@@ -18,9 +18,7 @@
   <h2 style="display: flex; align-items: center; gap: 12px;">
     Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}
     {% if latest.completed_at and latest.grade and latest.grade != "fail" %}
-    <form action="/drives/{{ drive.serial }}/print-label" method="post" style="margin-left: auto;">
-      <button type="submit" class="btn">Print cert label</button>
-    </form>
+    <button type="button" class="btn" style="margin-left: auto;" onclick="document.getElementById('label-preview-modal').showModal()">Preview cert label</button>
     {% endif %}
   </h2>
   {% if latest.error_message %}
@@ -44,6 +42,28 @@
     {% endif %}
   </dl>
 </section>
+
+{% if latest.completed_at and latest.grade and latest.grade != "fail" %}
+<dialog id="label-preview-modal" class="label-preview-dialog">
+  <header class="label-preview-head">
+    <strong>Cert label preview</strong>
+    <form method="dialog" class="inline"><button type="submit" class="btn-link" aria-label="Close">×</button></form>
+  </header>
+  <div class="label-preview-body">
+    <img src="/drives/{{ drive.serial }}/label-preview.png" alt="Cert label for {{ drive.serial }}">
+    <p class="label-preview-note muted">
+      Rendered at the configured roll size ({{ label_roll }}).
+      QR code resolves to <code>/reports/{{ drive.serial }}</code>.
+    </p>
+  </div>
+  <footer class="label-preview-actions">
+    <form method="dialog" class="inline"><button type="submit" class="btn">Close</button></form>
+    <form action="/drives/{{ drive.serial }}/print-label" method="post" class="inline">
+      <button type="submit" class="btn primary">Print to configured printer</button>
+    </form>
+  </footer>
+</dialog>
+{% endif %}
 
 <section class="panel">
   <h2>Hardware</h2>

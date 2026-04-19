@@ -220,6 +220,32 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
 .banner.warn-banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
 .btn-link { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit; text-decoration: underline; }
 .btn-link:hover { color: var(--text); }
+
+/* Cert-label preview modal */
+dialog.label-preview-dialog {
+  border: 1px solid var(--panel-border); border-radius: 10px;
+  background: var(--panel); color: var(--text);
+  padding: 0; max-width: 760px; width: 90vw;
+}
+dialog.label-preview-dialog::backdrop { background: rgba(0,0,0,0.65); }
+.label-preview-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--panel-border);
+  font-size: 14px;
+}
+.label-preview-head .btn-link { font-size: 20px; line-height: 1; text-decoration: none; }
+.label-preview-body { padding: 20px; }
+.label-preview-body img {
+  display: block; margin: 0 auto; max-width: 100%; height: auto;
+  background: white; padding: 12px; border-radius: 4px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+}
+.label-preview-note { margin: 14px 0 0; font-size: 12px; text-align: center; }
+.label-preview-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 16px; border-top: 1px solid var(--panel-border);
+}
+.inline { display: inline; }
 .small { font-size: 12px; }
 
 /* Destructive-action box on the New Batch form */

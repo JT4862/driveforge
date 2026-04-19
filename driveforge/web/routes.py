@@ -6,8 +6,10 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+import io
+
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import joinedload
 
@@ -354,6 +356,7 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             "max_temp": max_temp,
             "avg_temp": avg_temp,
             "suggested_use": SUGGESTED_USE.get(latest.grade) if latest and latest.grade else None,
+            "label_roll": state.settings.printer.label_roll or "DK-1209",
         },
     )
 
@@ -465,17 +468,13 @@ def _public_report_url(request: Request, state, serial: str) -> str:
     return f"{request.url.scheme}://{request.url.netloc}/reports/{serial}"
 
 
-def _print_label_for_run(request: Request, state, drive, run) -> tuple[bool, str]:
-    """Render + dispatch a single cert label. Returns (ok, message)."""
-    pc = state.settings.printer
-    if not pc.model:
-        return False, "no printer configured (Settings → Printer)"
-    # Lazy import so the web module loads on systems without brother_ql/qrcode
-    # installed (macOS dev env). The R720 install.sh ensures both are present.
+def _cert_label_data_for(request: Request, state, drive, run):
+    """Build CertLabelData for a given drive + run. Shared by preview + print."""
+    # Lazy import — the printer module pulls in qrcode + pillow which aren't
+    # always available in the macOS dev environment.
     from driveforge.core import printer as printer_mod
 
-    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
-    data = printer_mod.CertLabelData(
+    return printer_mod.CertLabelData(
         model=drive.model,
         serial=drive.serial,
         capacity_tb=round(drive.capacity_bytes / 1_000_000_000_000, 2),
@@ -485,6 +484,17 @@ def _print_label_for_run(request: Request, state, drive, run) -> tuple[bool, str
         report_url=_public_report_url(request, state, drive.serial),
         quick_mode=bool(run.quick_mode),
     )
+
+
+def _print_label_for_run(request: Request, state, drive, run) -> tuple[bool, str]:
+    """Render + dispatch a single cert label. Returns (ok, message)."""
+    pc = state.settings.printer
+    if not pc.model:
+        return False, "no printer configured (Settings → Printer)"
+    from driveforge.core import printer as printer_mod
+
+    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
+    data = _cert_label_data_for(request, state, drive, run)
     try:
         img = printer_mod.render_label(data, roll=pc.label_roll or "DK-1209")
     except Exception as exc:  # noqa: BLE001
@@ -507,6 +517,41 @@ def _latest_printable_run(session, serial: str):
         .filter(m.TestRun.grade.isnot(None))
         .order_by(m.TestRun.completed_at.desc())
         .first()
+    )
+
+
+@router.get("/drives/{serial}/label-preview.png")
+def drive_label_preview(request: Request, serial: str) -> Response:
+    """Render the cert label as PNG without dispatching to a printer.
+
+    Used by the in-browser preview modal on drive detail / batch detail.
+    Works even when no printer is configured — pulls the label_roll from
+    settings (default DK-1209) just for sizing.
+    """
+    state = get_state()
+    with state.session_factory() as session:
+        drive = session.get(m.Drive, serial)
+        if drive is None:
+            raise HTTPException(status_code=404, detail="drive not found")
+        run = _latest_printable_run(session, serial)
+        if run is None:
+            raise HTTPException(status_code=404, detail="no completed run to preview")
+        from driveforge.core import printer as printer_mod
+
+        data = _cert_label_data_for(request, state, drive, run)
+        try:
+            img = printer_mod.render_label(
+                data, roll=state.settings.printer.label_roll or "DK-1209"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("label preview render failed for %s", serial)
+            raise HTTPException(status_code=500, detail=f"render failed: {exc}") from exc
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
     )
 
 
