@@ -59,24 +59,57 @@ def _load_font(size: int) -> ImageFont.ImageFont:
 
 
 def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
-    """Compose a cert label as a Pillow image."""
+    """Compose a cert label as a Pillow image.
+
+    Layout (landscape DK-1209):
+      +--------------------------------------------+
+      | DriveForge Certified                  [A]  |
+      |---------------------------------------     |
+      | Model:    ...                              |
+      | Capacity: 6.0 TB                           |
+      | Serial:   V8G6X4RL                         |
+      | Tested:   2026-04-19          [QR code]    |
+      | POH:      12,432 h                         |
+      | Scan QR to verify — printed text           |
+      | alone is not authoritative.                |
+      +--------------------------------------------+
+    """
     size = LABEL_SIZES.get(roll, LABEL_SIZES["DK-1209"])
     img = Image.new("RGB", size, "white")
     draw = ImageDraw.Draw(img)
 
-    font_title = _load_font(36)
-    font_body = _load_font(22)
+    is_compact = size[0] < 280  # DK-1221 square-label path
+
+    if is_compact:
+        # Compact layout: QR + grade + last-4 of serial only
+        font_body = _load_font(18)
+        font_grade = _load_font(42)
+        qr = qrcode.QRCode(box_size=3, border=1)
+        qr.add_data(data.report_url)
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = min(size[1] - 50, size[0] - 80)
+        qr_img = qr_img.resize((qr_size, qr_size))
+        img.paste(qr_img, (6, (size[1] - qr_size) // 2))
+        draw.text((qr_size + 14, 10), data.grade.upper(), font=font_grade, fill="black")
+        draw.text((qr_size + 14, 60), data.serial[-6:], font=font_body, fill="black")
+        return img
+
+    font_title = _load_font(34)
+    font_body = _load_font(20)
     font_grade = _load_font(72)
+    font_footer = _load_font(14)
 
     padding = 14
     draw.text((padding, padding), "DriveForge Certified", font=font_title, fill="black")
     draw.line(
-        [(padding, padding + 44), (size[0] - padding, padding + 44)],
+        [(padding, padding + 42), (size[0] - padding, padding + 42)],
         fill="black",
         width=2,
     )
 
-    body_y = padding + 54
+    # Body column on the left
+    body_y = padding + 52
     lines = [
         f"Model:    {data.model[:28]}",
         f"Capacity: {data.capacity_tb:.1f} TB",
@@ -86,25 +119,33 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     ]
     for line in lines:
         draw.text((padding, body_y), line, font=font_body, fill="black")
-        body_y += 28
+        body_y += 24
 
-    # Big grade block on the right
-    draw.text(
-        (size[0] - 120, padding + 50),
-        data.grade.upper(),
-        font=font_grade,
-        fill="black",
-    )
+    # Right column: QR in the middle, big grade letter at far right
+    grade_text = data.grade.upper()
+    grade_bbox = draw.textbbox((0, 0), grade_text, font=font_grade)
+    grade_w = grade_bbox[2] - grade_bbox[0]
+    grade_x = size[0] - grade_w - padding
+    grade_y = padding + 70  # below title separator, vertically centered-ish
 
-    # QR code for the report URL, bottom-right corner
+    # QR sits below the title, in the column between body text and grade
     qr = qrcode.QRCode(box_size=3, border=1)
     qr.add_data(data.report_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_size = min(size[1] - body_y - padding, 120)
-    if qr_size > 40:
-        qr_img = qr_img.resize((qr_size, qr_size))
-        img.paste(qr_img, (size[0] - qr_size - padding, size[1] - qr_size - padding))
+    qr_top = padding + 52  # just below the title separator line
+    qr_size_cap = size[1] - qr_top - 32  # leave room for footer
+    qr_size = min(qr_size_cap, grade_x - (padding + 320) - 12, 160)
+    qr_size = max(qr_size, 80)
+    qr_img = qr_img.resize((qr_size, qr_size))
+    qr_x = padding + 320
+    img.paste(qr_img, (qr_x, qr_top))
+
+    draw.text((grade_x, grade_y), grade_text, font=font_grade, fill="black")
+
+    # Footer — the "verify via QR" guardrail
+    footer = "Scan QR to verify — printed text alone is not authoritative."
+    draw.text((padding, size[1] - 22), footer, font=font_footer, fill="black")
 
     return img
 
