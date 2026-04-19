@@ -13,6 +13,12 @@
   to acknowledge that selected drives will be destructively wiped.
 </div>
 {% endif %}
+{% if err == "active" %}
+<div class="banner warn-banner">
+  &#9888; Batch not started — every selected drive is already under test in
+  another batch. Pull those drives (or wait for them to finish), then try again.
+</div>
+{% endif %}
 
 <form method="post" action="/batches/new" class="panel">
   <label class="field">
@@ -21,16 +27,23 @@
   </label>
   <table class="runs">
     <thead>
-      <tr><th>Include</th><th>Serial</th><th>Model</th><th>Capacity</th><th>Transport</th></tr>
+      <tr><th>Include</th><th>Serial</th><th>Model</th><th>Capacity</th><th>Transport</th><th>Status</th></tr>
     </thead>
     <tbody>
     {% for d in drives %}
-      <tr>
-        <td><input type="checkbox" name="drive" value="{{ d.serial }}" checked></td>
+      <tr{% if d.active %} class="muted"{% endif %}>
+        <td>
+          {% if d.active %}
+            <input type="checkbox" disabled title="Currently under test in another batch">
+          {% else %}
+            <input type="checkbox" name="drive" value="{{ d.serial }}" checked>
+          {% endif %}
+        </td>
         <td>{{ d.serial }}</td>
         <td>{{ d.model }}</td>
         <td>{{ "%.1f"|format(d.capacity_tb) }} TB</td>
         <td>{{ d.transport.value|upper }}</td>
+        <td>{% if d.active %}<span class="pill">testing</span>{% else %}available{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

@@ -57,6 +57,16 @@ class PipelineFailure(Exception):
         self.detail = detail
 
 
+class BatchRejected(Exception):
+    """Raised by start_batch when every requested drive is already under test
+    (or the caller passed an empty selection). The web handler converts this
+    into a user-facing flash so the operator knows nothing was started."""
+
+    def __init__(self, detail: str, *, conflicts: list[str] | None = None) -> None:
+        super().__init__(detail)
+        self.conflicts = conflicts or []
+
+
 LOG_TAIL_MAX_LINES = 40
 
 
@@ -85,6 +95,14 @@ class Orchestrator:
                 return
             run.log_tail = "\n".join(buf)
             session.commit()
+
+    def active_serials(self) -> set[str]:
+        """Serials currently running in any in-flight batch. Guards against
+        double-booking a drive into two batches — the second start would
+        overwrite the task handle, orphan the first pipeline, and race the
+        same device with parallel smartctl/hdparm/badblocks calls.
+        """
+        return set(self._tasks) | set(self.state.bay_assignments.values())
 
     def _spawn_done_blinker(self, drive: Drive, outcome: str) -> None:
         """Start the post-pipeline activity-LED blinker for this drive.
@@ -124,7 +142,25 @@ class Orchestrator:
         *,
         quick: bool = False,
     ) -> str:
-        """Create a batch and kick off testing for each drive."""
+        """Create a batch and kick off testing for each drive.
+
+        Refuses to include any drive that's already under test in another
+        in-flight batch (raises `BatchRejected` if every requested drive is
+        already active).
+        """
+        busy = self.active_serials()
+        conflicts = [d.serial for d in drives if d.serial in busy]
+        if conflicts:
+            logger.warning(
+                "skipping %d already-active drive(s) from new batch: %s",
+                len(conflicts), ", ".join(conflicts),
+            )
+        drives = [d for d in drives if d.serial not in busy]
+        if not drives:
+            raise BatchRejected(
+                "all selected drives are already under test in another batch",
+                conflicts=conflicts,
+            )
         batch_id = uuid.uuid4().hex[:12]
         plan = self.state.refresh_bay_plan()
         with self.state.session_factory() as session:

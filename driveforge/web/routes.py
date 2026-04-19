@@ -373,26 +373,44 @@ def batches(request: Request) -> HTMLResponse:
 def new_batch_form(request: Request) -> HTMLResponse:
     drives = drive_mod.discover()
     err = request.query_params.get("err")
+    orch = request.app.state.orchestrator
+    busy = orch.active_serials()
+    drives_view = [
+        {
+            "serial": d.serial,
+            "model": d.model,
+            "capacity_tb": d.capacity_tb,
+            "transport": d.transport,
+            "active": d.serial in busy,
+        }
+        for d in drives
+    ]
     return templates.TemplateResponse(
-        request, "new_batch.html", {"drives": drives, "err": err}
+        request, "new_batch.html", {"drives": drives_view, "err": err}
     )
 
 
 @router.post("/batches/new")
 async def new_batch_submit(request: Request) -> RedirectResponse:
+    # Imported locally so this module doesn't pull in the orchestrator on
+    # collection-time — keeps test import graph shallow.
+    from driveforge.daemon.orchestrator import BatchRejected
+
     form = await request.form()
     source = form.get("source") or None
     selected = form.getlist("drive")
     quick = form.get("quick") == "on"
     confirm = (form.get("confirm") or "").strip().upper()
     if confirm != "ERASE":
-        # Round-trip back to the form with an error banner
         return RedirectResponse(url="/batches/new?err=confirm", status_code=303)
     drives = [d for d in drive_mod.discover() if d.serial in selected]
     if not drives:
         drives = drive_mod.discover()
     orch = request.app.state.orchestrator
-    await orch.start_batch(drives, source=source, quick=quick)
+    try:
+        await orch.start_batch(drives, source=source, quick=quick)
+    except BatchRejected:
+        return RedirectResponse(url="/batches/new?err=active", status_code=303)
     return RedirectResponse(url="/", status_code=303)
 
 
