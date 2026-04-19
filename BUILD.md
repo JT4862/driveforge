@@ -584,21 +584,75 @@ Total to usable MVP (Phases 1-5): ~4 weeks of focused time.
 
 ## Development Environment
 
-Dev happens locally on macOS (this working directory), deploys to the R720 for
-real drive testing.
+Three tiers of environment, used for different work:
 
-**Local dev (macOS)**:
-- Python 3.11+ via `pyenv` or Homebrew
-- Dev dependencies via `uv` or pip in a virtualenv
-- Unit tests run without drives using mocked smartctl / nvme output fixtures
-- TUI developed against recorded drive-state fixtures
+### Tier 1 — macOS (primary dev loop)
 
-**Integration / real testing (R720)**:
+Day-to-day coding happens here. FastAPI + HTMX + Jinja + Textual are all
+pure Python and platform-portable; no VM or container needed for the UI
+iteration loop.
+
+- Python 3.11+ via Homebrew
+- `uv` for venv + dependency management (`brew install uv`)
+- Unit tests run without drives against recorded `smartctl` /
+  `nvme-cli` / `ipmitool` fixtures
+- TUI developed against the same recorded fixtures
+
+**Dev mode**: the daemon accepts a `--dev --fixtures <dir>` flag that
+serves canned drive/batch/telemetry state instead of running real
+orchestration. Web UI iteration loop:
+
+```bash
+uv venv && uv pip install -e .
+driveforge-daemon --dev --fixtures tests/fixtures/
+# open http://localhost:8080 in a browser; edit templates, refresh
+```
+
+**What to mock on macOS** (all Linux-only, all orchestration plumbing,
+none of it blocks UI work):
+
+| Thing | Reason | Mock approach |
+|---|---|---|
+| `pyudev` | Linux kernel udev only | Fake event fixtures |
+| `brother_ql` USB | Needs physical printer | Use its file backend → PNG on disk |
+| `smartctl` against `/dev/sdX` | No drives on Mac | Recorded output fixtures |
+| `ipmitool` | Needs iDRAC | Recorded output fixtures |
+
+### Tier 2 — Debian VM (integration testing)
+
+When the work touches udev / systemd / real networking, run a local
+Debian VM instead of going to the R720. **[Lima](https://github.com/lima-vm/lima)**
+is the recommended tool (`brew install lima`) — lightweight Debian VMs
+on macOS with automatic port forwarding to `127.0.0.1`. Multipass is an
+acceptable alternative.
+
+**Not Docker.** systemd in containers requires privileged mode, udev
+doesn't work cleanly, and drive device access is absent. VMs are
+purpose-built for this; containers fight you.
+
+```bash
+limactl start --name=driveforge-dev template://debian-12
+limactl shell driveforge-dev
+# inside: sudo apt install <system deps>; rsync code in; systemctl start driveforge-daemon
+# browse http://127.0.0.1:8080 from macOS
+```
+
+### Tier 3 — R720 (real hardware)
+
+For anything involving actual drives, SMART reads against physical disks,
+or the thermal printer:
+
 - Debian 12 installed via iDRAC virtual media or USB installer
-- `ansible/r720-provision.yml` installs system packages + systemd units
-- Deploy via `rsync` from macOS or a GitHub Actions pipeline
+- `scripts/r720-provision.yml` (Ansible) installs system packages + systemd units
+- Deploy via `rsync` from macOS or GitHub Actions pipeline
 - Real drives plugged into the 8 LFF bays; SMART output captured as new
   fixtures to expand the unit-test corpus
+
+### Tier boundary rule
+
+If a change can be validated with fixtures, do it in Tier 1. Only escalate
+to Tier 2 or 3 when Linux-specific behavior or real hardware is actually
+required. Most web UI iteration never leaves Tier 1.
 
 ---
 
