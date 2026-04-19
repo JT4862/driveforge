@@ -1,22 +1,20 @@
 # DriveForge — Enterprise Drive Refurbishment Pipeline
 
-## Purpose of this file
+## About this document
 
-Context handoff for a Claude Code session building **DriveForge**, a Debian-based
-Python application that turns a dedicated Dell PowerEdge R720 into an in-house
-drive refurbishment workstation. Pulled enterprise drives go in, get secure-
-erased + burned in + SMART-validated + graded, and come out with a printed
-certification label ready for homelab deployment.
+Canonical design document for **DriveForge** — a Debian-based Python
+application that turns a dedicated Dell PowerEdge R720 (or comparable
+hardware) into an in-house drive refurbishment workstation. Pulled
+enterprise drives go in, get secure-erased + burned in + SMART-validated
++ graded, and come out with a printed certification label ready for
+homelab deployment.
 
-**Session owner**: JT (`jthompson4862@gmail.com`)
-**License**: MIT
-**Start a new Claude Code session pointed at this file**:
+Read alongside the code when making non-trivial changes. User-facing
+install instructions live in [README.md](README.md); this file covers
+architecture, phase plan, and the *why* behind each decision.
 
-```
-cd /Users/jt/Homelab/driveforge
-# In Claude Code:
-# Read @BUILD.md
-```
+- **License**: MIT
+- **Repository**: <https://github.com/JT4862/driveforge>
 
 ---
 
@@ -105,6 +103,55 @@ Design implication: **no feature requires a config file restart**. Plug in
 a printer after first-run setup → it's usable within a second. Swap to a
 different Brother QL model → it's auto-detected and reconfigured.
 
+### Enclosure & Bay Detection
+
+Server-class hardware (R720 backplane, MD1200, most storage shelves)
+exposes a SAS enclosure over **SES (SCSI Enclosure Services)**. The
+Linux kernel surfaces this at `/sys/class/enclosure/<name>/`:
+
+```
+/sys/class/enclosure/0:0:32:0/
+├── device/{vendor,model,scsi_generic/sg3}
+├── id                          # logical WWN
+├── Slot_00/
+│   ├── slot                    # "0"
+│   ├── status                  # "OK" | "Unknown"
+│   └── device/block/sda/       # populated slot → block device
+├── Slot_01/ …
+└── Slot_07/
+```
+
+`driveforge.core.enclosures` enumerates this tree on daemon boot and
+whenever a udev event reshuffles drives. Each physical slot becomes a
+tracked bay identified by a stable `bay_key`:
+
+| Format | Meaning |
+|---|---|
+| `e<enc_idx>:s<slot>` | Real enclosure slot (e.g. R720 slot 3 → `e0:s3`) |
+| `v<n>` | Virtual bay — used only when no SES enclosure was found |
+| `u:<serial>` | Unbayed drive — NVMe or direct-attached SATA not in any enclosure |
+
+**Virtual bay fallback**: on consumer PCs or NVMe-only rigs where no SES
+enclosure exists, DriveForge generates `virtual_bays` (default 8, editable
+in Settings → Daemon) slots that drives are assigned to in insertion
+order. Mixing real + virtual is **not** supported — any single real
+enclosure disables the virtual-bay fallback entirely.
+
+**Multi-enclosure**: plug in an MD1200 via SAS cable → next `refresh_bay_plan()`
+picks it up, dashboard now renders two enclosure sections totaling
+R720 slots + MD1200 slots. No user action required.
+
+**Unbayed section**: drives without an enclosure association (NVMe, USB,
+direct SATA on a consumer motherboard) render in their own section below
+the enclosure grid so they're visible but clearly flagged as outside the
+bay-slot semantics.
+
+**Slot LED control** (Phase 7+ stretch): SES enclosures support setting
+ident / fault LEDs via `sg_ses --set=FAIL,1 --index=0,<slot>`. When a
+drive fails grading, DriveForge can light its fault LED so the operator
+knows exactly which bay to pull from a 20+ bay rack. Not wired in the
+MVP — noted for the first real-hardware shakedown.
+
 ### System package dependencies
 
 | Package | Purpose |
@@ -132,8 +179,10 @@ different Brother QL model → it's auto-detected and reconfigured.
 | `sqlalchemy` + `alembic` | DB ORM + migrations |
 | `pydantic` | Type-safe models + config validation |
 | `brother_ql` | Brother QL raster driver via raw USB (skips CUPS overhead) |
-| `pyudev` | libudev bindings — hotplug detection for printer and drives |
-| `qrcode` | QR generation for cert labels |
+| `pyudev` | libudev bindings — hotplug detection (Linux extra; no-op on macOS) |
+| `cryptography` | Ed25519 signature verification for firmware blobs |
+| `python-multipart` | FastAPI form-body parser |
+| `qrcode` + `pillow` | QR generation + label image composition |
 | `pytest` | Testing |
 
 ---
@@ -522,25 +571,34 @@ driveforge/
 │   ├── cli.py                       # CLI entrypoints (Click)
 │   ├── config.py                    # Pydantic config loader
 │   ├── daemon/
-│   │   ├── app.py                   # FastAPI daemon
+│   │   ├── app.py                   # FastAPI daemon + lifespan + middleware
 │   │   ├── orchestrator.py          # Test pipeline driver
-│   │   └── api.py                   # REST routes
+│   │   ├── state.py                 # Shared DaemonState + BayPlan cache
+│   │   └── api.py                   # REST routes under /api
 │   ├── tui/
 │   │   └── app.py                   # Textual TUI client
 │   ├── web/
 │   │   ├── routes.py                # HTMX-powered pages
-│   │   ├── templates/
-│   │   └── static/
+│   │   ├── setup.py                 # First-run setup wizard (5 steps)
+│   │   ├── templates/               # Jinja templates + setup/ subdir
+│   │   └── static/                  # app.css, static assets
 │   ├── core/
-│   │   ├── drive.py                 # Drive model + discovery
-│   │   ├── smart.py                 # smartctl wrapper + parser
+│   │   ├── drive.py                 # Drive model + lsblk discovery
+│   │   ├── smart.py                 # smartctl wrapper + JSON parser
 │   │   ├── erase.py                 # Secure erase (SATA/SAS/NVMe)
 │   │   ├── badblocks.py             # badblocks wrapper
-│   │   ├── grading.py               # A/B/C/fail logic
-│   │   ├── firmware.py              # NVMe updates + lookup
+│   │   ├── grading.py               # A/B/C/fail logic + rationale
+│   │   ├── firmware.py              # Lookup DB + apply + decide_apply
+│   │   ├── signing.py               # Ed25519 verify for firmware blobs
+│   │   ├── enclosures.py            # SES / sysfs enclosure detection
 │   │   ├── printer.py               # Brother QL raster cert printing
 │   │   ├── hotplug.py               # pyudev monitor (printer + drive events)
+│   │   ├── telemetry.py             # ipmitool chassis power sampling
+│   │   ├── reports.py               # Report payload model
+│   │   ├── process.py               # Subprocess runner with fixture mode
 │   │   └── webhook.py               # Outbound JSON webhook dispatch
+│   ├── data/
+│   │   └── firmware_db.yaml         # Bundled firmware lookup DB
 │   └── db/
 │       ├── models.py                # SQLAlchemy schemas
 │       └── migrations/              # Alembic
@@ -559,26 +617,29 @@ driveforge/
 │   ├── usage.md
 │   └── troubleshooting.md
 └── tests/
-    ├── unit/                        # Against recorded SMART fixtures
-    └── integration/
+    ├── fixtures/                    # Canned smartctl / lsblk / ipmitool output + synthetic sysfs
+    ├── unit/                        # Against recorded fixtures — no hardware required
+    └── integration/                 # For real Debian-VM runs
 ```
 
 ---
 
-## MVP Milestones
+## Implementation Phases
 
-| Phase | Goal | Duration |
+| Phase | Goal | Status |
 |---|---|---|
-| **1** | Daemon skeleton; drive discovery; runs smartctl + badblocks + erase on one drive; logs to `/var/log/driveforge` | 1 week |
-| **2** | Textual TUI drives daemon via REST; 8-drive parallel orchestration via tmux | 1 week |
-| **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; first real A/B/C verdicts | 1 week |
-| **4** | Thermal printer + cert label design; auto-prints on completion | 3-4 days |
-| **5** | Outbound webhook on batch complete (JSON POST to configured URL); local report page scaffolding | 3-4 days |
-| **6** | Web UI (FastAPI + HTMX) as primary interface; telemetry charts; public-facing QR landing page + Cloudflare Tunnel exposure; TUI becomes fallback | 1-2 weeks |
-| **7** | NVMe firmware auto-update | 3-4 days |
-| **8+** | SATA/SAS firmware lookup DB; community drive-stats DB; public OSS release | ongoing |
+| **1** | Daemon skeleton; drive discovery; smartctl + badblocks + erase wrappers; logs to `/var/log/driveforge` | ✅ Fixture-complete (real-hardware pending) |
+| **2** | Textual TUI drives daemon via REST; parallel orchestration | ✅ Fixture-complete |
+| **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; first real A/B/C verdicts | ✅ Fixture-complete |
+| **4** | Thermal printer + cert label design; auto-prints on completion | ✅ Code + Pillow rendering complete; physical print pending real hardware |
+| **5** | Outbound webhook on batch complete (JSON POST to configured URL); local report page scaffolding | ✅ Complete |
+| **6** | Web UI (FastAPI + HTMX) as primary interface; telemetry charts (Chart.js); public-facing QR landing page; first-run setup wizard; editable Settings | ✅ Complete (Cloudflare Tunnel exposure deferred) |
+| **7** | NVMe firmware auto-apply (approval model + signing + canary decision function) | 🟡 Decision logic + signing complete; orchestrator flash dispatch pending real hardware |
+| **8+** | SATA/SAS firmware lookup DB; community drive-stats DB; slot LED control via sg_ses; public OSS release | ongoing |
 
-Total to usable MVP (Phases 1-5): ~4 weeks of focused time.
+**Current status** (2026-04-19): Phases 1-6 complete and runnable against
+fixtures. 39 unit tests passing. First real-hardware install has not yet
+happened — the next meaningful milestone is a Debian VM / R720 dry run.
 
 ---
 
@@ -829,20 +890,29 @@ is gray-market fraud, not refurbishment.
    die-cut labels (29×62mm).
 3. **Drive pool sizing**: How many Grade A drives to stockpile before starting
    the Ceph cluster build? Shapes how aggressively to process pulls.
-4. **Public release timing**: open-source from day one (nothing to hide, MIT
-   already chosen) or keep private until MVP is polished?
+4. ~~**Public release timing**~~ — **Resolved**: private repo during
+   pre-alpha shakedown; flip to public after the first successful
+   real-hardware batch run.
 
 ---
 
-## Next Steps for New Session
+## Next Steps
 
-Starting fresh:
-1. Read this doc + memory files at `~/.claude/projects/-Users-jt/memory/`
-2. Initialize Python project structure (`pyproject.toml`, `driveforge/`
-   package, MIT LICENSE)
-3. Begin Phase 1: daemon skeleton + single-drive test pipeline against
-   recorded SMART fixtures
+Code is feature-complete for dev-mode. The remaining milestones are
+hardware-dependent and sequenced as:
 
-Not starting fresh — if prior work exists, check `git log` and existing code
-before proposing next actions. This BUILD.md is a snapshot of the current
-plan; reality may have moved past it.
+1. **Debian VM dry run** via Lima or Proxmox — prove `install.sh` works
+   end to end on a clean Debian 12 install
+2. **First R720 install** — pulls drives, plugs them in, runs a real
+   batch. Capture any SMART / SES / printer-integration snags and fix.
+3. **First printed label + first QR scan** — prove the cert artifact
+   lifecycle is complete
+4. **Wire firmware auto-apply** — orchestrator → `apply_nvme_firmware()`,
+   gated on canary success. One approved entry at a time, carefully.
+5. **Flip repo public** — once the above is done, when there's a story
+   to tell
+6. **Phase 8+** — SATA/SAS firmware lookup DB, slot LED control,
+   community drive-stats contributions
+
+This BUILD.md is a snapshot of the current design; when reality moves
+past it, update it.
