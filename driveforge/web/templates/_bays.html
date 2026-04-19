@@ -8,35 +8,35 @@
   </div>
 </div>
 {% elif bay.state == "installed" %}
-<a class="bay-card installed{% if bay.last_grade %} graded graded-{{ bay.last_grade }}{% endif %}" href="/drives/{{ bay.serial }}">
-  <div class="bay-num">
-    Bay {{ bay.bay }}
-    {% if bay.last_grade %}
-      <span class="bay-report-wrap">
-        <a class="report-link" href="/reports/{{ bay.serial }}" title="View cert report" onclick="event.stopPropagation();">📄</a>
-        {% if bay.last_grade == "fail" %}
-          <span class="grade grade-fail grade-corner">✗ FAIL</span>
-        {% else %}
-          <span class="grade grade-{{ bay.last_grade }} grade-corner">{{ bay.last_grade|upper }}</span>
+<div class="bay-card installed{% if bay.last_grade %} graded graded-{{ bay.last_grade }}{% endif %}">
+  <a class="bay-card-main" href="/drives/{{ bay.serial }}">
+    <div class="bay-num">Bay {{ bay.bay }}</div>
+    <div class="bay-body">
+      <div class="drive-model">{{ bay.model }}</div>
+      <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
+      {% if bay.last_grade == "fail" %}
+        <div class="phase last-test fail-text">✗ Failed {{ bay.last_tested.strftime('%Y-%m-%d') }}{% if bay.last_phase %} &middot; {{ bay.last_phase|replace("_", " ") }}{% endif %}</div>
+        {% if bay.last_error %}
+        <div class="fail-detail" title="{{ bay.last_error }}">{{ bay.last_error }}</div>
         {% endif %}
-      </span>
-    {% endif %}
-  </div>
-  <div class="bay-body">
-    <div class="drive-model">{{ bay.model }}</div>
-    <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
-    {% if bay.last_grade == "fail" %}
-      <div class="phase last-test fail-text">✗ Failed {{ bay.last_tested.strftime('%Y-%m-%d') }}{% if bay.last_phase %} &middot; {{ bay.last_phase|replace("_", " ") }}{% endif %}</div>
-      {% if bay.last_error %}
-      <div class="fail-detail" title="{{ bay.last_error }}">{{ bay.last_error }}</div>
+      {% elif bay.last_grade %}
+        <div class="phase last-test">Grade {{ bay.last_grade|upper }} &middot; tested {{ bay.last_tested.strftime('%Y-%m-%d') }}</div>
+      {% else %}
+        <div class="phase idle">idle &middot; never tested</div>
       {% endif %}
-    {% elif bay.last_grade %}
-      <div class="phase last-test">Grade {{ bay.last_grade|upper }} &middot; tested {{ bay.last_tested.strftime('%Y-%m-%d') }}</div>
+    </div>
+  </a>
+  {% if bay.last_grade %}
+  <div class="bay-badges">
+    <a class="report-link" href="/reports/{{ bay.serial }}" title="View cert report">📄</a>
+    {% if bay.last_grade == "fail" %}
+      <span class="grade grade-fail grade-corner">✗ FAIL</span>
     {% else %}
-      <div class="phase idle">idle &middot; never tested</div>
+      <span class="grade grade-{{ bay.last_grade }} grade-corner">{{ bay.last_grade|upper }}</span>
     {% endif %}
   </div>
-</a>
+  {% endif %}
+</div>
 {% else %}
 <a class="bay-card active phase-{{ bay.phase_class }}" href="/drives/{{ bay.serial }}">
   <div class="bay-num">Bay {{ bay.bay }}</div>

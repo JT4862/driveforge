@@ -76,11 +76,17 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
   color: var(--muted); font-family: var(--mono); font-size: 11px;
   margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.bay-card .bay-num { display: flex; justify-content: space-between; align-items: center; }
+.bay-card { position: relative; }
+.bay-card-main { color: inherit; text-decoration: none; display: flex; flex-direction: column; gap: 8px; }
+.bay-card-main:hover { text-decoration: none; }
+.bay-badges {
+  position: absolute; top: 12px; right: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  z-index: 2;
+}
 .grade-corner { font-size: 11px; padding: 1px 6px; }
-.bay-report-wrap { display: inline-flex; align-items: center; gap: 6px; }
 .report-link { text-decoration: none; font-size: 14px; line-height: 1; opacity: 0.7; }
-.report-link:hover { opacity: 1; }
+.report-link:hover { opacity: 1; text-decoration: none; }
 .bad { color: var(--fail); font-weight: 600; }
 .ok { color: var(--ok); }
 .bay-card.empty { border-style: dashed; opacity: 0.55; }
