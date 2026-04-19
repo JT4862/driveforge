@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Dashboard</h1>
+  <div class="stats">
+    <span class="pill">{{ drive_count }} drives in history</span>
+    <span class="pill">{{ batch_count }} batches run</span>
+  </div>
+  <div class="actions">
+    <a class="btn primary" href="/batches/new">+ New Batch</a>
+    <form method="post" action="/api/abort-all" class="inline">
+      <button class="btn danger" type="submit" onclick="return confirm('Abort all active drives?')">Abort All</button>
+    </form>
+  </div>
+</section>
+
+<section id="bay-grid" hx-get="/_partials/bays" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "_bays.html" %}
+</section>
+{% endblock %}

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Batch {{ batch.id[:12] }} — DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <a href="/batches" class="back">&larr; Batches</a>
+  <h1>Batch {{ batch.id[:12] }}</h1>
+  <div class="subtitle">
+    {{ batch.source or "Unlabeled" }} &middot;
+    Started {{ batch.started_at.isoformat() if batch.started_at else "—" }}
+    {% if batch.completed_at %}&middot; Completed {{ batch.completed_at.isoformat() }}{% else %}&middot; <span class="pill">in progress</span>{% endif %}
+  </div>
+  <div class="breakdown">
+    <span class="grade grade-A">{{ totals.A }} A</span>
+    <span class="grade grade-B">{{ totals.B }} B</span>
+    <span class="grade grade-C">{{ totals.C }} C</span>
+    <span class="grade grade-fail">{{ totals.fail }} Fail</span>
+  </div>
+</section>
+
+<table class="runs">
+  <thead><tr><th>Serial</th><th>Bay</th><th>Phase</th><th>Grade</th><th>Report</th></tr></thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
+      <td>{{ r.bay or "—" }}</td>
+      <td>{{ r.phase|replace("_", " ") }}</td>
+      <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
+      <td>{% if r.report_url %}<a href="{{ r.report_url }}">view</a>{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

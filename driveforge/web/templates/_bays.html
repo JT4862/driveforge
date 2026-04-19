@@ -1,0 +1,26 @@
+<div class="bay-grid">
+  {% for bay in bays %}
+    {% if bay.empty %}
+    <div class="bay-card empty">
+      <div class="bay-num">Bay {{ bay.bay }}</div>
+      <div class="bay-body">
+        <div class="empty-msg">Empty</div>
+        <div class="empty-hint">Insert a drive to enroll</div>
+      </div>
+    </div>
+    {% else %}
+    <a class="bay-card active" href="/drives/{{ bay.serial }}">
+      <div class="bay-num">Bay {{ bay.bay }}</div>
+      <div class="bay-body">
+        <div class="drive-model">{{ bay.model }}</div>
+        <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
+        <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
+        <div class="progress">
+          <div class="bar" style="width: {{ bay.percent }}%"></div>
+        </div>
+        <div class="percent">{{ "%.0f"|format(bay.percent) }}%</div>
+      </div>
+    </a>
+    {% endif %}
+  {% endfor %}
+</div>

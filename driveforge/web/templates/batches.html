@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Batches — DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Batches</h1>
+</section>
+
+{% if batches %}
+<table class="batches">
+  <thead><tr><th>ID</th><th>Source</th><th>Started</th><th>Completed</th><th>Drives</th><th>A</th><th>B</th><th>C</th><th>Fail</th></tr></thead>
+  <tbody>
+    {% for b in batches %}
+    <tr>
+      <td><a href="/batches/{{ b.batch.id }}">{{ b.batch.id[:12] }}</a></td>
+      <td>{{ b.batch.source or "—" }}</td>
+      <td>{{ b.batch.started_at.isoformat() if b.batch.started_at else "—" }}</td>
+      <td>{{ b.batch.completed_at.isoformat() if b.batch.completed_at else "—" }}</td>
+      <td>{{ b.count }}</td>
+      <td>{{ b.totals.A }}</td>
+      <td>{{ b.totals.B }}</td>
+      <td>{{ b.totals.C }}</td>
+      <td>{{ b.totals.fail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No batches yet. Start one from the Dashboard.</p>
+{% endif %}
+{% endblock %}

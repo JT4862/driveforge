@@ -1,0 +1,32 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 3]},
+  "device": {"name": "/dev/sda", "info_name": "/dev/sda [SAT]", "type": "sat", "protocol": "ATA"},
+  "model_family": "HGST Ultrastar",
+  "model_name": "HGST HUS726T6TALE6L4",
+  "serial_number": "V8G6X4RL",
+  "firmware_version": "K8GNW7LH",
+  "user_capacity": {"blocks": 11721045168, "bytes": 6001175126016},
+  "smart_status": {"passed": true},
+  "temperature": {"current": 34},
+  "power_on_time": {"hours": 12432, "minutes": 17},
+  "ata_smart_attributes": {
+    "revision": 16,
+    "table": [
+      {"id": 1, "name": "Raw_Read_Error_Rate", "value": 100, "worst": 100, "thresh": 16, "raw": {"value": 0, "string": "0"}},
+      {"id": 2, "name": "Throughput_Performance", "value": 136, "worst": 136, "thresh": 54, "raw": {"value": 97, "string": "97"}},
+      {"id": 3, "name": "Spin_Up_Time", "value": 127, "worst": 127, "thresh": 24, "raw": {"value": 0, "string": "0"}},
+      {"id": 4, "name": "Start_Stop_Count", "value": 100, "worst": 100, "thresh": 0, "raw": {"value": 42, "string": "42"}},
+      {"id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "worst": 100, "thresh": 5, "raw": {"value": 0, "string": "0"}},
+      {"id": 7, "name": "Seek_Error_Rate", "value": 100, "worst": 100, "thresh": 67, "raw": {"value": 0, "string": "0"}},
+      {"id": 9, "name": "Power_On_Hours", "value": 99, "worst": 99, "thresh": 0, "raw": {"value": 12432, "string": "12432"}},
+      {"id": 10, "name": "Spin_Retry_Count", "value": 100, "worst": 100, "thresh": 60, "raw": {"value": 0, "string": "0"}},
+      {"id": 12, "name": "Power_Cycle_Count", "value": 100, "worst": 100, "thresh": 0, "raw": {"value": 42, "string": "42"}},
+      {"id": 190, "name": "Airflow_Temperature_Cel", "value": 66, "worst": 56, "thresh": 45, "raw": {"value": 34, "string": "34 (min/max 24/44)"}},
+      {"id": 194, "name": "Temperature_Celsius", "value": 200, "worst": 200, "thresh": 0, "raw": {"value": 34, "string": "34 (0 14 0 0 0)"}},
+      {"id": 197, "name": "Current_Pending_Sector", "value": 100, "worst": 100, "thresh": 0, "raw": {"value": 0, "string": "0"}},
+      {"id": 198, "name": "Offline_Uncorrectable", "value": 100, "worst": 100, "thresh": 0, "raw": {"value": 0, "string": "0"}},
+      {"id": 199, "name": "UDMA_CRC_Error_Count", "value": 200, "worst": 200, "thresh": 0, "raw": {"value": 0, "string": "0"}}
+    ]
+  }
+}

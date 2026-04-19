@@ -1,0 +1,28 @@
+# DriveForge grading thresholds — shipped defaults.
+#
+# Users should edit these via the web UI (Settings → Grading) rather than by
+# hand. This file exists only as the fallback when the UI hasn't written its
+# own copy yet.
+#
+# Grade A: drives clean enough for primary Ceph OSDs / TrueNAS main pool
+# Grade B: small number of stable reallocated sectors; fine for secondary
+#          pools or scratch / backup targets
+# Grade C: more reallocated sectors but stable; OK for cold storage / heavy
+#          redundancy environments
+# Fail   : pending sectors, offline-uncorrectable, test failures, or any
+#          attribute degradation between pre- and post-test snapshots
+
+grade_a_reallocated_max: 0
+grade_b_reallocated_max: 8
+grade_c_reallocated_max: 40
+fail_on_pending_sectors: true
+fail_on_offline_uncorrectable: true
+
+# Drives that exceeded this temperature during burn-in are demoted to Grade C.
+# Set to `null` to disable the thermal rule entirely.
+thermal_excursion_c: 60
+
+# Tolerance for Power_On_Hours drift between pre- and post-test. Mostly a
+# sanity check — values wildly off usually indicate a hardware fault or a
+# counter-reset attempt.
+power_on_hours_drift_tolerance_h: 1

@@ -1,0 +1,9 @@
+{
+  "blockdevices": [
+    {"name": "sda", "model": "HGST HUS726T6TALE6L4", "serial": "V8G6X4RL", "size": 6001175126016, "tran": "sata", "rota": true, "type": "disk", "rev": "K8GNW7LH"},
+    {"name": "sdb", "model": "ST8000NM0075", "serial": "ZA1AH5X9", "size": 8001563221504, "tran": "sas", "rota": true, "type": "disk", "rev": "E002"},
+    {"name": "sdc", "model": "WDC WUH721414ALE6L4", "serial": "Y4KP8JKL", "size": 14000519643136, "tran": "sata", "rota": true, "type": "disk", "rev": "LDGNW07G"},
+    {"name": "sdd", "model": "INTEL SSDSC2KG960G8", "serial": "BTYG91230A9N960CGN", "size": 960197124096, "tran": "sata", "rota": false, "type": "disk", "rev": "XCV10132"},
+    {"name": "nvme0n1", "model": "Samsung SSD 970 EVO Plus 1TB", "serial": "S5GXNG0N101923L", "size": 1000204886016, "tran": "nvme", "rota": false, "type": "disk", "rev": "2B2QEXM7"}
+  ]
+}

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime / local state
+/var/
+*.db
+*.sqlite
+*.sqlite3
+/logs/
+/reports/
+/pending-labels/
+/config/local.yaml
+
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Build artefacts
+/target/
+/release/

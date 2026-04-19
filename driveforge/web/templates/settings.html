@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Settings — DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Settings</h1>
+  <div class="subtitle">All DriveForge configuration lives here. Changes persist to <code>/etc/driveforge/driveforge.yaml</code>.</div>
+</section>
+
+<section class="panel">
+  <h2>Grading thresholds</h2>
+  <dl class="kv">
+    <dt>Grade A max reallocated sectors</dt><dd>{{ settings.grading.grade_a_reallocated_max }}</dd>
+    <dt>Grade B max reallocated sectors</dt><dd>{{ settings.grading.grade_b_reallocated_max }}</dd>
+    <dt>Grade C max reallocated sectors</dt><dd>{{ settings.grading.grade_c_reallocated_max }}</dd>
+    <dt>Fail on pending sectors</dt><dd>{{ settings.grading.fail_on_pending_sectors }}</dd>
+    <dt>Fail on offline uncorrectable</dt><dd>{{ settings.grading.fail_on_offline_uncorrectable }}</dd>
+    <dt>Thermal excursion threshold (°C)</dt><dd>{{ settings.grading.thermal_excursion_c or "disabled" }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Printer</h2>
+  <dl class="kv">
+    <dt>Model</dt><dd>{{ settings.printer.model or "not configured" }}</dd>
+    <dt>Connection</dt><dd>{{ settings.printer.connection }}</dd>
+    <dt>Label roll</dt><dd>{{ settings.printer.label_roll or "auto-detect" }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Integrations</h2>
+  <dl class="kv">
+    <dt>Outbound webhook URL</dt><dd>{{ settings.integrations.webhook_url or "(not configured)" }}</dd>
+    <dt>Cloudflare Tunnel hostname</dt><dd>{{ settings.integrations.cloudflare_tunnel_hostname or "(not configured)" }}</dd>
+    <dt>Firmware DB URL</dt><dd>{{ settings.integrations.firmware_db_url or "bundled" }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Daemon</h2>
+  <dl class="kv">
+    <dt>Bind host</dt><dd>{{ settings.daemon.host }}</dd>
+    <dt>Bind port</dt><dd>{{ settings.daemon.port }}</dd>
+    <dt>Database</dt><dd>{{ settings.daemon.db_path }}</dd>
+    <dt>Reports directory</dt><dd>{{ settings.daemon.reports_dir }}</dd>
+  </dl>
+</section>
+
+<p class="muted">Edit forms land in Phase 6 / first-run wizard. For now, settings are read-only here.</p>
+{% endblock %}
