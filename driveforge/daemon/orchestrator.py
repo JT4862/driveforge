@@ -57,11 +57,34 @@ class PipelineFailure(Exception):
         self.detail = detail
 
 
+LOG_TAIL_MAX_LINES = 40
+
+
 class Orchestrator:
     def __init__(self, state: DaemonState) -> None:
         self.state = state
         self._tasks: dict[str, asyncio.Task] = {}
         self._semaphore = asyncio.Semaphore(MAX_PARALLEL)
+
+    def _log(self, drive_serial: str, line: str) -> None:
+        """Append a line to the drive's in-memory log tail (capped)."""
+        ts = datetime.now(UTC).strftime("%H:%M:%S")
+        buf = self.state.active_log.setdefault(drive_serial, [])
+        buf.append(f"[{ts}] {line}")
+        if len(buf) > LOG_TAIL_MAX_LINES:
+            del buf[: len(buf) - LOG_TAIL_MAX_LINES]
+
+    def _persist_log(self, drive_serial: str, run_id: int) -> None:
+        """Flush the in-memory log tail into test_run.log_tail."""
+        buf = self.state.active_log.get(drive_serial)
+        if not buf:
+            return
+        with self.state.session_factory() as session:
+            run = session.get(m.TestRun, run_id)
+            if run is None:
+                return
+            run.log_tail = "\n".join(buf)
+            session.commit()
 
     async def start_batch(
         self,
@@ -135,6 +158,12 @@ class Orchestrator:
     async def _run_drive(self, batch_id: str, bay_key: str, drive: Drive, *, quick: bool) -> None:
         """Per-drive pipeline."""
         async with self._semaphore:
+            # Fresh log buffer for this run
+            self.state.active_log[drive.serial] = []
+            self._log(
+                drive.serial,
+                f"start {drive.device_path} {drive.model} ({drive.transport.value}){' [quick]' if quick else ''}",
+            )
             try:
                 await self._execute_pipeline(batch_id, bay_key, drive, quick=quick)
             except asyncio.CancelledError:
@@ -151,8 +180,12 @@ class Orchestrator:
                 self.state.bay_assignments.pop(bay_key, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
+                # Keep the last log in memory briefly so a refresh after a
+                # batch completes still shows the final lines. Let the next
+                # run clear it.
 
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
+        self._log(drive.serial, f"✗ {phase}: {detail}")
         with self.state.session_factory() as session:
             run = (
                 session.query(m.TestRun)
@@ -166,6 +199,7 @@ class Orchestrator:
             run.completed_at = datetime.now(UTC)
             run.grade = "fail"
             run.error_message = f"[{phase}] {detail}"[:4000]
+            run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
             session.commit()
 
     async def _execute_pipeline(
@@ -247,11 +281,13 @@ class Orchestrator:
     async def _advance(self, run_id: int, phase: str, drive: Drive) -> None:
         self.state.active_phase[drive.serial] = phase
         self.state.active_percent[drive.serial] = 0.0
+        self._log(drive.serial, f"→ phase: {phase}")
         with self.state.session_factory() as session:
             run = session.get(m.TestRun, run_id)
             if run is None:
                 return
             run.phase = phase
+            run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
             session.commit()
 
     async def _capture_smart(self, run_id: int, drive: Drive, *, kind: str) -> smart.SmartSnapshot:
@@ -339,9 +375,16 @@ class Orchestrator:
                 await asyncio.sleep(0.1)
             return (0, 0, 0)
         serial = drive.serial
+        self._log(serial, f"badblocks -wsv -b 4096 {drive.device_path}")
+        # Throttle log updates to every 10% so we don't fill the buffer
+        last_logged_pct = [0.0]
 
         def on_progress(pct: float, errs: tuple[int, int, int]) -> None:
             self.state.active_percent[serial] = float(pct)
+            if pct - last_logged_pct[0] >= 10.0:
+                self._log(serial, f"badblocks: {pct:.1f}% errors={errs[0]}/{errs[1]}/{errs[2]}")
+                last_logged_pct[0] = pct
+                self._persist_log(serial, run_id)
 
         try:
             errs = await badblocks.run_destructive_streaming(
@@ -351,10 +394,7 @@ class Orchestrator:
             raise PipelineFailure("badblocks", str(exc)) from exc
         except asyncio.TimeoutError:
             raise PipelineFailure("badblocks", "exceeded maximum runtime") from None
-        if sum(errs) > 0:
-            # Grading handles this as a fail; don't raise here so the drive
-            # still produces a report with the error counts.
-            pass
+        self._log(serial, f"badblocks complete: errors={errs[0]}/{errs[1]}/{errs[2]}")
         return errs
 
     def _record_telemetry(

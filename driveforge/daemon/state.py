@@ -25,11 +25,13 @@ class DaemonState:
     engine: Engine
     session_factory: sessionmaker
 
-    # In-flight: global bay id -> active drive serial. Driven by the orchestrator.
-    bay_assignments: dict[int, str] = field(default_factory=dict)
+    # In-flight: bay_key -> active drive serial. Driven by the orchestrator.
+    bay_assignments: dict[str, str] = field(default_factory=dict)
     # Latest phase per drive — for fast dashboard rendering
     active_phase: dict[str, str] = field(default_factory=dict)
     active_percent: dict[str, float] = field(default_factory=dict)
+    # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
+    active_log: dict[str, list[str]] = field(default_factory=dict)
 
     # Cached enclosure discovery. Refreshed on boot + udev events.
     bay_plan: enclosures.BayPlan = field(

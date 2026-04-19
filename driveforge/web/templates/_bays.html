@@ -17,7 +17,7 @@
   </div>
 </a>
 {% else %}
-<a class="bay-card active" href="/drives/{{ bay.serial }}">
+<a class="bay-card active phase-{{ bay.phase_class }}" href="/drives/{{ bay.serial }}">
   <div class="bay-num">Bay {{ bay.bay }}</div>
   <div class="bay-body">
     <div class="drive-model">{{ bay.model }}</div>
@@ -26,7 +26,13 @@
     <div class="progress">
       <div class="bar" style="width: {{ bay.percent }}%"></div>
     </div>
-    <div class="percent">{{ "%.0f"|format(bay.percent) }}%</div>
+    <div class="bay-stats">
+      <span class="percent">{{ "%.0f"|format(bay.percent) }}%</span>
+      <span class="timing">
+        {{ bay.elapsed_label }}
+        {% if bay.eta_label %}&middot; ETA {{ bay.eta_label }}{% endif %}
+      </span>
+    </div>
   </div>
 </a>
 {% endif %}

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,6 +18,60 @@ from driveforge.db import models as m
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter()
+
+
+_PHASE_CLASS = {
+    "queued": "info",
+    "pre_smart": "info",
+    "short_test": "info",
+    "firmware_check": "info",
+    "post_smart": "info",
+    "grading": "info",
+    "secure_erase": "erase",
+    "badblocks": "burn",
+    "long_test": "long",
+    "done": "done",
+    "failed": "fail",
+    "aborted": "fail",
+}
+
+
+def _format_duration(seconds: float | int) -> str:
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h}h {m}m"
+
+
+# Rough per-GB seconds coefficients per phase + media type. Good to one
+# significant figure; refined with real-hardware telemetry later.
+_ETA_BADBLOCKS_SEC_PER_GB = {"hdd": 16.0, "ssd": 5.0, "nvme": 2.0}
+_ETA_ERASE_SEC_PER_GB = {"hdd": 6.0, "ssd": 0.5, "nvme": 0.1}
+_ETA_LONG_TEST_SEC_PER_GB = {"hdd": 12.0, "ssd": 0.5, "nvme": 0.5}
+
+
+def _media_kind(drive_row) -> str:
+    if drive_row.transport == "nvme":
+        return "nvme"
+    # Without rotation info on the DB row, assume SAS/SATA spinning for now.
+    # SSD detection can be refined later via the discovered drive metadata.
+    return "hdd"
+
+
+def _eta_seconds(phase: str, drive_row) -> int | None:
+    gb = drive_row.capacity_bytes / 1_000_000_000
+    media = _media_kind(drive_row)
+    if phase == "badblocks":
+        return int(gb * _ETA_BADBLOCKS_SEC_PER_GB[media])
+    if phase == "secure_erase":
+        return int(max(60, gb * _ETA_ERASE_SEC_PER_GB[media]))
+    if phase == "long_test":
+        return int(gb * _ETA_LONG_TEST_SEC_PER_GB[media])
+    return None
 
 
 def _bay_card(
@@ -39,6 +93,21 @@ def _bay_card(
     if serial:
         drive = session.get(m.Drive, serial)
         if drive is not None:
+            phase = state.active_phase.get(serial, "queued")
+            # In-flight run: grab started_at for elapsed/eta
+            run = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=serial, completed_at=None)
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            elapsed_sec = 0
+            if run and run.started_at:
+                delta = datetime.now(UTC) - (
+                    run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=UTC)
+                )
+                elapsed_sec = int(delta.total_seconds())
+            eta = _eta_seconds(phase, drive)
             return {
                 "bay": display_bay,
                 "state": "active",
@@ -46,8 +115,11 @@ def _bay_card(
                 "serial": serial,
                 "model": drive.model,
                 "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
-                "phase": state.active_phase.get(serial, "queued"),
+                "phase": phase,
+                "phase_class": _PHASE_CLASS.get(phase, "info"),
                 "percent": state.active_percent.get(serial, 0.0),
+                "elapsed_label": _format_duration(elapsed_sec),
+                "eta_label": f"~{_format_duration(eta)}" if eta else None,
             }
     if installed_drive is not None:
         return {
@@ -201,6 +273,10 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
                 .order_by(m.TelemetrySample.ts.asc())
                 .all()
             )
+    # Live log tail: prefer in-memory buffer if the drive is currently active,
+    # else fall back to the persisted test_run.log_tail.
+    live_log = "\n".join(state.active_log.get(serial, []))
+    log_tail = live_log or (latest.log_tail if latest else "") or ""
     return templates.TemplateResponse(
         request,
         "drive_detail.html",
@@ -211,6 +287,8 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             "snapshots": snapshots,
             "telemetry": telemetry_pts,
             "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
+            "log_tail": log_tail,
+            "log_is_live": bool(live_log),
         },
     )
 

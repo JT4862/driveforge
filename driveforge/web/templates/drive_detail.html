@@ -24,6 +24,14 @@
   </dl>
 </section>
 
+{% if log_tail %}
+<section class="panel"
+         {% if log_is_live %}hx-get="/drives/{{ drive.serial }}" hx-select="#log-tail" hx-target="#log-tail" hx-swap="outerHTML" hx-trigger="every 3s"{% endif %}>
+  <h2>Phase log{% if log_is_live %} <span class="pill saved">live</span>{% endif %}</h2>
+  <pre id="log-tail" class="log-tail">{{ log_tail }}</pre>
+</section>
+{% endif %}
+
 {% if latest.rules %}
 <section class="panel">
   <h2>Grading rules</h2>
