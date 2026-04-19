@@ -41,21 +41,68 @@
 
 {% if telemetry %}
 <section class="panel">
-  <h2>Telemetry ({{ telemetry|length }} samples)</h2>
-  <table class="telemetry">
-    <thead><tr><th>Timestamp</th><th>Phase</th><th>Temp °C</th><th>Chassis W</th></tr></thead>
-    <tbody>
-    {% for t in telemetry %}
-      <tr>
-        <td>{{ t.ts.isoformat() if t.ts else "" }}</td>
-        <td>{{ t.phase }}</td>
-        <td>{{ t.drive_temp_c if t.drive_temp_c is not none else "—" }}</td>
-        <td>{{ "%.0f"|format(t.chassis_power_w) if t.chassis_power_w is not none else "—" }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
+  <h2>Telemetry ({{ telemetry|length }} samples<span id="bucket-note" class="muted"></span>)</h2>
+  <div class="charts">
+    <div class="chart-box">
+      <div class="chart-title">Drive temperature (°C)</div>
+      <div class="chart-canvas-wrap"><canvas id="temp-chart"></canvas></div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-title">Chassis power (W)</div>
+      <div class="chart-canvas-wrap"><canvas id="power-chart"></canvas></div>
+    </div>
+  </div>
+  <details class="raw-table">
+    <summary class="muted">Show raw sample table</summary>
+    <table class="telemetry">
+      <thead><tr><th>Timestamp</th><th>Phase</th><th>Temp °C</th><th>Chassis W</th></tr></thead>
+      <tbody>
+      {% for t in telemetry %}
+        <tr>
+          <td>{{ t.ts.isoformat() if t.ts else "" }}</td>
+          <td>{{ t.phase }}</td>
+          <td>{{ t.drive_temp_c if t.drive_temp_c is not none else "—" }}</td>
+          <td>{{ "%.0f"|format(t.chassis_power_w) if t.chassis_power_w is not none else "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
 </section>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<script>
+(async function () {
+  const resp = await fetch('/api/drives/{{ drive.serial }}/telemetry');
+  const data = await resp.json();
+  if (data.bucket_min > 0) {
+    document.getElementById('bucket-note').textContent =
+      ' — downsampled to ' + data.bucket_min + '-min buckets';
+  }
+  const labels = data.points.map(p => new Date(p.ts).toLocaleTimeString());
+  const temps = data.points.map(p => p.temp);
+  const watts = data.points.map(p => p.watts);
+  const chartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#8b97a5', maxRotation: 0, autoSkip: true }, grid: { color: 'rgba(255,255,255,0.04)' } },
+      y: { ticks: { color: '#8b97a5' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+    },
+    elements: { point: { radius: 0 } },
+  };
+  new Chart(document.getElementById('temp-chart'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: temps, borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.12)', fill: true, tension: 0.25 }] },
+    options: chartOptions,
+  });
+  new Chart(document.getElementById('power-chart'), {
+    type: 'line',
+    data: { labels, datasets: [{ data: watts, borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.12)', fill: true, tension: 0.25 }] },
+    options: chartOptions,
+  });
+})();
+</script>
 {% endif %}
 {% endif %}
 

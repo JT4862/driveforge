@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -111,6 +113,73 @@ def get_drive(serial: str) -> DriveOut:
             firmware_version=d.firmware_version,
             first_seen_at=d.first_seen_at.isoformat() if d.first_seen_at else None,
         )
+
+
+@router.get("/drives/{serial}/telemetry")
+def drive_telemetry(serial: str, test_run_id: int | None = None, bucket_min: int = 5) -> dict[str, Any]:
+    """Return telemetry points for charting.
+
+    If samples span > 1 hour, aggregates into `bucket_min`-minute buckets
+    (mean per bucket) to keep payloads small. Otherwise returns raw samples.
+    """
+    state = get_state()
+    with state.session_factory() as session:
+        q = session.query(m.TelemetrySample).filter_by(drive_serial=serial)
+        if test_run_id is not None:
+            q = q.filter_by(test_run_id=test_run_id)
+        else:
+            latest = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=serial)
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            if latest is None:
+                return {"points": [], "bucket_min": 0}
+            q = q.filter_by(test_run_id=latest.id)
+        samples = q.order_by(m.TelemetrySample.ts.asc()).all()
+    if not samples:
+        return {"points": [], "bucket_min": 0}
+    first = samples[0].ts
+    last = samples[-1].ts
+    span = (last - first) if last and first else timedelta(0)
+    raw = [
+        {
+            "ts": s.ts.isoformat() if s.ts else None,
+            "phase": s.phase,
+            "temp": s.drive_temp_c,
+            "watts": s.chassis_power_w,
+        }
+        for s in samples
+    ]
+    if span.total_seconds() <= 3600:
+        return {"points": raw, "bucket_min": 0}
+    bucket = timedelta(minutes=bucket_min)
+    buckets: dict[datetime, list[dict]] = {}
+    for p in raw:
+        if p["ts"] is None:
+            continue
+        t = datetime.fromisoformat(p["ts"])
+        key = t - timedelta(
+            minutes=t.minute % bucket_min,
+            seconds=t.second,
+            microseconds=t.microsecond,
+        )
+        buckets.setdefault(key, []).append(p)
+    agg = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        temps = [g["temp"] for g in group if g["temp"] is not None]
+        watts = [g["watts"] for g in group if g["watts"] is not None]
+        agg.append(
+            {
+                "ts": key.isoformat(),
+                "phase": group[-1]["phase"],
+                "temp": sum(temps) / len(temps) if temps else None,
+                "watts": sum(watts) / len(watts) if watts else None,
+            }
+        )
+    return {"points": agg, "bucket_min": bucket_min}
 
 
 @router.get("/drives/{serial}/test_runs", response_model=list[TestRunOut])
