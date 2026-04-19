@@ -4,13 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}DriveForge{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/static/logo-mark.png">
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
 </head>
 <body>
   {% block chrome %}
   <header class="topbar">
-    <div class="brand"><a href="/">DriveForge</a></div>
+    <div class="brand">
+      <a href="/">
+        <img src="/static/logo-mark.png" alt="" class="brand-mark">
+        <span class="brand-text"><span class="brand-teal">Drive</span>Forge</span>
+      </a>
+    </div>
     <nav class="tabs">
       <a href="/" class="tab{% if request.url.path == '/' %} active{% endif %}" accesskey="d">Dashboard</a>
       <a href="/batches" class="tab{% if '/batches' in request.url.path %} active{% endif %}" accesskey="b">Batches</a>
