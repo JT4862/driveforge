@@ -13,12 +13,69 @@ before calling this.
 
 from __future__ import annotations
 
+import logging
+import re
+
 from driveforge.core.drive import Drive, Transport
 from driveforge.core.process import run
+
+logger = logging.getLogger(__name__)
 
 
 class EraseError(RuntimeError):
     pass
+
+
+# Parses `hdparm -I` security stanza. Examples:
+#   "2min for SECURITY ERASE UNIT. 2min for ENHANCED SECURITY ERASE UNIT."
+#   "128min for SECURITY ERASE UNIT. 90min for ENHANCED SECURITY ERASE UNIT."
+# Some drives report nothing, some report hours — bail out and fall back to
+# a capacity heuristic if this doesn't match.
+_SATA_SE_TIME_RE = re.compile(
+    r"(\d+)\s*min\s+for\s+SECURITY\s+ERASE\s+UNIT", re.IGNORECASE
+)
+
+
+def _sata_estimated_seconds(device: str) -> int | None:
+    try:
+        r = run(["hdparm", "-I", device], timeout=10)
+    except Exception:  # noqa: BLE001
+        return None
+    if not r.ok:
+        return None
+    m = _SATA_SE_TIME_RE.search(r.stdout)
+    if not m:
+        return None
+    return max(60, int(m.group(1)) * 60)
+
+
+def estimate_erase_seconds(drive: Drive) -> int | None:
+    """Return a best-guess wall-clock for the secure-erase phase.
+
+    Used by the orchestrator to drive a time-based progress bar for a phase
+    that emits no native progress. Returns None when we genuinely can't
+    estimate — caller should show an indeterminate/busy state instead of a
+    misleading 0%.
+    """
+    if drive.transport == Transport.SATA:
+        # Ask the drive how long SECURITY ERASE UNIT is expected to take.
+        est = _sata_estimated_seconds(drive.device_path)
+        if est is not None:
+            return est
+        # Fall through to capacity heuristic below.
+    if drive.transport == Transport.NVME:
+        # NVMe format is typically a few seconds even on multi-TB drives
+        # (crypto-erase), but give ourselves headroom.
+        return 60
+    # SAS sg_format and the SATA fallback: estimate from capacity. These are
+    # intentionally pessimistic so the bar under-reports rather than lying
+    # past 100%. Real sg_format on a 300 GB SAS runs 15-60 min.
+    if drive.capacity_bytes:
+        gb = drive.capacity_bytes / 1_000_000_000
+        # 20 min per 100 GB, clamped to [5 min, 6 h]
+        seconds = int((gb / 100) * 20 * 60)
+        return max(5 * 60, min(seconds, 6 * 3600))
+    return None
 
 
 def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str | None = None) -> None:

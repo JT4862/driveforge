@@ -381,6 +381,36 @@ class Orchestrator:
             # Safety: never erase a USB-attached drive. Likely an external
             # boot drive or adapter, not a test target.
             raise PipelineFailure("secure_erase", "refusing to erase USB-transport drive")
+        serial = drive.serial
+        # hdparm / sg_format / nvme format emit no progress — we synthesize a
+        # time-based bar from the drive's own estimate (hdparm -I) or a
+        # capacity heuristic. Caps at 99% so the bar never claims done until
+        # the blocking call actually returns.
+        estimate = erase.estimate_erase_seconds(drive)
+        if estimate:
+            mins = estimate / 60
+            self._log(
+                serial,
+                f"secure_erase estimated ~{mins:.0f} min (ticker based on drive estimate)",
+            )
+        else:
+            self._log(serial, "secure_erase: no duration estimate — showing indeterminate progress")
+
+        async def tick() -> None:
+            start = asyncio.get_event_loop().time()
+            while True:
+                elapsed = asyncio.get_event_loop().time() - start
+                if estimate:
+                    pct = min(99.0, (elapsed / estimate) * 100.0)
+                else:
+                    # Indeterminate: saw-tooth 0 → 95 → 0 every 30s so the
+                    # user sees the UI is alive without us pretending to know
+                    # the actual progress.
+                    pct = (elapsed % 30.0) / 30.0 * 95.0
+                self.state.active_percent[serial] = pct
+                await asyncio.sleep(1.0)
+
+        ticker = asyncio.create_task(tick())
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(None, erase.secure_erase, drive)
@@ -388,6 +418,13 @@ class Orchestrator:
             raise PipelineFailure("secure_erase", str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise PipelineFailure("secure_erase", f"unexpected: {exc}") from exc
+        finally:
+            ticker.cancel()
+            try:
+                await ticker
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self.state.active_percent[serial] = 100.0
 
     async def _run_badblocks(self, drive: Drive, *, dev_mode: bool, run_id: int) -> tuple[int, int, int]:
         if dev_mode:
