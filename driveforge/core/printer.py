@@ -112,16 +112,19 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
 
     # Body column on the left
     body_y = padding + 52
+    # Tight single-space alignment so long model strings and the Wipe line
+    # don't run into the QR column. The prior 4-space padding burned ~45 px
+    # of horizontal room.
     wipe_line = (
-        "Wipe:     NIST 800-88 Purge*"
+        "Wipe: NIST 800-88 Purge*"
         if data.quick_mode
-        else "Wipe:     NIST 800-88 Purge + 4-pass"
+        else "Wipe: NIST 800-88 + 4-pass"
     )
     lines = [
-        f"Model:    {data.model[:28]}",
+        f"Model: {data.model[:24]}",
         f"Capacity: {data.capacity_tb:.1f} TB",
-        f"Serial:   {data.serial}",
-        f"Tested:   {data.tested_date.isoformat()}",
+        f"Serial: {data.serial}",
+        f"Tested: {data.tested_date.isoformat()}",
         f"Hours on: {data.power_on_hours:,} h",
         wipe_line,
     ]

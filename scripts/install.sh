@@ -34,6 +34,7 @@ apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio \
   tmux lshw lsscsi ipmitool avahi-daemon avahi-utils \
+  fonts-dejavu-core \
   curl ca-certificates >/dev/null
 ok "system packages installed"
 
