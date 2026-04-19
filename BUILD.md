@@ -83,7 +83,7 @@ Three logical components, one codebase:
 |---|---|
 | `driveforge-daemon` | systemd service. Owns orchestration, DB, printer, outbound webhook dispatch. Exposes REST API on `localhost:8080`. |
 | `driveforge-tui` | Textual-based TUI. Talks to daemon via REST. For when you're at the crash cart or the web UI is down. |
-| `driveforge-web` | FastAPI + HTMX web UI served by the daemon. Primary interface. Reachable at `http://driveforge.local` on the LAN. |
+| `driveforge-web` | FastAPI + HTMX web UI served by the daemon. Primary interface. Reachable at `http://driveforge.local:8080` on the LAN (see Network & Access). |
 
 Separating daemon from UI means tests keep running whether or not anyone is
 watching, and both UIs are thin clients over the same REST surface — no
@@ -117,6 +117,8 @@ different Brother QL model → it's auto-detected and reconfigured.
 | `fio` | Endurance / pattern testing (Phase 5+ workloads) |
 | `tmux` | Per-drive parallel session management |
 | `lshw`, `lsblk`, `lsscsi` | Hardware and block device discovery |
+| `avahi-daemon` | mDNS — advertises `driveforge.local` on the LAN |
+| `ipmitool` | Chassis telemetry (watts, temps) via local iDRAC |
 
 ### Python stack
 
@@ -206,8 +208,10 @@ and a **Skip** option, and the wizard auto-detects wherever it can rather
 than ask:
 
 1. **Welcome** — brief explanation of what happens next
-2. **Hardware discovery** — lists detected bays from `lsscsi` / `lsblk`,
-   confirms the HBA mode, reports iDRAC/IPMI availability
+2. **Hardware & network discovery** — lists detected bays from `lsscsi` /
+   `lsblk`, confirms the HBA mode, reports iDRAC/IPMI availability, shows
+   current IP / hostname / static-or-DHCP status; warns if on DHCP because
+   the access URL may change
 3. **Printer** — USB scan via udev for Brother VID `0x04F9`; pre-fills
    the model and loaded label roll if detected; inline **Test print**
    button. Skippable — plug in a printer later and the hotplug monitor
@@ -578,6 +582,29 @@ with local-only features; every external integration is opt-in.
 A fresh install prints cert labels, saves reports locally, and serves a
 read-only report page on the LAN. Everything else is toggled on in Settings.
 
+### Network & Access
+
+DriveForge's web UI is reachable on the LAN via two URLs out of the box:
+
+- **`http://driveforge.local:8080`** — advertised via mDNS (Avahi). Works on
+  macOS, iOS, modern Linux, and Windows with Bonjour installed. Preferred.
+- **`http://<server-ip>:8080`** — the raw LAN IP. Always works.
+
+The daemon binds to `0.0.0.0:8080` by default. Port and bind address are
+configurable in Settings → System (change requires a daemon restart; the
+UI warns about the URL change before applying).
+
+**Network config is not DriveForge's responsibility.** Static IP / DHCP /
+DNS is handled at the Debian layer via `netplan`. The install script
+detects DHCP and prints a friendly warning so users know the URL could
+drift after a reboot. A Phase 7+ `driveforge network` CLI may later wrap
+netplan for users who want a Proxmox-style static-IP wizard, but it is
+explicitly out of MVP scope.
+
+HTTPS: MVP is HTTP-only. Phase 6+ adds optional self-signed HTTPS on
+port 8443, with Let's Encrypt via Cloudflare Tunnel as the path to a
+trusted public cert for the QR landing page.
+
 ### End-user install flow
 
 1. User installs Debian 12 on their own server hardware (OS out of scope)
@@ -590,8 +617,19 @@ read-only report page on the LAN. Everything else is toggled on in Settings.
    enables and starts `driveforge-daemon.service`
 4. Connect thermal printer via USB (optional — can be plugged in later;
    udev hotplug monitor auto-configures it)
-5. Open `http://<server-ip>:8080` → **First-run setup wizard** runs,
-   auto-detecting hardware and walking through optional integrations. No
+5. Install script finishes with a Proxmox-style access summary:
+   ```
+   ✓ DriveForge installed and running.
+
+   Open the web UI at:
+     → http://driveforge.local:8080     (mDNS, preferred)
+     → http://192.168.1.42:8080         (direct IP)
+
+   ⚠  This server is on DHCP — the IP may change on reboot. For a stable
+      URL, set a static IP via Debian's netplan config.
+   ```
+6. Opening either URL lands on the **First-Run Setup Wizard**, which
+   auto-detects hardware and walks through optional integrations. No
    files to edit by hand, ever.
 
 ### What we are explicitly NOT shipping
@@ -672,6 +710,9 @@ is gray-market fraud, not refurbishment.
   a DriveForge concern.
 - **Remote admin access** via Cloudflare Tunnel — the public QR landing page
   ships in Phase 6; full admin UI exposure is a separate Phase 7+ decision
+- **`driveforge network` CLI** — Proxmox-style static-IP wizard that wraps
+  `netplan` with a preview-and-confirm flow. Phase 7+ nice-to-have; users
+  who want it today can edit netplan directly.
 - No ArgoCD — DriveForge is inherently tied to physical R720 hardware, not
   a Kubernetes workload
 
