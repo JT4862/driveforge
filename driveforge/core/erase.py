@@ -49,12 +49,26 @@ def _nvme_format(device: str) -> None:
 
 
 def secure_erase(drive: Drive) -> None:
-    """Dispatch to the right erase path based on transport."""
-    if drive.transport == Transport.SATA:
+    """Dispatch to the right erase path based on transport.
+
+    For drives classified as SAS by lsblk, re-probe via smartctl first —
+    SATA drives attached to SAS HBAs show up as tran=sas in lsblk but
+    actually speak ATA. sg_format (SCSI FORMAT UNIT) fails on those with
+    "Illegal request"; they want hdparm instead.
+    """
+    effective = drive.transport
+    if effective == Transport.SAS:
+        from driveforge.core.drive import detect_true_transport
+
+        refined = detect_true_transport(drive.device_path)
+        if refined in (Transport.SATA, Transport.SAS, Transport.NVME):
+            effective = refined
+
+    if effective == Transport.SATA:
         _sata_secure_erase(drive.device_path)
-    elif drive.transport == Transport.SAS:
+    elif effective == Transport.SAS:
         _sas_secure_erase(drive.device_path)
-    elif drive.transport == Transport.NVME:
+    elif effective == Transport.NVME:
         _nvme_format(drive.device_path)
     else:
-        raise EraseError(f"no erase path for transport={drive.transport}")
+        raise EraseError(f"no erase path for transport={effective}")

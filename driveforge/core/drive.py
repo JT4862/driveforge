@@ -163,14 +163,11 @@ def discover(include_root: bool = False) -> list[Drive]:
             rota_int = None
         device_path = f"/dev/{name}"
         transport = _transport_of(entry)
-        # Only re-probe when lsblk reports SAS. SATA-on-SAS-HBA is the
-        # ambiguous case where the kernel says "sas" but the drive actually
-        # speaks ATA (STP tunneling). lsblk is trustworthy for nvme / usb /
-        # direct-attached SATA.
-        if transport == Transport.SAS:
-            refined = detect_true_transport(device_path)
-            if refined in (Transport.SATA, Transport.SAS):
-                transport = refined
+        # NOTE: we no longer call detect_true_transport() here. That probe
+        # shells out to smartctl and was running on every dashboard refresh
+        # (HTMX polls every 3s), piling up concurrent smartctl processes on
+        # the same drive and timing out. Instead, the orchestrator re-probes
+        # right before dispatching secure_erase — the only place it matters.
         drives.append(
             Drive(
                 serial=serial,
