@@ -8,16 +8,20 @@
 
 {% if rows %}
 <table class="runs">
-  <thead><tr><th>Completed</th><th>Serial</th><th>Drive</th><th>Grade</th><th title="Power-on hours — total hours the drive has been running">Hours on</th><th>Batch</th></tr></thead>
+  <thead><tr><th>Completed</th><th>Serial</th><th>Drive</th><th>Capacity</th><th>Grade</th><th title="Power-on hours — total hours the drive has been running">Hours on</th><th>Duration</th><th>Mode</th><th>Batch</th><th>Report</th></tr></thead>
   <tbody>
     {% for r in rows %}
     <tr>
       <td>{{ r.completed_at.isoformat() if r.completed_at else "" }}</td>
       <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
       <td>{{ r.model }}</td>
+      <td>{% if r.capacity_tb %}{{ "%.1f"|format(r.capacity_tb) }} TB{% else %}—{% endif %}</td>
       <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
       <td>{{ "{:,}".format(r.power_on_hours) if r.power_on_hours else "—" }}</td>
+      <td>{{ r.duration or "—" }}</td>
+      <td>{% if r.quick_mode %}<span class="pill">quick</span>{% else %}<span class="pill">full</span>{% endif %}</td>
       <td>{% if r.batch_id %}<a href="/batches/{{ r.batch_id }}">{{ r.batch_id[:8] }}</a>{% else %}—{% endif %}</td>
+      <td>{% if r.has_report %}<a href="/reports/{{ r.drive_serial }}" title="Public cert report">📄</a>{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}
   </tbody>

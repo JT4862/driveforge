@@ -26,6 +26,9 @@
     <dt>Current pending</dt><dd>{{ run.current_pending_sector if run.current_pending_sector is not none else "—" }}</dd>
     <dt>Offline uncorrectable</dt><dd>{{ run.offline_uncorrectable if run.offline_uncorrectable is not none else "—" }}</dd>
     <dt>SMART status</dt><dd>{% if run.smart_status_passed %}passed{% elif run.smart_status_passed is false %}failed{% else %}—{% endif %}</dd>
+    {% if max_temp %}
+    <dt>Temperature (during test)</dt><dd>max {{ max_temp }}°C &middot; avg {{ avg_temp }}°C</dd>
+    {% endif %}
   </dl>
   {% if run.rules %}
   <section>

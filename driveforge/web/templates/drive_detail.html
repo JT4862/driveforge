@@ -16,11 +16,31 @@
   <dl class="kv">
     <dt>Phase</dt><dd>{{ latest.phase|replace("_", " ") }}</dd>
     <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}">{{ latest.grade|upper }}</span>{% else %}—{% endif %}</dd>
+    {% if suggested_use %}
+    <dt>Suggested use</dt><dd class="muted">{{ suggested_use }}</dd>
+    {% endif %}
     <dt>Started</dt><dd>{{ latest.started_at.isoformat() if latest.started_at else "—" }}</dd>
-    <dt>Completed</dt><dd>{{ latest.completed_at.isoformat() if latest.completed_at else "—" }}</dd>
+    <dt>Completed</dt><dd>{{ latest.completed_at.isoformat() if latest.completed_at else "—" }}{% if duration_label %} &middot; ran {{ duration_label }}{% endif %}</dd>
     <dt>Power-on hours</dt><dd>{{ "{:,}".format(latest.power_on_hours_at_test) if latest.power_on_hours_at_test else "—" }}{% if latest.power_on_hours_at_test %} ({{ "%.1f"|format(latest.power_on_hours_at_test / 8760) }} years continuous){% endif %}</dd>
     <dt>Reallocated sectors</dt><dd>{{ latest.reallocated_sectors if latest.reallocated_sectors is not none else "—" }}</dd>
+    <dt>Current pending</dt><dd>{% if latest.current_pending_sector and latest.current_pending_sector > 0 %}<span class="bad">{{ latest.current_pending_sector }}</span>{% else %}{{ latest.current_pending_sector if latest.current_pending_sector is not none else "—" }}{% endif %}</dd>
+    <dt>Offline uncorrectable</dt><dd>{% if latest.offline_uncorrectable and latest.offline_uncorrectable > 0 %}<span class="bad">{{ latest.offline_uncorrectable }}</span>{% else %}{{ latest.offline_uncorrectable if latest.offline_uncorrectable is not none else "—" }}{% endif %}</dd>
     <dt>SMART status</dt><dd>{% if latest.smart_status_passed %}passed{% elif latest.smart_status_passed is false %}failed{% else %}—{% endif %}</dd>
+    {% if max_temp %}
+    <dt>Temperature (test)</dt><dd>max {{ max_temp }}°C &middot; avg {{ avg_temp }}°C</dd>
+    {% endif %}
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Hardware</h2>
+  <dl class="kv">
+    <dt>Model</dt><dd>{{ drive.model }}</dd>
+    <dt>Serial</dt><dd>{{ drive.serial }}</dd>
+    <dt>Capacity</dt><dd>{{ capacity_tb }} TB ({{ "{:,}".format(drive.capacity_bytes) }} bytes)</dd>
+    <dt>Transport</dt><dd>{{ drive.transport|upper }}</dd>
+    <dt>Firmware</dt><dd>{{ drive.firmware_version or "—" }}</dd>
+    <dt>First seen</dt><dd>{{ drive.first_seen_at.date().isoformat() if drive.first_seen_at else "—" }}</dd>
   </dl>
 </section>
 

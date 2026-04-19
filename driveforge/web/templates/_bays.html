@@ -11,10 +11,15 @@
 <a class="bay-card installed{% if bay.last_grade %} graded graded-{{ bay.last_grade }}{% endif %}" href="/drives/{{ bay.serial }}">
   <div class="bay-num">
     Bay {{ bay.bay }}
-    {% if bay.last_grade == "fail" %}
-      <span class="grade grade-fail grade-corner">✗ FAIL</span>
-    {% elif bay.last_grade %}
-      <span class="grade grade-{{ bay.last_grade }} grade-corner">{{ bay.last_grade|upper }}</span>
+    {% if bay.last_grade %}
+      <span class="bay-report-wrap">
+        <a class="report-link" href="/reports/{{ bay.serial }}" title="View cert report" onclick="event.stopPropagation();">📄</a>
+        {% if bay.last_grade == "fail" %}
+          <span class="grade grade-fail grade-corner">✗ FAIL</span>
+        {% else %}
+          <span class="grade grade-{{ bay.last_grade }} grade-corner">{{ bay.last_grade|upper }}</span>
+        {% endif %}
+      </span>
     {% endif %}
   </div>
   <div class="bay-body">

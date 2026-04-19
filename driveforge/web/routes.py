@@ -265,6 +265,14 @@ def bays_partial(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "_bays.html", {"view": view})
 
 
+SUGGESTED_USE = {
+    "A": "Primary Ceph OSD, TrueNAS main pool — no reservations",
+    "B": "Secondary OSD, scratch pool, backup target",
+    "C": "Cold storage, test environment, heavy-redundancy array",
+    "fail": "Scrap / e-waste — do not deploy",
+}
+
+
 @router.get("/drives/{serial}", response_class=HTMLResponse)
 def drive_detail(request: Request, serial: str) -> HTMLResponse:
     state = get_state()
@@ -281,6 +289,8 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
         latest = runs[0] if runs else None
         snapshots = []
         telemetry_pts = []
+        max_temp = None
+        avg_temp = None
         if latest:
             snapshots = (
                 session.query(m.SmartSnapshot)
@@ -294,8 +304,15 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
                 .order_by(m.TelemetrySample.ts.asc())
                 .all()
             )
-    # Live log tail: prefer in-memory buffer if the drive is currently active,
-    # else fall back to the persisted test_run.log_tail.
+            temps = [t.drive_temp_c for t in telemetry_pts if t.drive_temp_c is not None]
+            if temps:
+                max_temp = max(temps)
+                avg_temp = round(sum(temps) / len(temps), 1)
+    duration_sec = None
+    if latest and latest.started_at and latest.completed_at:
+        started = latest.started_at if latest.started_at.tzinfo else latest.started_at.replace(tzinfo=UTC)
+        completed = latest.completed_at if latest.completed_at.tzinfo else latest.completed_at.replace(tzinfo=UTC)
+        duration_sec = int((completed - started).total_seconds())
     live_log = "\n".join(state.active_log.get(serial, []))
     log_tail = live_log or (latest.log_tail if latest else "") or ""
     return templates.TemplateResponse(
@@ -310,6 +327,10 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
             "log_tail": log_tail,
             "log_is_live": bool(live_log),
+            "duration_label": _format_duration(duration_sec) if duration_sec is not None else None,
+            "max_temp": max_temp,
+            "avg_temp": avg_temp,
+            "suggested_use": SUGGESTED_USE.get(latest.grade) if latest and latest.grade else None,
         },
     )
 
@@ -426,17 +447,28 @@ def history(request: Request) -> HTMLResponse:
             .limit(500)
             .all()
         )
-        rows = [
-            {
-                "completed_at": r.completed_at,
-                "drive_serial": r.drive_serial,
-                "model": r.drive.model if r.drive else "—",
-                "grade": r.grade,
-                "power_on_hours": r.power_on_hours_at_test,
-                "batch_id": r.batch_id,
-            }
-            for r in runs
-        ]
+        rows = []
+        for r in runs:
+            duration = None
+            if r.started_at and r.completed_at:
+                started = r.started_at if r.started_at.tzinfo else r.started_at.replace(tzinfo=UTC)
+                completed = r.completed_at if r.completed_at.tzinfo else r.completed_at.replace(tzinfo=UTC)
+                duration = _format_duration(int((completed - started).total_seconds()))
+            capacity_tb = round(r.drive.capacity_bytes / 1_000_000_000_000, 2) if r.drive else None
+            rows.append(
+                {
+                    "completed_at": r.completed_at,
+                    "drive_serial": r.drive_serial,
+                    "model": r.drive.model if r.drive else "—",
+                    "capacity_tb": capacity_tb,
+                    "grade": r.grade,
+                    "power_on_hours": r.power_on_hours_at_test,
+                    "batch_id": r.batch_id,
+                    "quick_mode": bool(r.quick_mode),
+                    "duration": duration,
+                    "has_report": bool(r.report_url),
+                }
+            )
     return templates.TemplateResponse(request, "history.html", {"rows": rows})
 
 
@@ -592,6 +624,9 @@ def public_report(request: Request, serial: str) -> HTMLResponse:
             .order_by(m.TelemetrySample.ts.asc())
             .all()
         )
+    temps = [t.drive_temp_c for t in telemetry_pts if t.drive_temp_c is not None]
+    max_temp = max(temps) if temps else None
+    avg_temp = round(sum(temps) / len(temps), 1) if temps else None
     return templates.TemplateResponse(
         request,
         "report.html",
@@ -600,6 +635,8 @@ def public_report(request: Request, serial: str) -> HTMLResponse:
             "run": latest,
             "telemetry": telemetry_pts,
             "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
+            "max_temp": max_temp,
+            "avg_temp": avg_temp,
             "generated_at": datetime.utcnow(),
         },
     )
