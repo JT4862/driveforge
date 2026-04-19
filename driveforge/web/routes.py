@@ -225,6 +225,19 @@ def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
+    with state.session_factory() as session:
+        approvals = session.query(m.FirmwareApproval).order_by(m.FirmwareApproval.approved_at.desc()).all()
+        approvals_view = [
+            {
+                "id": a.id,
+                "model": a.model,
+                "transport": a.transport,
+                "version": a.version,
+                "signature_verified": a.signature_verified,
+                "approved_at": a.approved_at,
+            }
+            for a in approvals
+        ]
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -232,6 +245,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "saved_panel": saved,
             "restart_required": restart == "1",
+            "firmware_approvals": approvals_view,
         },
     )
 
@@ -307,6 +321,18 @@ async def save_daemon(request: Request) -> RedirectResponse:
     await _save_settings_or_ignore(request)
     suffix = "&restart=1" if restart_needed else ""
     return RedirectResponse(url=f"/settings?saved=daemon{suffix}", status_code=303)
+
+
+@router.post("/settings/firmware")
+async def save_firmware(request: Request) -> RedirectResponse:
+    state = get_state()
+    form = await request.form()
+    f = state.settings.firmware
+    f.auto_apply = form.get("auto_apply") == "on"
+    f.require_canary = form.get("require_canary") == "on"
+    f.trust_pubkey = (form.get("trust_pubkey") or "").strip()
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/settings?saved=firmware", status_code=303)
 
 
 @router.post("/settings/wizard-replay")

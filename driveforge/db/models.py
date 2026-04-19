@@ -115,6 +115,49 @@ class TelemetrySample(Base):
     test_run: Mapped[TestRun | None] = relationship(back_populates="telemetry")
 
 
+class FirmwareApproval(Base):
+    """User-approved (model, transport, version, sha256) firmware entries.
+
+    When auto-apply is enabled, the orchestrator flashes drives whose
+    firmware matches an approved entry. Without a row here, entries stay
+    check-only regardless of the auto-apply toggle.
+    """
+
+    __tablename__ = "firmware_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model: Mapped[str] = mapped_column(String(128), index=True)
+    transport: Mapped[str] = mapped_column(String(16))
+    version: Mapped[str] = mapped_column(String(64))
+    blob_sha256: Mapped[str] = mapped_column(String(64))
+    signature_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FirmwareOperation(Base):
+    """Audit log of every firmware flash attempt (successful or not).
+
+    One row per drive attempt. Canary operations are flagged so we can
+    correlate later same-batch drives back to their canary.
+    """
+
+    __tablename__ = "firmware_operations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    test_run_id: Mapped[int | None] = mapped_column(ForeignKey("test_runs.id"), nullable=True)
+    drive_serial: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str] = mapped_column(String(128))
+    from_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    to_version: Mapped[str] = mapped_column(String(64))
+    is_canary: Mapped[bool] = mapped_column(Boolean, default=False)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    outcome: Mapped[str] = mapped_column(String(32))  # success | failed | skipped | deferred
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
 

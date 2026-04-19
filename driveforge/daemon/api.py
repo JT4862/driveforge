@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from driveforge.core import drive as drive_mod
 from driveforge.core import firmware
@@ -184,6 +185,64 @@ async def start_batch(body: StartBatchIn, request: Request) -> BatchOut:
         completed_at=None,
         totals={"A": 0, "B": 0, "C": 0, "fail": 0},
     )
+
+
+class FirmwareApproveIn(BaseModel):
+    model: str
+    transport: str
+    version: str
+    blob_sha256: str
+    signature_verified: bool = False
+    notes: str | None = None
+
+
+@router.get("/firmware/approvals")
+def list_firmware_approvals() -> list[dict[str, Any]]:
+    state = get_state()
+    with state.session_factory() as session:
+        rows = session.execute(select(m.FirmwareApproval)).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "model": r.model,
+                "transport": r.transport,
+                "version": r.version,
+                "blob_sha256": r.blob_sha256,
+                "signature_verified": r.signature_verified,
+                "approved_at": r.approved_at.isoformat() if r.approved_at else None,
+                "notes": r.notes,
+            }
+            for r in rows
+        ]
+
+
+@router.post("/firmware/approvals")
+def approve_firmware(body: FirmwareApproveIn) -> dict[str, Any]:
+    state = get_state()
+    with state.session_factory() as session:
+        row = m.FirmwareApproval(
+            model=body.model,
+            transport=body.transport,
+            version=body.version,
+            blob_sha256=body.blob_sha256,
+            signature_verified=body.signature_verified,
+            notes=body.notes,
+        )
+        session.add(row)
+        session.commit()
+        return {"id": row.id, "status": "approved"}
+
+
+@router.delete("/firmware/approvals/{approval_id}")
+def unapprove_firmware(approval_id: int) -> dict[str, str]:
+    state = get_state()
+    with state.session_factory() as session:
+        row = session.get(m.FirmwareApproval, approval_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        session.delete(row)
+        session.commit()
+        return {"status": "removed"}
 
 
 @router.get("/firmware/check/{serial}")

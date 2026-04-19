@@ -39,6 +39,22 @@ class IntegrationsConfig(BaseModel):
     firmware_db_url: str | None = None  # defaults to bundled DB
 
 
+class FirmwareConfig(BaseModel):
+    """Firmware auto-apply behavior.
+
+    Never defaults to True — flashing is opt-in and requires per-entry
+    approval in Settings → Firmware regardless of this toggle.
+    """
+
+    auto_apply: bool = False
+    # Base64-encoded Ed25519 public key. Empty = use bundled trust root.
+    trust_pubkey: str = ""
+    # Always test the first drive of a new (model, target_version) flash
+    # inside a batch, wait for its grade, then proceed with siblings only
+    # if the canary passed.
+    require_canary: bool = True
+
+
 class GradingConfig(BaseModel):
     """A/B/C/Fail thresholds. Users tune in Settings → Grading.
 
@@ -77,6 +93,7 @@ class Settings(BaseSettings):
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     printer: PrinterConfig = Field(default_factory=PrinterConfig)
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
+    firmware: FirmwareConfig = Field(default_factory=FirmwareConfig)
     grading: GradingConfig = Field(default_factory=GradingConfig)
 
     # First-run state. Flipped to True when the wizard completes; user can
