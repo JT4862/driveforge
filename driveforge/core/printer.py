@@ -196,11 +196,18 @@ def print_label(img: Image.Image, *, model: str, backend: str = "file", identifi
         cut=True,
     )
     if backend == "file":
-        # Write the raw raster bytes to a .bin for inspection
-        target = Path(identifier or "/tmp/driveforge-label.bin")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(bytes(instructions))
-        logger.info("label raster written to %s (%d bytes)", target, len(instructions))
+        # Dev-mode preview: save the rendered label as a viewable PNG next to
+        # the raw Brother QL raster bytes. The PNG is what the operator
+        # actually wants to see; the .bin is for protocol-level debugging.
+        target_bin = Path(identifier or "/tmp/driveforge-label.bin")
+        target_bin.parent.mkdir(parents=True, exist_ok=True)
+        target_bin.write_bytes(bytes(instructions))
+        target_png = target_bin.with_suffix(".png")
+        img.save(target_png, "PNG")
+        logger.info(
+            "label dev-preview written: %s (%d bytes raster) + %s (PNG)",
+            target_bin, len(instructions), target_png,
+        )
         return True
     try:
         send(

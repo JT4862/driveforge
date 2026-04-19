@@ -67,6 +67,7 @@
       {% for c in ["usb", "network", "bluetooth"] %}
       <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
       {% endfor %}
+      <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
     </select>
   </label>
   <label class="field">

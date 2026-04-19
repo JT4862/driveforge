@@ -447,6 +447,7 @@ _BROTHER_QL_BACKENDS = {
     "usb": "pyusb",
     "network": "network",
     "bluetooth": "linux_kernel",
+    "file": "file",  # dev mode: save PNG + raster to /tmp, no hardware needed
 }
 
 
