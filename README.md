@@ -62,8 +62,12 @@ for.
    - `badblocks` destructive write/read (skipped in quick mode)
    - SMART long self-test (skipped in quick mode)
    - Post-test SMART diff → grade (A / B / C / fail) with per-rule rationale
-   - Thermal printer cert label (Brother QL family)
    - Optional outbound webhook (n8n / Zapier / any HTTPS endpoint)
+
+   Cert labels are **printed on-demand**, not automatically, from the
+   batch detail page (single "Print" per drive, or "Print all passing"
+   for the whole batch) and from the drive detail page. This keeps label
+   stock out of failed drives and lets you reprint if a sticker peels.
 3. Serves a local web UI at `http://driveforge.local:8080` with live bay
    state, per-drive SMART history, telemetry charts, and a public QR-coded
    report page for each completed drive

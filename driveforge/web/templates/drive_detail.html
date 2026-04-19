@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}{{ drive.model }} ({{ drive.serial }}) — DriveForge{% endblock %}
 {% block content %}
+{% set flash = request.query_params.get('flash') %}
+{% if flash %}
+<div class="banner {% if flash == 'ok' %}ok-banner{% else %}warn-banner{% endif %}">
+  {{ request.query_params.get('msg', '') }}
+</div>
+{% endif %}
 <section class="page-head">
   <a href="/" class="back">&larr; Dashboard</a>
   <h1>{{ drive.model }}</h1>
@@ -9,7 +15,14 @@
 
 {% if latest %}
 <section class="panel">
-  <h2>Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}</h2>
+  <h2 style="display: flex; align-items: center; gap: 12px;">
+    Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}
+    {% if latest.completed_at and latest.grade and latest.grade != "fail" %}
+    <form action="/drives/{{ drive.serial }}/print-label" method="post" style="margin-left: auto;">
+      <button type="submit" class="btn">Print cert label</button>
+    </form>
+    {% endif %}
+  </h2>
   {% if latest.error_message %}
   <div class="banner warn-banner" style="white-space: pre-wrap;">&#9888; {{ latest.error_message }}</div>
   {% endif %}

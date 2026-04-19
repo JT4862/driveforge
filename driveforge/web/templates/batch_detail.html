@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Batch {{ batch.id[:12] }} — DriveForge{% endblock %}
 {% block content %}
+{% set flash = request.query_params.get('flash') %}
+{% if flash %}
+<div class="banner {% if flash == 'ok' %}ok-banner{% else %}warn-banner{% endif %}">
+  {{ request.query_params.get('msg', '') }}
+</div>
+{% endif %}
 <section class="page-head">
   <a href="/batches" class="back">&larr; Batches</a>
   <h1>Batch {{ batch.id[:12] }}</h1>
@@ -15,10 +21,15 @@
     <span class="grade grade-C">{{ totals.C }} C</span>
     <span class="grade grade-fail">{{ totals.fail }} Fail</span>
   </div>
+  {% if printable_count > 0 %}
+  <form action="/batches/{{ batch.id }}/print-labels" method="post" style="display: inline; margin-top: 12px;">
+    <button type="submit" class="btn">Print {{ printable_count }} passing label{{ 's' if printable_count != 1 else '' }}</button>
+  </form>
+  {% endif %}
 </section>
 
 <table class="runs">
-  <thead><tr><th>Serial</th><th>Phase</th><th>Grade</th><th>Notes</th><th>Report</th></tr></thead>
+  <thead><tr><th>Serial</th><th>Phase</th><th>Grade</th><th>Notes</th><th>Report</th><th>Label</th></tr></thead>
   <tbody>
     {% for r in runs %}
     <tr>
@@ -27,6 +38,13 @@
       <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}"{% if r.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ r.grade|upper }}{% if r.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% else %}—{% endif %}</td>
       <td class="muted">{{ r.error_message[:120] if r.error_message else "—" }}{% if r.error_message and r.error_message|length > 120 %}…{% endif %}</td>
       <td>{% if r.report_url %}<a href="{{ r.report_url }}">view</a>{% else %}—{% endif %}</td>
+      <td>
+        {% if r.printable %}
+        <form action="/drives/{{ r.drive_serial }}/print-label" method="post" style="display: inline;">
+          <button type="submit" class="btn-link">Print</button>
+        </form>
+        {% else %}—{% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>

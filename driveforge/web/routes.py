@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from driveforge.core import drive as drive_mod
 from driveforge.core import enclosures
 from driveforge.daemon.state import get_state
 from driveforge.db import models as m
+
+logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
@@ -399,6 +402,146 @@ async def abort_all_web(request: Request) -> RedirectResponse:
     await orch.abort_all()
     return RedirectResponse(url="/", status_code=303)
 
+# --- Manual cert label printing ---------------------------------------------
+# Labels are printed on-demand, not automatically, so the operator can inspect
+# each cert before committing a sticker. See BUILD.md → Certification Labels.
+
+_BROTHER_QL_BACKENDS = {
+    # PrinterConfig.connection → brother_ql backend id
+    "usb": "pyusb",
+    "network": "network",
+    "bluetooth": "linux_kernel",
+}
+
+
+def _public_report_url(request: Request, state, serial: str) -> str:
+    """Build the URL that goes into the QR code on the printed label.
+
+    Prefer the Cloudflare Tunnel hostname from Settings so the QR resolves
+    from outside the homelab LAN; fall back to the request's own host.
+    """
+    tun = state.settings.integrations.cloudflare_tunnel_hostname
+    if tun:
+        if not tun.startswith(("http://", "https://")):
+            tun = f"https://{tun}"
+        return f"{tun.rstrip('/')}/reports/{serial}"
+    return f"{request.url.scheme}://{request.url.netloc}/reports/{serial}"
+
+
+def _print_label_for_run(request: Request, state, drive, run) -> tuple[bool, str]:
+    """Render + dispatch a single cert label. Returns (ok, message)."""
+    pc = state.settings.printer
+    if not pc.model:
+        return False, "no printer configured (Settings → Printer)"
+    # Lazy import so the web module loads on systems without brother_ql/qrcode
+    # installed (macOS dev env). The R720 install.sh ensures both are present.
+    from driveforge.core import printer as printer_mod
+
+    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
+    data = printer_mod.CertLabelData(
+        model=drive.model,
+        serial=drive.serial,
+        capacity_tb=round(drive.capacity_bytes / 1_000_000_000_000, 2),
+        grade=run.grade or "—",
+        tested_date=(run.completed_at or run.started_at or datetime.now(UTC)).date(),
+        power_on_hours=run.power_on_hours_at_test or 0,
+        report_url=_public_report_url(request, state, drive.serial),
+        quick_mode=bool(run.quick_mode),
+    )
+    try:
+        img = printer_mod.render_label(data, roll=pc.label_roll or "DK-1209")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("label render failed for %s", drive.serial)
+        return False, f"render failed: {exc}"
+    ok = printer_mod.print_label(
+        img, model=pc.model, backend=backend, identifier=pc.backend_identifier
+    )
+    if not ok:
+        return False, "printer dispatch failed (check Settings → Printer and device connection)"
+    return True, f"printed label for {drive.serial}"
+
+
+def _latest_printable_run(session, serial: str):
+    """Return the drive's most recent completed run that produced a grade."""
+    return (
+        session.query(m.TestRun)
+        .filter_by(drive_serial=serial)
+        .filter(m.TestRun.completed_at.isnot(None))
+        .filter(m.TestRun.grade.isnot(None))
+        .order_by(m.TestRun.completed_at.desc())
+        .first()
+    )
+
+
+@router.post("/drives/{serial}/print-label")
+def print_drive_label(request: Request, serial: str) -> RedirectResponse:
+    state = get_state()
+    with state.session_factory() as session:
+        drive = session.get(m.Drive, serial)
+        if drive is None:
+            raise HTTPException(status_code=404, detail="drive not found")
+        run = _latest_printable_run(session, serial)
+        if run is None:
+            return RedirectResponse(
+                url=f"/drives/{serial}?flash=err&msg=no+completed+run+to+print",
+                status_code=303,
+            )
+        ok, msg = _print_label_for_run(request, state, drive, run)
+    status = "ok" if ok else "err"
+    from urllib.parse import quote
+
+    return RedirectResponse(
+        url=f"/drives/{serial}?flash={status}&msg={quote(msg)}",
+        status_code=303,
+    )
+
+
+@router.post("/batches/{batch_id}/print-labels")
+def print_batch_labels(request: Request, batch_id: str) -> RedirectResponse:
+    state = get_state()
+    with state.session_factory() as session:
+        batch = session.get(m.Batch, batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="batch not found")
+        # Only print labels for runs that actually graded (skip fails + incomplete)
+        runs = (
+            session.query(m.TestRun)
+            .filter_by(batch_id=batch_id)
+            .filter(m.TestRun.completed_at.isnot(None))
+            .filter(m.TestRun.grade.isnot(None))
+            .filter(m.TestRun.grade != "fail")
+            .all()
+        )
+        printed = 0
+        failures: list[str] = []
+        for run in runs:
+            drive = session.get(m.Drive, run.drive_serial)
+            if drive is None:
+                continue
+            ok, msg = _print_label_for_run(request, state, drive, run)
+            if ok:
+                printed += 1
+            else:
+                failures.append(f"{run.drive_serial}: {msg}")
+                # If the very first label fails because of config, abort early
+                # rather than spam identical errors for every drive.
+                if "no printer configured" in msg or "printer dispatch failed" in msg:
+                    break
+    from urllib.parse import quote
+
+    if failures and printed == 0:
+        return RedirectResponse(
+            url=f"/batches/{batch_id}?flash=err&msg={quote(failures[0])}",
+            status_code=303,
+        )
+    summary = f"printed {printed}/{len(runs)} labels"
+    if failures:
+        summary += f" · {len(failures)} failed"
+    return RedirectResponse(
+        url=f"/batches/{batch_id}?flash=ok&msg={quote(summary)}",
+        status_code=303,
+    )
+
 
 @router.get("/batches/{batch_id}", response_class=HTMLResponse)
 def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
@@ -427,13 +570,22 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
                 "report_url": r.report_url,
                 "error_message": r.error_message,
                 "quick_mode": bool(r.quick_mode),
+                "printable": bool(
+                    r.completed_at and r.grade and r.grade != "fail"
+                ),
             }
             for r in runs
         ]
+        printable_count = sum(1 for r in runs_view if r["printable"])
     return templates.TemplateResponse(
         request,
         "batch_detail.html",
-        {"batch": batch_view, "runs": runs_view, "totals": totals},
+        {
+            "batch": batch_view,
+            "runs": runs_view,
+            "totals": totals,
+            "printable_count": printable_count,
+        },
     )
 
 
