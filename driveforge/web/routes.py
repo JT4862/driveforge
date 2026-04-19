@@ -134,9 +134,9 @@ def _bay_card(
         last_grade = last_run.grade if last_run else None
         last_tested = last_run.completed_at if last_run else None
         last_phase = last_run.phase if last_run else None
+        last_quick = bool(last_run.quick_mode) if last_run else False
         last_error = None
         if last_run and last_run.error_message:
-            # Extract the "[phase]" portion and a short summary for the card
             msg = last_run.error_message.strip().split("\n", 1)[0]
             last_error = msg[:80] + ("…" if len(msg) > 80 else "")
         return {
@@ -149,6 +149,7 @@ def _bay_card(
             "last_grade": last_grade,
             "last_tested": last_tested,
             "last_phase": last_phase,
+            "last_quick": last_quick,
             "last_error": last_error,
         }
     return {"bay": display_bay, "state": "empty", "key": bay_key}

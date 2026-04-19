@@ -24,7 +24,7 @@
     <tr>
       <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
       <td>{{ r.phase|replace("_", " ") }}{% if r.quick_mode %} <span class="pill">quick</span>{% endif %}</td>
-      <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
+      <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}"{% if r.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ r.grade|upper }}{% if r.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% else %}—{% endif %}</td>
       <td class="muted">{{ r.error_message[:120] if r.error_message else "—" }}{% if r.error_message and r.error_message|length > 120 %}…{% endif %}</td>
       <td>{% if r.report_url %}<a href="{{ r.report_url }}">view</a>{% else %}—{% endif %}</td>
     </tr>

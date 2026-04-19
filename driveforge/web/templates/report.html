@@ -9,11 +9,20 @@
 <body class="report-body">
 <main class="report-card">
   <header class="report-head">
-    <h1>DriveForge Certified</h1>
+    <h1>DriveForge Certified{% if run.quick_mode %} <span class="provisional-tag">provisional</span>{% endif %}</h1>
     <div class="report-grade">
-      <span class="grade grade-{{ run.grade }} grade-xl">{{ run.grade|upper }}</span>
+      <span class="grade grade-{{ run.grade }} grade-xl">{{ run.grade|upper }}{% if run.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>
     </div>
   </header>
+  {% if run.quick_mode %}
+  <div class="banner warn-banner" style="margin-bottom: 20px;">
+    <strong>⚠ Quick-mode result.</strong> This drive passed DriveForge's quick-mode pipeline
+    (pre-SMART + short self-test + secure erase + post-SMART + grading) but
+    <strong>badblocks surface scan</strong> and the <strong>long SMART self-test</strong> were skipped.
+    Treat this grade as a preliminary health check, not a full production certification.
+    Re-run the drive in full mode to upgrade.
+  </div>
+  {% endif %}
   <dl class="kv wide">
     <dt>Model</dt><dd>{{ drive.model }}</dd>
     <dt>Serial</dt><dd>{{ drive.serial }}</dd>

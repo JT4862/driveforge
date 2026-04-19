@@ -32,7 +32,7 @@
     {% if bay.last_grade == "fail" %}
       <span class="grade grade-fail grade-corner">✗ FAIL</span>
     {% else %}
-      <span class="grade grade-{{ bay.last_grade }} grade-corner">{{ bay.last_grade|upper }}</span>
+      <span class="grade grade-{{ bay.last_grade }} grade-corner"{% if bay.last_quick %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ bay.last_grade|upper }}{% if bay.last_quick %}<sup class="provisional">*</sup>{% endif %}</span>
     {% endif %}
   </div>
   {% endif %}

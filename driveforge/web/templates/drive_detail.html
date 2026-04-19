@@ -15,7 +15,7 @@
   {% endif %}
   <dl class="kv">
     <dt>Phase</dt><dd>{{ latest.phase|replace("_", " ") }}</dd>
-    <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}">{{ latest.grade|upper }}</span>{% else %}—{% endif %}</dd>
+    <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}"{% if latest.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ latest.grade|upper }}{% if latest.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% if latest.quick_mode %} <span class="muted small">(provisional — quick mode)</span>{% endif %}{% else %}—{% endif %}</dd>
     {% if suggested_use %}
     <dt>Suggested use</dt><dd class="muted">{{ suggested_use }}</dd>
     {% endif %}

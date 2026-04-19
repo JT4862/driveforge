@@ -16,7 +16,7 @@
       <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
       <td>{{ r.model }}</td>
       <td>{% if r.capacity_tb %}{{ "%.1f"|format(r.capacity_tb) }} TB{% else %}—{% endif %}</td>
-      <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
+      <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}"{% if r.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ r.grade|upper }}{% if r.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% else %}—{% endif %}</td>
       <td>{{ "{:,}".format(r.power_on_hours) if r.power_on_hours else "—" }}</td>
       <td>{{ r.duration or "—" }}</td>
       <td>{% if r.quick_mode %}<span class="pill">quick</span>{% else %}<span class="pill">full</span>{% endif %}</td>
