@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from driveforge.core import badblocks, grading, smart, telemetry, webhook
+from driveforge.core import badblocks, enclosures, grading, smart, telemetry, webhook
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -50,6 +50,8 @@ class Orchestrator:
     async def start_batch(self, drives: list[Drive], source: str | None = None) -> str:
         """Create a batch and kick off testing for each drive."""
         batch_id = uuid.uuid4().hex[:12]
+        # Refresh the bay plan so new enclosures / drives show up
+        plan = self.state.refresh_bay_plan()
         with self.state.session_factory() as session:
             batch = m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC))
             session.add(batch)
@@ -67,32 +69,40 @@ class Orchestrator:
                         )
                     )
             session.commit()
-        for bay, drive in enumerate(drives, start=1):
-            self.state.bay_assignments[bay] = drive.serial
-            task = asyncio.create_task(self._run_drive(batch_id, bay, drive))
+        used_keys = set(self.state.bay_assignments.keys())
+        for drive in drives:
+            bay_key = enclosures.bay_key_for_device(plan, drive.device_path)
+            if bay_key is None:
+                if plan.virtual_bay_count > 0:
+                    bay_key = enclosures.assign_virtual_bay(plan, used_keys)
+                if bay_key is None:
+                    bay_key = enclosures.unbayed_key(drive.serial)
+            used_keys.add(bay_key)
+            self.state.bay_assignments[bay_key] = drive.serial
+            task = asyncio.create_task(self._run_drive(batch_id, bay_key, drive))
             self._tasks[drive.serial] = task
         # Fire webhook when all drives in this batch complete
         asyncio.create_task(self._on_batch_complete(batch_id, [d.serial for d in drives]))
         return batch_id
 
-    async def _run_drive(self, batch_id: str, bay: int, drive: Drive) -> None:
+    async def _run_drive(self, batch_id: str, bay_key: str, drive: Drive) -> None:
         """Per-drive pipeline."""
         async with self._semaphore:
             try:
-                await self._execute_pipeline(batch_id, bay, drive)
+                await self._execute_pipeline(batch_id, bay_key, drive)
             except Exception:
                 logger.exception("drive pipeline failed for %s", drive.serial)
             finally:
-                self.state.bay_assignments.pop(bay, None)
+                self.state.bay_assignments.pop(bay_key, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
 
-    async def _execute_pipeline(self, batch_id: str, bay: int, drive: Drive) -> None:
+    async def _execute_pipeline(self, batch_id: str, bay_key: str, drive: Drive) -> None:
         with self.state.session_factory() as session:
             test_run = m.TestRun(
                 drive_serial=drive.serial,
                 batch_id=batch_id,
-                bay=bay,
+                bay=None,  # numeric bay deprecated — bay_key tracked in-memory instead
                 phase="queued",
             )
             session.add(test_run)

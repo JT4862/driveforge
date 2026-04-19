@@ -58,6 +58,9 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 @media (max-width: 900px) { .bay-grid { grid-template-columns: repeat(2, 1fr); } }
 .bay-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; color: var(--text); min-height: 140px; text-decoration: none; transition: border-color 0.1s; }
 .bay-card.active:hover { border-color: var(--accent); }
+.bay-card.installed { opacity: 0.85; }
+.bay-card.installed:hover { border-color: var(--muted); }
+.bay-card.installed .phase.idle { color: var(--muted); font-style: italic; }
 .bay-card.empty { border-style: dashed; opacity: 0.55; }
 .bay-num { font-family: var(--mono); color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .bay-body { display: flex; flex-direction: column; gap: 4px; }
@@ -169,3 +172,9 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
 .bay-card .sparkline { margin-top: 6px; }
 .bay-card .sparkline svg { width: 100%; height: 18px; }
 .bay-card .sparkline path { fill: none; stroke: var(--ok); stroke-width: 1.4; }
+
+/* Enclosure groups */
+.enclosure { margin-bottom: 24px; }
+.enclosure-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.enclosure-head h3 { margin: 0; font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.enclosure-head .muted { font-size: 12px; }

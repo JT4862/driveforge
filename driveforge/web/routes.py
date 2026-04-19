@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import joinedload
 
 from driveforge.core import drive as drive_mod
+from driveforge.core import enclosures
 from driveforge.daemon.state import get_state
 from driveforge.db import models as m
 
@@ -19,43 +20,113 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 router = APIRouter()
 
 
-def _bay_view(state, session) -> list[dict]:
-    """Compose the 8-bay dashboard view from current orchestrator + DB state."""
-    bays: list[dict] = []
-    for bay_num in range(1, 9):
-        serial = state.bay_assignments.get(bay_num)
-        if serial is None:
-            bays.append({"bay": bay_num, "empty": True})
-            continue
+def _bay_card(
+    state,
+    session,
+    bay_key: str,
+    display_bay: int,
+    *,
+    installed_drive: "drive_mod.Drive | None" = None,
+) -> dict:
+    """Render a single bay card.
+
+    Three visual states:
+      - empty: slot has no drive installed
+      - installed (idle): drive is physically in the slot but no test running
+      - active: drive is under test (assigned in bay_assignments)
+    """
+    serial = state.bay_assignments.get(bay_key)
+    if serial:
         drive = session.get(m.Drive, serial)
-        if drive is None:
-            bays.append({"bay": bay_num, "empty": True})
-            continue
-        bays.append(
-            {
-                "bay": bay_num,
-                "empty": False,
+        if drive is not None:
+            return {
+                "bay": display_bay,
+                "state": "active",
+                "key": bay_key,
                 "serial": serial,
                 "model": drive.model,
                 "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
                 "phase": state.active_phase.get(serial, "queued"),
                 "percent": state.active_percent.get(serial, 0.0),
             }
+    if installed_drive is not None:
+        return {
+            "bay": display_bay,
+            "state": "installed",
+            "key": bay_key,
+            "serial": installed_drive.serial,
+            "model": installed_drive.model,
+            "capacity_tb": installed_drive.capacity_tb,
+        }
+    return {"bay": display_bay, "state": "empty", "key": bay_key}
+
+
+def _bay_view(state, session) -> dict:
+    """Compose the grouped bay view from enclosure plan + orchestrator state."""
+    plan = state.bay_plan
+    # One-shot lsblk to get serials for every device currently present.
+    # Used to show "installed but idle" bays.
+    discovered = {d.device_path: d for d in drive_mod.discover()}
+
+    enclosure_groups = []
+    for enc_idx, enc in enumerate(plan.enclosures):
+        bays = []
+        for slot in enc.slots:
+            key = f"e{enc_idx}:s{slot.slot_number}"
+            installed = discovered.get(slot.device) if slot.device else None
+            card = _bay_card(state, session, key, slot.slot_number + 1, installed_drive=installed)
+            card["slot_number"] = slot.slot_number
+            card["device"] = slot.device
+            bays.append(card)
+        enclosure_groups.append(
+            {
+                "label": enc.label,
+                "vendor": enc.vendor,
+                "sg_device": enc.sg_device,
+                "slot_count": enc.slot_count,
+                "populated_count": enc.populated_count,
+                "bays": bays,
+            }
         )
-    return bays
+    virtual_bays = []
+    if not plan.has_real_enclosures:
+        for i in range(plan.virtual_bay_count):
+            key = f"v{i}"
+            virtual_bays.append(_bay_card(state, session, key, i + 1))
+    # Unbayed drives — any drive that wasn't in a real enclosure slot and
+    # isn't in a virtual bay. Always render them so NVMe / USB drives are
+    # visible even without an active test.
+    in_slot_devices = {slot.device for enc in plan.enclosures for slot in enc.slots if slot.device}
+    unbayed: list[dict] = []
+    for device_path, d in discovered.items():
+        if device_path in in_slot_devices:
+            continue
+        # Skip if a virtual bay has claimed it
+        if any(v.get("serial") == d.serial for v in virtual_bays):
+            continue
+        key = enclosures.unbayed_key(d.serial)
+        card = _bay_card(state, session, key, 0, installed_drive=d)
+        unbayed.append(card)
+    return {
+        "enclosures": enclosure_groups,
+        "virtual_bays": virtual_bays,
+        "unbayed": unbayed,
+        "has_real_enclosures": plan.has_real_enclosures,
+        "total_bays": plan.total_bays,
+    }
 
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
     with state.session_factory() as session:
-        bays = _bay_view(state, session)
+        view = _bay_view(state, session)
         batch_count = session.query(m.Batch).count()
         drive_count = session.query(m.Drive).count()
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"bays": bays, "batch_count": batch_count, "drive_count": drive_count},
+        {"view": view, "batch_count": batch_count, "drive_count": drive_count},
     )
 
 
@@ -64,8 +135,8 @@ def bays_partial(request: Request) -> HTMLResponse:
     """HTMX polling endpoint for live dashboard refresh."""
     state = get_state()
     with state.session_factory() as session:
-        bays = _bay_view(state, session)
-    return templates.TemplateResponse(request, "_bays.html", {"bays": bays})
+        view = _bay_view(state, session)
+    return templates.TemplateResponse(request, "_bays.html", {"view": view})
 
 
 @router.get("/drives/{serial}", response_class=HTMLResponse)
@@ -317,6 +388,12 @@ async def save_daemon(request: Request) -> RedirectResponse:
     port_v = form.get("port")
     if port_v:
         d.port = int(port_v)
+    virtual_v = form.get("virtual_bays")
+    if virtual_v is not None and str(virtual_v).strip() != "":
+        d.virtual_bays = max(0, int(virtual_v))
+        # Re-plan so the dashboard picks up the new count immediately (only
+        # effective when no real enclosures are present)
+        state.refresh_bay_plan()
     restart_needed = old_host != d.host or old_port != d.port
     await _save_settings_or_ignore(request)
     suffix = "&restart=1" if restart_needed else ""

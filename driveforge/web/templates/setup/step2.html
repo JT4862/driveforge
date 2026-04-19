@@ -7,6 +7,27 @@
 </p>
 
 <section class="setup-panel">
+  <h2>Drive bays</h2>
+  {% if plan.has_real_enclosures %}
+    <p class="muted">
+      Detected {{ plan.enclosures|length }} SES enclosure{{ 's' if plan.enclosures|length != 1 else '' }},
+      {{ plan.total_bays }} total bays:
+    </p>
+    <ul class="setup-what">
+    {% for enc in plan.enclosures %}
+      <li>{{ enc.label }} &middot; {{ enc.slot_count }} slots ({{ enc.populated_count }} populated){% if enc.sg_device %} &middot; {{ enc.sg_device }}{% endif %}</li>
+    {% endfor %}
+    </ul>
+  {% else %}
+    <p class="warn">
+      &#9888; No SES enclosure detected. DriveForge will use a virtual-bay
+      fallback ({{ plan.virtual_bay_count }} slots by default; tunable in Settings &rarr; Daemon).
+      This is normal on consumer PCs without a SAS backplane.
+    </p>
+  {% endif %}
+</section>
+
+<section class="setup-panel">
   <h2>Drives</h2>
   {% if drives %}
   <table class="runs">

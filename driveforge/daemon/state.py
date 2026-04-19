@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from driveforge.config import Settings
+from driveforge.core import enclosures
 from driveforge.core.process import FixtureRunner, set_fixture_runner
 from driveforge.db.session import make_engine, init_db, make_session_factory
 
@@ -24,11 +25,24 @@ class DaemonState:
     engine: Engine
     session_factory: sessionmaker
 
-    # In-flight: bay number -> active drive serial. Driven by the orchestrator.
+    # In-flight: global bay id -> active drive serial. Driven by the orchestrator.
     bay_assignments: dict[int, str] = field(default_factory=dict)
     # Latest phase per drive — for fast dashboard rendering
     active_phase: dict[str, str] = field(default_factory=dict)
     active_percent: dict[str, float] = field(default_factory=dict)
+
+    # Cached enclosure discovery. Refreshed on boot + udev events.
+    bay_plan: enclosures.BayPlan = field(
+        default_factory=lambda: enclosures.BayPlan(enclosures=[], virtual_bay_count=0, total_bays=0)
+    )
+
+    def refresh_bay_plan(self) -> enclosures.BayPlan:
+        """Re-discover enclosures. Called on daemon start and udev add/remove."""
+        self.bay_plan = enclosures.build_bay_plan(
+            sys_root=self.settings.daemon.sysfs_root,
+            virtual_bays_fallback=self.settings.daemon.virtual_bays,
+        )
+        return self.bay_plan
 
     @classmethod
     def boot(cls, settings: Settings) -> "DaemonState":
@@ -38,10 +52,17 @@ class DaemonState:
         # Install the fixtures runner if dev mode is active
         if settings.dev_mode and settings.fixtures_dir:
             set_fixture_runner(FixtureRunner(settings.fixtures_dir))
+            # Dev mode also points sysfs at a synthetic tree under the
+            # fixtures dir if one exists
+            synthetic_sys = settings.fixtures_dir / "sys"
+            if synthetic_sys.exists():
+                settings.daemon.sysfs_root = settings.fixtures_dir
         # Ensure runtime dirs exist
         for d in (settings.daemon.state_dir, settings.daemon.pending_labels_dir, settings.daemon.reports_dir):
             Path(d).mkdir(parents=True, exist_ok=True)
-        return cls(settings=settings, engine=engine, session_factory=sf)
+        instance = cls(settings=settings, engine=engine, session_factory=sf)
+        instance.refresh_bay_plan()
+        return instance
 
 
 _STATE: DaemonState | None = None

@@ -80,6 +80,14 @@ class DaemonConfig(BaseModel):
     pending_labels_dir: Path = STATE_DIR_DEFAULT / "pending-labels"
     reports_dir: Path = STATE_DIR_DEFAULT / "reports"
 
+    # Hardware / bays
+    # Fallback slot count when no SES enclosure is detected (consumer PC,
+    # NVMe-only host, etc.). Ignored when real enclosures are present.
+    virtual_bays: int = 8
+    # Root path for sysfs — overridable in tests + dev to point at a
+    # synthetic tree. Production leaves this at "/".
+    sysfs_root: Path = Path("/")
+
 
 class Settings(BaseSettings):
     """Top-level config. Loaded from disk + env."""

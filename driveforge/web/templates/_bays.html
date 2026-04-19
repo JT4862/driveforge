@@ -1,26 +1,69 @@
-<div class="bay-grid">
-  {% for bay in bays %}
-    {% if bay.empty %}
-    <div class="bay-card empty">
-      <div class="bay-num">Bay {{ bay.bay }}</div>
-      <div class="bay-body">
-        <div class="empty-msg">Empty</div>
-        <div class="empty-hint">Insert a drive to enroll</div>
-      </div>
-    </div>
-    {% else %}
-    <a class="bay-card active" href="/drives/{{ bay.serial }}">
-      <div class="bay-num">Bay {{ bay.bay }}</div>
-      <div class="bay-body">
-        <div class="drive-model">{{ bay.model }}</div>
-        <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
-        <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
-        <div class="progress">
-          <div class="bar" style="width: {{ bay.percent }}%"></div>
-        </div>
-        <div class="percent">{{ "%.0f"|format(bay.percent) }}%</div>
-      </div>
-    </a>
-    {% endif %}
-  {% endfor %}
+{% macro bay_card(bay) -%}
+{% if bay.state == "empty" %}
+<div class="bay-card empty">
+  <div class="bay-num">Bay {{ bay.bay }}</div>
+  <div class="bay-body">
+    <div class="empty-msg">Empty</div>
+    <div class="empty-hint">Insert a drive to enroll</div>
+  </div>
 </div>
+{% elif bay.state == "installed" %}
+<a class="bay-card installed" href="/drives/{{ bay.serial }}">
+  <div class="bay-num">Bay {{ bay.bay }}</div>
+  <div class="bay-body">
+    <div class="drive-model">{{ bay.model }}</div>
+    <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
+    <div class="phase idle">idle &middot; not under test</div>
+  </div>
+</a>
+{% else %}
+<a class="bay-card active" href="/drives/{{ bay.serial }}">
+  <div class="bay-num">Bay {{ bay.bay }}</div>
+  <div class="bay-body">
+    <div class="drive-model">{{ bay.model }}</div>
+    <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
+    <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
+    <div class="progress">
+      <div class="bar" style="width: {{ bay.percent }}%"></div>
+    </div>
+    <div class="percent">{{ "%.0f"|format(bay.percent) }}%</div>
+  </div>
+</a>
+{% endif %}
+{%- endmacro %}
+
+{% if view.has_real_enclosures %}
+  {% for enc in view.enclosures %}
+  <section class="enclosure">
+    <header class="enclosure-head">
+      <h3>{{ enc.label }}</h3>
+      <span class="muted">{{ enc.populated_count }}/{{ enc.slot_count }} slots populated{% if enc.sg_device %} &middot; {{ enc.sg_device }}{% endif %}</span>
+    </header>
+    <div class="bay-grid">
+      {% for bay in enc.bays %}{{ bay_card(bay) }}{% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+{% else %}
+  <section class="enclosure">
+    <header class="enclosure-head">
+      <h3>Virtual bays</h3>
+      <span class="muted">{{ view.virtual_bays|length }} slots &middot; no SES enclosure detected, using virtual-bay fallback</span>
+    </header>
+    <div class="bay-grid">
+      {% for bay in view.virtual_bays %}{{ bay_card(bay) }}{% endfor %}
+    </div>
+  </section>
+{% endif %}
+
+{% if view.unbayed %}
+<section class="enclosure">
+  <header class="enclosure-head">
+    <h3>Unbayed drives</h3>
+    <span class="muted">{{ view.unbayed|length }} drives not in any enclosure slot (NVMe / directly-attached)</span>
+  </header>
+  <div class="bay-grid">
+    {% for bay in view.unbayed %}{{ bay_card(bay) }}{% endfor %}
+  </div>
+</section>
+{% endif %}

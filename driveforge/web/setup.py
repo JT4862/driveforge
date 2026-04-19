@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from driveforge import config as cfg
 from driveforge.core import drive as drive_mod
+from driveforge.core import enclosures
 from driveforge.core.process import run
 from driveforge.daemon.state import get_state
 
@@ -83,6 +84,8 @@ def setup_step(request: Request, step: int) -> HTMLResponse:
         ctx["drives"] = drive_mod.discover()
         ctx["network"] = _network_snapshot()
         ctx["ipmi_ok"] = _ipmi_available()
+        plan = state.refresh_bay_plan()
+        ctx["plan"] = plan
     elif step == 3:
         ctx["printer_models"] = [
             "QL-800",
