@@ -18,7 +18,7 @@
     <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}">{{ latest.grade|upper }}</span>{% else %}—{% endif %}</dd>
     <dt>Started</dt><dd>{{ latest.started_at.isoformat() if latest.started_at else "—" }}</dd>
     <dt>Completed</dt><dd>{{ latest.completed_at.isoformat() if latest.completed_at else "—" }}</dd>
-    <dt>Power-on hours</dt><dd>{{ "{:,}".format(latest.power_on_hours_at_test) if latest.power_on_hours_at_test else "—" }}</dd>
+    <dt>Power-on hours</dt><dd>{{ "{:,}".format(latest.power_on_hours_at_test) if latest.power_on_hours_at_test else "—" }}{% if latest.power_on_hours_at_test %} ({{ "%.1f"|format(latest.power_on_hours_at_test / 8760) }} years continuous){% endif %}</dd>
     <dt>Reallocated sectors</dt><dd>{{ latest.reallocated_sectors if latest.reallocated_sectors is not none else "—" }}</dd>
     <dt>SMART status</dt><dd>{% if latest.smart_status_passed %}passed{% elif latest.smart_status_passed is false %}failed{% else %}—{% endif %}</dd>
   </dl>
