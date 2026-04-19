@@ -58,9 +58,17 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 @media (max-width: 900px) { .bay-grid { grid-template-columns: repeat(2, 1fr); } }
 .bay-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; color: var(--text); min-height: 140px; text-decoration: none; transition: border-color 0.1s; }
 .bay-card.active:hover { border-color: var(--accent); }
-.bay-card.installed { opacity: 0.85; }
+.bay-card.installed { opacity: 0.9; }
 .bay-card.installed:hover { border-color: var(--muted); }
 .bay-card.installed .phase.idle { color: var(--muted); font-style: italic; }
+.bay-card.installed .phase.last-test { color: var(--text); font-weight: 500; }
+.bay-card.installed.graded { opacity: 1; }
+.bay-card.installed.graded.graded-A { border-left: 3px solid var(--grade-a); }
+.bay-card.installed.graded.graded-B { border-left: 3px solid var(--grade-b); }
+.bay-card.installed.graded.graded-C { border-left: 3px solid var(--grade-c); }
+.bay-card.installed.graded.graded-fail { border-left: 3px solid var(--grade-fail); }
+.bay-card .bay-num { display: flex; justify-content: space-between; align-items: center; }
+.grade-corner { font-size: 11px; padding: 1px 6px; }
 .bay-card.empty { border-style: dashed; opacity: 0.55; }
 
 /* Phase-colored active bay cards — left border + progress bar color */

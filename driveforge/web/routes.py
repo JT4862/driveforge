@@ -122,6 +122,17 @@ def _bay_card(
                 "eta_label": f"~{_format_duration(eta)}" if eta else None,
             }
     if installed_drive is not None:
+        # Look up the most recent completed test for this drive so the card
+        # shows "Grade B · tested 2026-04-19" instead of a bland "idle" line.
+        last_run = (
+            session.query(m.TestRun)
+            .filter_by(drive_serial=installed_drive.serial)
+            .filter(m.TestRun.completed_at.isnot(None))
+            .order_by(m.TestRun.completed_at.desc())
+            .first()
+        )
+        last_grade = last_run.grade if last_run else None
+        last_tested = last_run.completed_at if last_run else None
         return {
             "bay": display_bay,
             "state": "installed",
@@ -129,6 +140,8 @@ def _bay_card(
             "serial": installed_drive.serial,
             "model": installed_drive.model,
             "capacity_tb": installed_drive.capacity_tb,
+            "last_grade": last_grade,
+            "last_tested": last_tested,
         }
     return {"bay": display_bay, "state": "empty", "key": bay_key}
 
