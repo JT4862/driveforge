@@ -88,22 +88,55 @@ def _bay_view(state, session) -> dict:
                 "bays": bays,
             }
         )
+    # Partition discovered drives: bay-eligible (SATA / SAS) go into virtual
+    # bays; NVMe / USB go to the unbayed section (they're never in a front
+    # bay on this hardware class).
+    in_slot_devices = {slot.device for enc in plan.enclosures for slot in enc.slots if slot.device}
+    bay_eligible: list = []
+    unbayed_eligible: list = []
+    for d in discovered.values():
+        if d.device_path in in_slot_devices:
+            continue
+        if d.transport in (drive_mod.Transport.NVME, drive_mod.Transport.USB):
+            unbayed_eligible.append(d)
+        else:
+            bay_eligible.append(d)
+    # Stable ordering so drives don't jump bays across refreshes
+    bay_eligible.sort(key=lambda d: d.serial)
+
     virtual_bays = []
     if not plan.has_real_enclosures:
+        # Build a stable serial → virtual-bay mapping for idle drives so the
+        # dashboard shows them parked in bays instead of bucketed as unbayed.
+        idle_serials_in_order = [
+            d.serial for d in bay_eligible
+            if d.serial not in state.bay_assignments.values()
+        ]
+        virtual_map: dict[int, "drive_mod.Drive"] = {}
+        slot_idx = 0
+        for d in bay_eligible:
+            if d.serial in state.bay_assignments.values():
+                continue  # active drive — bay_assignments already tracks it
+            while slot_idx < plan.virtual_bay_count and f"v{slot_idx}" in state.bay_assignments:
+                slot_idx += 1
+            if slot_idx >= plan.virtual_bay_count:
+                break
+            virtual_map[slot_idx] = d
+            slot_idx += 1
         for i in range(plan.virtual_bay_count):
             key = f"v{i}"
-            virtual_bays.append(_bay_card(state, session, key, i + 1))
-    # Unbayed drives — any drive that wasn't in a real enclosure slot and
-    # isn't in a virtual bay. Always render them so NVMe / USB drives are
-    # visible even without an active test.
-    in_slot_devices = {slot.device for enc in plan.enclosures for slot in enc.slots if slot.device}
+            installed = virtual_map.get(i)
+            virtual_bays.append(_bay_card(state, session, key, i + 1, installed_drive=installed))
+        # Any bay_eligible drives that didn't fit fall through to unbayed
+        assigned_serials = {d.serial for d in virtual_map.values()}
+        overflow = [d for d in bay_eligible if d.serial not in assigned_serials
+                    and d.serial not in state.bay_assignments.values()]
+    else:
+        overflow = []
+
+    # Unbayed section: NVMe / USB drives + overflow from virtual bays
     unbayed: list[dict] = []
-    for device_path, d in discovered.items():
-        if device_path in in_slot_devices:
-            continue
-        # Skip if a virtual bay has claimed it
-        if any(v.get("serial") == d.serial for v in virtual_bays):
-            continue
+    for d in unbayed_eligible + overflow:
         key = enclosures.unbayed_key(d.serial)
         card = _bay_card(state, session, key, 0, installed_drive=d)
         unbayed.append(card)

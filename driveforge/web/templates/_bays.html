@@ -47,8 +47,8 @@
 {% else %}
   <section class="enclosure">
     <header class="enclosure-head">
-      <h3>Virtual bays</h3>
-      <span class="muted">{{ view.virtual_bays|length }} slots &middot; no SES enclosure detected, using virtual-bay fallback</span>
+      <h3>Bays</h3>
+      <span class="muted">{{ view.virtual_bays|length }} slots &middot; direct-attach (no SES)</span>
     </header>
     <div class="bay-grid">
       {% for bay in view.virtual_bays %}{{ bay_card(bay) }}{% endfor %}
@@ -59,8 +59,8 @@
 {% if view.unbayed %}
 <section class="enclosure">
   <header class="enclosure-head">
-    <h3>Unbayed drives</h3>
-    <span class="muted">{{ view.unbayed|length }} drives not in any enclosure slot (NVMe / directly-attached)</span>
+    <h3>Other drives</h3>
+    <span class="muted">{{ view.unbayed|length }} drive{{ 's' if view.unbayed|length != 1 else '' }} outside the bay grid (NVMe / USB / overflow)</span>
   </header>
   <div class="bay-grid">
     {% for bay in view.unbayed %}{{ bay_card(bay) }}{% endfor %}

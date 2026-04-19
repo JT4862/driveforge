@@ -19,10 +19,11 @@
     {% endfor %}
     </ul>
   {% else %}
-    <p class="warn">
-      &#9888; No SES enclosure detected. DriveForge will use a virtual-bay
-      fallback ({{ plan.virtual_bay_count }} slots by default; tunable in Settings &rarr; Daemon).
-      This is normal on consumer PCs without a SAS backplane.
+    <p class="muted">
+      Direct-attach or no-SES hardware &mdash; using virtual bays
+      ({{ plan.virtual_bay_count }} slots; tunable in Settings &rarr; Daemon).
+      Common on R720 LFF direct-attach backplanes and consumer PCs.
+      Drives plugged into front bays will still appear on the dashboard.
     </p>
   {% endif %}
 </section>
