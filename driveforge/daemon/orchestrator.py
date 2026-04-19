@@ -20,6 +20,7 @@ import uuid
 from datetime import UTC, datetime
 
 from driveforge.core import badblocks, blinker, enclosures, erase, grading, process, smart, telemetry, webhook
+from driveforge.core import drive as drive_mod
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -172,21 +173,30 @@ class Orchestrator:
                 # report tran=sas from lsblk but aren't rotational, so we can't
                 # just key off transport.
                 rota = None if d.rotation_rate is None else d.rotation_rate > 0
+                # Refine manufacturer via smartctl INQUIRY on SAS drives; for
+                # SATA this still returns the prefix-parse result set by
+                # discover(). One smartctl call per enrolled drive, not per
+                # dashboard refresh — safe from the D-state pile-up pattern.
+                mfr = drive_mod.probe_manufacturer(d.device_path, d.model) or d.manufacturer
                 existing = session.get(m.Drive, d.serial)
                 if existing is None:
                     session.add(
                         m.Drive(
                             serial=d.serial,
                             model=d.model,
+                            manufacturer=mfr,
                             capacity_bytes=d.capacity_bytes,
                             transport=d.transport.value,
                             firmware_version=d.firmware_version,
                             rotational=rota,
                         )
                     )
-                elif existing.rotational is None and rota is not None:
-                    # Backfill legacy rows enrolled before this column existed.
-                    existing.rotational = rota
+                else:
+                    # Backfill legacy rows + upgrade stale manufacturer.
+                    if existing.rotational is None and rota is not None:
+                        existing.rotational = rota
+                    if not existing.manufacturer and mfr:
+                        existing.manufacturer = mfr
             session.commit()
         # Stop any "safe to pull" blinkers for drives we're re-enrolling so
         # they don't race real pipeline I/O.

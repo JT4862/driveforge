@@ -39,6 +39,7 @@ class Drive(BaseModel):
     device_path: str
     rotation_rate: int | None = None  # 0 for SSD
     firmware_version: str | None = None
+    manufacturer: str | None = None
     bay: int | None = None  # assigned by the orchestrator
 
     @property
@@ -91,6 +92,82 @@ def _root_device_name() -> str | None:
         # strip trailing partition (e.g. p2)
         return name.split("p")[0] if "p" in name else name
     return name.rstrip("0123456789")
+
+
+# Known drive-manufacturer prefixes. Keys are what shows up verbatim in the
+# first token of the model string (INQUIRY vendor on SCSI, or model_name on
+# ATA). Values are the normalized display name.
+_MFR_PREFIXES = {
+    "INTEL": "Intel",
+    "SAMSUNG": "Samsung",
+    "SEAGATE": "Seagate",
+    "WDC": "Western Digital",
+    "WD": "Western Digital",
+    "HGST": "HGST",
+    "TOSHIBA": "Toshiba",
+    "KIOXIA": "Kioxia",
+    "KINGSTON": "Kingston",
+    "CRUCIAL": "Crucial",
+    "MICRON": "Micron",
+    "SANDISK": "SanDisk",
+    "SK": "SK Hynix",  # "SK hynix" → first token is "SK"
+    "HYNIX": "SK Hynix",
+    "HITACHI": "Hitachi",
+    "FUJITSU": "Fujitsu",
+    "SOLIDIGM": "Solidigm",
+    "IBM": "IBM",
+    "DELL": "Dell",
+    "HP": "HP",
+    "NETAPP": "NetApp",
+}
+
+
+def detect_manufacturer(model: str, vendor_hint: str | None = None) -> str | None:
+    """Best-effort manufacturer detection.
+
+    Prefers an explicit `vendor_hint` (e.g. from smartctl INQUIRY on SAS
+    drives), falls back to parsing the model string against a known-prefix
+    list. Seagate SATA/SAS models conventionally start with "ST" followed by
+    digits ("ST300MM0006", "ST4000NM0023") so we handle that pattern too.
+    Returns None if nothing matches; the caller should leave the column
+    null rather than showing a wrong guess.
+    """
+    if vendor_hint:
+        clean = vendor_hint.strip().upper()
+        # smartctl on a SATA-behind-SAT tunnel often reports "ATA" as vendor;
+        # that's not a real manufacturer, so ignore it and fall through.
+        if clean and clean != "ATA":
+            return _MFR_PREFIXES.get(clean, vendor_hint.strip())
+    if not model:
+        return None
+    first_token = model.strip().split(maxsplit=1)[0].upper()
+    if first_token in _MFR_PREFIXES:
+        return _MFR_PREFIXES[first_token]
+    # Seagate model numbers like "ST300MM0006" — "ST" followed by a digit is
+    # the Seagate drive-code convention going back 30+ years.
+    if len(first_token) >= 3 and first_token.startswith("ST") and first_token[2].isdigit():
+        return "Seagate"
+    return None
+
+
+def probe_manufacturer(device_path: str, model: str) -> str | None:
+    """Enrollment-time probe: smartctl INQUIRY vendor + model fallback.
+
+    Only called at start_batch time (once per drive), never in the dashboard
+    hot path. Timeout-protected so a hung drive can't stall enrollment.
+    """
+    import json as _json
+
+    vendor_hint: str | None = None
+    try:
+        result = run(["smartctl", "--json", "-i", device_path], timeout=15.0)
+        if result.stdout:
+            data = _json.loads(result.stdout)
+            vendor_hint = (data.get("vendor") or "").strip() or None
+    except Exception:  # noqa: BLE001
+        # smartctl failed / hung / not-JSON → fall back to model parse only
+        vendor_hint = None
+    return detect_manufacturer(model, vendor_hint=vendor_hint)
 
 
 def detect_true_transport(device_path: str) -> Transport | None:
@@ -173,15 +250,20 @@ def discover(include_root: bool = False) -> list[Drive]:
         # (HTMX polls every 3s), piling up concurrent smartctl processes on
         # the same drive and timing out. Instead, the orchestrator re-probes
         # right before dispatching secure_erase — the only place it matters.
+        model_str = (entry.get("model") or "Unknown").strip()
         drives.append(
             Drive(
                 serial=serial,
-                model=(entry.get("model") or "Unknown").strip(),
+                model=model_str,
                 capacity_bytes=int(entry.get("size") or 0),
                 transport=transport,
                 device_path=device_path,
                 rotation_rate=(0 if rota_int == 0 else (7200 if rota_int == 1 else None)),
                 firmware_version=entry.get("rev"),
+                # Fast prefix parse only — smartctl probe happens at enrollment
+                # (probe_manufacturer) so the discovery hot path stays
+                # smartctl-free.
+                manufacturer=detect_manufacturer(model_str),
             )
         )
     return drives

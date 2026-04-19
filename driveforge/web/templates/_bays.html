@@ -12,7 +12,7 @@
   <a class="bay-card-main" href="/drives/{{ bay.serial }}">
     <div class="bay-num">Bay {{ bay.bay }}</div>
     <div class="bay-body">
-      <div class="drive-model">{{ bay.model }}</div>
+      <div class="drive-model">{% if bay.manufacturer %}<span class="mfr">{{ bay.manufacturer }}</span> {% endif %}{{ bay.model }}</div>
       <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
       {% if bay.last_grade == "fail" %}
         <div class="phase last-test fail-text">✗ Failed {{ bay.last_tested.strftime('%Y-%m-%d') }}{% if bay.last_phase %} &middot; {{ bay.last_phase|replace("_", " ") }}{% endif %}</div>
@@ -41,7 +41,7 @@
 <a class="bay-card active phase-{{ bay.phase_class }}" href="/drives/{{ bay.serial }}">
   <div class="bay-num">Bay {{ bay.bay }}</div>
   <div class="bay-body">
-    <div class="drive-model">{{ bay.model }}</div>
+    <div class="drive-model">{% if bay.manufacturer %}<span class="mfr">{{ bay.manufacturer }}</span> {% endif %}{{ bay.model }}</div>
     <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
     <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
     {% if bay.sublabel %}<div class="phase-sub">{{ bay.sublabel }}</div>{% endif %}

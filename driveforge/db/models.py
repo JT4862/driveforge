@@ -39,6 +39,10 @@ class Drive(Base):
 
     serial: Mapped[str] = mapped_column(String(64), primary_key=True)
     model: Mapped[str] = mapped_column(String(128))
+    # Normalized manufacturer name ("Intel", "Seagate", etc.). Populated at
+    # enrollment via smartctl INQUIRY vendor (SAS) or model-string prefix
+    # parse (SATA/NVMe). Displayed on dashboard bay cards.
+    manufacturer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     capacity_bytes: Mapped[int] = mapped_column(Integer, default=0)
     transport: Mapped[str] = mapped_column(String(16), default="unknown")
     # True = spinning HDD, False = SSD/NVMe, None = unknown (legacy rows).

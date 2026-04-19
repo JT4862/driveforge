@@ -128,6 +128,7 @@ def _bay_card(
                 "key": bay_key,
                 "serial": serial,
                 "model": drive.model,
+                "manufacturer": drive.manufacturer,
                 "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
                 "phase": phase,
                 "phase_class": _PHASE_CLASS.get(phase, "info"),
@@ -154,12 +155,18 @@ def _bay_card(
         if last_run and last_run.error_message:
             msg = last_run.error_message.strip().split("\n", 1)[0]
             last_error = msg[:80] + ("…" if len(msg) > 80 else "")
+        # Prefer the DB's manufacturer (populated at enrollment via smartctl
+        # INQUIRY) over the live lsblk-driven prefix parse — it's more
+        # authoritative for SAS drives. Falls back to the discovered value.
+        db_drive = session.get(m.Drive, installed_drive.serial)
+        mfr = (db_drive.manufacturer if db_drive else None) or installed_drive.manufacturer
         return {
             "bay": display_bay,
             "state": "installed",
             "key": bay_key,
             "serial": installed_drive.serial,
             "model": installed_drive.model,
+            "manufacturer": mfr,
             "capacity_tb": installed_drive.capacity_tb,
             "last_grade": last_grade,
             "last_tested": last_tested,
