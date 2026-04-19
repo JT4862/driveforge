@@ -19,7 +19,9 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from driveforge.core import badblocks, enclosures, erase, grading, process, smart, telemetry, webhook
+from pathlib import Path
+
+from driveforge.core import badblocks, enclosures, erase, firmware, grading, process, smart, telemetry, webhook
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -243,10 +245,9 @@ class Orchestrator:
         if short_ok is False:
             raise PipelineFailure("short_test", "SMART short self-test reported failure")
 
-        # Phase 3: firmware check (check-only — apply is Phase 7+)
+        # Phase 3: firmware check (check-only, never auto-flashes here)
         await self._advance(run_id, "firmware_check", drive)
-        if dev_mode:
-            await asyncio.sleep(0.2)
+        await self._run_firmware_check(run_id, drive, dev_mode=dev_mode)
 
         # Phase 4: secure erase (ALWAYS runs — this is the destructive step)
         await self._advance(run_id, "secure_erase", drive)
@@ -364,6 +365,52 @@ class Orchestrator:
                 return status.last_result_passed
         logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
         return None
+
+    async def _run_firmware_check(self, run_id: int, drive: Drive, *, dev_mode: bool) -> None:
+        """Look up the drive's firmware version in the DB. Check-only.
+
+        Never flashes. Logs the outcome to the phase log and stores it on
+        the test run so the UI can surface "up to date" vs "update
+        available" vs "OEM-locked" etc.
+        """
+        if dev_mode:
+            await asyncio.sleep(0.2)
+            return
+        db_path = Path(__file__).parent.parent / "data" / "firmware_db.yaml"
+        custom = self.state.settings.integrations.firmware_db_url
+        if custom:
+            self._log(drive.serial, f"firmware DB: custom URL configured ({custom}) — using bundled for now")
+        try:
+            check = firmware.check_firmware(drive, db_path=db_path)
+        except Exception as exc:  # noqa: BLE001
+            self._log(drive.serial, f"firmware check failed: {exc}")
+            return
+        if check.update_available and check.entry:
+            self._log(
+                drive.serial,
+                f"firmware: {check.current_version} → {check.entry.version} available (not auto-applying; see Settings → Firmware)",
+            )
+        elif check.current_version and check.latest_version:
+            self._log(drive.serial, f"firmware: {check.current_version} (up to date)")
+        else:
+            self._log(drive.serial, f"firmware: {check.reason}")
+        # Persist for the drive-detail UI
+        with self.state.session_factory() as session:
+            run = session.get(m.TestRun, run_id)
+            if run is not None:
+                existing_rules = list(run.rules) if run.rules else []
+                existing_rules.append(
+                    {
+                        "name": "firmware_check",
+                        "passed": True,  # check-only is always "passed"
+                        "detail": check.reason,
+                        "current_version": check.current_version,
+                        "latest_version": check.latest_version,
+                        "update_available": check.update_available,
+                    }
+                )
+                run.rules = existing_rules
+                session.commit()
 
     async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool) -> None:
         if dev_mode:
