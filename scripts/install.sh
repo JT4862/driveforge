@@ -81,7 +81,10 @@ systemctl daemon-reload
 # Avahi usually autostarts on Debian but enable explicitly so
 # driveforge.local is reachable on first boot.
 systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
-systemctl enable --now driveforge-daemon.service
+systemctl enable driveforge-daemon.service
+# Restart (not just start) so re-running install.sh after a code update
+# picks up the new package instead of keeping the old daemon in memory.
+systemctl restart driveforge-daemon.service
 ok "driveforge-daemon running"
 
 # Detect primary IP + DHCP status for the access summary
