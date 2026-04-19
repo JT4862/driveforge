@@ -118,6 +118,102 @@ duplicated logic.
 
 ---
 
+## User Interface
+
+### Guiding principle
+
+DriveForge is a **start-it-and-walk-away** tool: a batch runs for days, humans
+glance at it once or twice a day. The primary screen is therefore a live
+dashboard of bay state, not a menu tree. Both the TUI (Textual) and web UI
+(HTMX) are thin clients over the same daemon REST surface, so screen flows
+are shared.
+
+### Navigation (tabs / left rail)
+
+1. **Dashboard** — live state of the 8 bays (home)
+2. **Batches** — active + historical batch list
+3. **History** — all drives ever processed, searchable
+4. **Settings** — grading thresholds, printer, CRM, n8n
+5. **System** — daemon health, logs, R720 vitals, printer status
+
+### Dashboard
+
+Eight bay cards in a grid. Empty bays grayed out with a "Scan for drive"
+affordance. A primary **[+ New Batch]** button at the top, a corner
+**[Abort All]** with confirm modal for emergencies. Per-card content:
+
+```
+┌─ Bay 3 ──────────────────┐
+│ HGST HUS726T6TALE6L4     │
+│ SN: V8G6X4RL  • 6.0 TB   │
+│ Phase 5: badblocks (2/4) │
+│ ████████░░░░ 68%  ETA 9h │
+│ SMART: ● clean           │
+└──────────────────────────┘
+```
+
+### Drive detail (click a card)
+
+- Full SMART table: pre-test vs current, deltas highlighted
+- Live log tail from the tmux session
+- Phase timeline — done / running / queued
+- Live telemetry charts (temperature over test run, see Telemetry below)
+- Actions: **Abort**, **Pause**, **Restart current phase**, **Attach to
+  tmux** (TUI only), **Print label** (if graded), **Override grade** (with
+  required note, Phase 6+ only)
+
+### Batches / History / Settings / System
+
+- **Batches**: list with A/B/C/F breakdown per batch; drill-in shows drives;
+  actions: **Export CSV**, **Re-sync to CRM**, **Reprint any label**
+- **History**: flat searchable drive table (serial/model/grade/date/batch);
+  read-only detail view with prominent **Reprint label** button
+- **Settings**: four panels — Grading (in-app threshold editor, writes
+  `/etc/driveforge/grading.yaml`), Printer (test print, template preview,
+  paper-out diagnostic), CRM (endpoint + token + test connection),
+  Integrations (n8n webhook, firmware DB source)
+- **System**: daemon status, DB size, printer status, R720 vitals, last 50
+  errors with drive context
+
+### Keybinds (TUI and web)
+
+`d` dashboard · `b` batches · `h` history · `,` settings · `?` help · `Esc` back
+
+### Explicitly out of MVP
+
+- **Grade override**: invites gaming the rubric. Added only when a genuine
+  false-grade case shows up.
+- **Tmux attach**: TUI-only feature; painful to implement in web, not worth it.
+
+---
+
+## Telemetry
+
+Per-drive and chassis-level signals collected across a test run. Stored in
+SQLite as a simple time-series table (one row per drive per poll, ~30s
+interval) and exposed as line charts in the drive detail + dashboard views.
+
+| Signal | Source | Granularity | Purpose |
+|---|---|---|---|
+| Drive temperature (°C) | SMART attrs 190/194 via `smartctl` | Per drive, 30s | Spot overheating drives mid-run |
+| Drive airflow temp (°C) | SMART attr 190 where available | Per drive, 30s | Cross-check inlet vs drive temp |
+| Chassis power (W) | `ipmitool` against local iDRAC | Server-wide, 30s | Batch-level power cost reporting |
+| Derived: power-hours per drive | chassis_watts apportioned across active drives × duration | Per drive, per phase | Rough per-drive energy attribution |
+
+True per-bay wattage is not measurable on stock R720 hardware (no per-bay
+instrumentation on the backplane) and is explicitly out of scope. If ever
+needed, a shelf of inline USB/SATA power meters could be added as a Phase
+8+ stretch.
+
+Telemetry data feeds:
+- **Drive detail page**: temp + derived power-hours chart for that drive
+- **Dashboard**: small sparkline per bay card (current temp trend)
+- **Batch complete report**: total kWh drawn, peak/avg chassis power
+- **Grading**: optional thermal-excursion flag if any drive exceeded a
+  configured temp ceiling during test (threshold in `grading.yaml`)
+
+---
+
 ## Test Workflow
 
 Per-drive pipeline. Each drive runs inside a tmux session named
@@ -197,8 +293,12 @@ POH:      12,432 h
 [QR code → Twenty CRM record]
 ```
 
-The QR code encodes a URL to the drive's Twenty CRM `HardwareAsset` record,
-with a fallback to the daemon's local report page if CRM is unreachable.
+The QR code encodes a URL to the drive's **public report landing page**
+served by DriveForge (see Phase 6), which links to the Twenty CRM
+`HardwareAsset` record. The landing page is a read-only view of the drive's
+cert: model, serial, grade, test date, key SMART attributes, and thermal
+chart from the test run. Exposed externally via Cloudflare Tunnel so anyone
+with the label can scan and verify without a CRM login.
 
 ---
 
@@ -314,11 +414,12 @@ driveforge/
 |---|---|---|
 | **1** | Daemon skeleton; drive discovery; runs smartctl + badblocks + erase on one drive; logs to `/var/log/driveforge` | 1 week |
 | **2** | Textual TUI drives daemon via REST; 8-drive parallel orchestration via tmux | 1 week |
-| **3** | Grading logic + pre/post SMART diff; writes reports; first real A/B/C verdicts | 1 week |
+| **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; first real A/B/C verdicts | 1 week |
 | **4** | Thermal printer + cert label design; auto-prints on completion | 3-4 days |
 | **5** | Twenty CRM sync (HardwareAsset + RefurbBatch); n8n webhook on batch complete | 3-4 days |
-| **6** | Web UI (FastAPI + HTMX) as primary interface; TUI becomes fallback | 1 week |
-| **7+** | NVMe firmware auto-update; SATA/SAS firmware lookup DB; Cloudflare Tunnel for remote; public release | ongoing |
+| **6** | Web UI (FastAPI + HTMX) as primary interface; telemetry charts; public-facing QR landing page + Cloudflare Tunnel exposure; TUI becomes fallback | 1-2 weeks |
+| **7** | NVMe firmware auto-update | 3-4 days |
+| **8+** | SATA/SAS firmware lookup DB; community drive-stats DB; public OSS release | ongoing |
 
 Total to usable MVP (Phases 1-5): ~4 weeks of focused time.
 
@@ -363,7 +464,9 @@ real drive testing.
 
 ### Homelab (easy, Phase 7+)
 - **n8n workflow** triggered on batch completion → summary email / Slack
-- **Cloudflare Tunnel** so the web UI is reachable from anywhere
+  (basic webhook is Phase 5; richer workflows layered on later)
+- **Remote admin access** via Cloudflare Tunnel — the public QR landing page
+  ships in Phase 6; full admin UI exposure is a separate Phase 7+ decision
 - No ArgoCD — DriveForge is inherently tied to physical R720 hardware, not
   a Kubernetes workload
 
