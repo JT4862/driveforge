@@ -138,14 +138,24 @@ class SelfTestStatus(BaseModel):
 
 
 def self_test_status(device: str) -> SelfTestStatus:
-    """Query SMART self-test progress. Works for ATA; parses NVMe status separately."""
+    """Query SMART self-test progress via smartctl (sync wrapper)."""
     result = run(["smartctl", "--json", "-c", "-l", "selftest", device])
     if not result.stdout:
         return SelfTestStatus(in_progress=False)
+    return parse_self_test_status(result.stdout)
+
+
+def parse_self_test_status(payload: str) -> SelfTestStatus:
+    """Pure-function parser for `smartctl --json -c -l selftest` output.
+
+    Handles ATA (`ata_smart_data.self_test`), NVMe
+    (`nvme_self_test_log.current_self_test_operation`), and SAS
+    (`scsi_self_test_N.result`) log shapes. Returns in-progress + pass/fail.
+    """
     import json as _json
 
     try:
-        data = _json.loads(result.stdout)
+        data = _json.loads(payload)
     except _json.JSONDecodeError:
         return SelfTestStatus(in_progress=False)
     # ATA path: ata_smart_data.self_test.status
@@ -180,24 +190,33 @@ def self_test_status(device: str) -> SelfTestStatus:
             last_passed = True
         elif any(word in st for word in ("fail", "error", "aborted")):
             last_passed = False
-    # SCSI / SAS self-test log — scsi_self_test_0 is most recent. In-progress
-    # reported via status code 15 per SPC-4.
-    for i in range(20):
-        entry = data.get(f"scsi_self_test_{i}")
-        if not entry:
-            continue
-        sts = (entry.get("status") or {}).get("value")
-        if sts == 15:
-            # In progress — percent_remaining is often available separately
-            pct_remaining = data.get("scsi_percentage_of_test_remaining")
-            return SelfTestStatus(
-                in_progress=True,
-                percent_complete=(100 - int(pct_remaining)) if isinstance(pct_remaining, int) else None,
-                status_string=(entry.get("status") or {}).get("string", ""),
-            )
-        if isinstance(sts, int) and last_passed is None:
-            last_passed = sts == 0  # 0 = "Completed without error"
-            break
+    # SCSI / SAS self-test log. smartctl --json emits scsi_self_test_0
+    # through _19 with this shape:
+    #   {"code": {...}, "result": {"value": N, "string": "..."}, ...}
+    # result.value semantics per SPC-4 / smartmontools:
+    #   0 = Completed without error
+    #   1 = Aborted by user (SEND DIAGNOSTIC)
+    #   2 = Aborted by reset or power cycle
+    #   3 = Unknown error
+    #   4-8 = Various failure segments
+    #   15 = Self-test in progress
+    # (The first entry with result.value=15 indicates a running test.)
+    if last_passed is None:
+        for i in range(20):
+            entry = data.get(f"scsi_self_test_{i}")
+            if not entry:
+                continue
+            result = entry.get("result") or {}
+            result_val = result.get("value")
+            if result_val == 15:
+                return SelfTestStatus(
+                    in_progress=True,
+                    percent_complete=None,  # SAS log doesn't expose progress %
+                    status_string=result.get("string", ""),
+                )
+            if isinstance(result_val, int):
+                last_passed = result_val == 0
+                break  # Most recent completed entry is authoritative
     # NVMe path: self_test_log.current_self_test_operation
     nvme = (data.get("nvme_self_test_log") or {}).get("current_self_test_operation") or {}
     nvme_op_value = nvme.get("value")
@@ -212,5 +231,5 @@ def self_test_status(device: str) -> SelfTestStatus:
     return SelfTestStatus(
         in_progress=False,
         last_result_passed=last_passed,
-        status_string=status.get("string", ""),
+        status_string=status.get("string", "") if isinstance(status, dict) else "",
     )
