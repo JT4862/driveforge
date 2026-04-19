@@ -40,7 +40,15 @@ ok "system packages installed"
 log "Creating driveforge user and directories..."
 id -u driveforge >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/driveforge driveforge
 install -d -o driveforge -g driveforge -m 0755 /var/lib/driveforge /var/log/driveforge
-install -d -m 0755 /etc/driveforge
+# Daemon needs to write to /etc/driveforge/ when the user saves settings in
+# the UI — owned by the driveforge user, not root.
+install -d -o driveforge -g driveforge -m 0755 /etc/driveforge
+
+# Safety: if a previous install left a DB in place, preserve it. A fresh
+# install.sh re-run should never clobber test history.
+if [[ -f /var/lib/driveforge/driveforge.db ]]; then
+  warn "Existing DB found at /var/lib/driveforge/driveforge.db — preserving."
+fi
 ok "user + dirs ready"
 
 log "Installing DriveForge Python package..."
@@ -70,6 +78,9 @@ log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/
 systemctl daemon-reload
+# Avahi usually autostarts on Debian but enable explicitly so
+# driveforge.local is reachable on first boot.
+systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 systemctl enable --now driveforge-daemon.service
 ok "driveforge-daemon running"
 
