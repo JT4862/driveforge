@@ -223,11 +223,98 @@ def history(request: Request) -> HTMLResponse:
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
+    saved = request.query_params.get("saved")
+    restart = request.query_params.get("restart")
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {"settings": state.settings},
+        {
+            "settings": state.settings,
+            "saved_panel": saved,
+            "restart_required": restart == "1",
+        },
     )
+
+
+async def _save_settings_or_ignore(request: Request) -> None:
+    from driveforge import config as cfg
+
+    try:
+        cfg.save(request.app.state.orchestrator.state.settings)
+    except PermissionError:
+        pass
+
+
+@router.post("/settings/grading")
+async def save_grading(request: Request) -> RedirectResponse:
+    state = get_state()
+    form = await request.form()
+    g = state.settings.grading
+    for key in (
+        "grade_a_reallocated_max",
+        "grade_b_reallocated_max",
+        "grade_c_reallocated_max",
+    ):
+        v = form.get(key)
+        if v is not None and str(v).strip() != "":
+            setattr(g, key, int(v))
+    g.fail_on_pending_sectors = form.get("fail_on_pending_sectors") == "on"
+    g.fail_on_offline_uncorrectable = form.get("fail_on_offline_uncorrectable") == "on"
+    temp = (form.get("thermal_excursion_c") or "").strip()
+    g.thermal_excursion_c = int(temp) if temp else None
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/settings?saved=grading", status_code=303)
+
+
+@router.post("/settings/printer")
+async def save_printer(request: Request) -> RedirectResponse:
+    state = get_state()
+    form = await request.form()
+    p = state.settings.printer
+    p.model = (form.get("model") or "").strip() or None
+    p.connection = (form.get("connection") or "usb").strip()
+    p.label_roll = (form.get("label_roll") or "").strip() or None
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/settings?saved=printer", status_code=303)
+
+
+@router.post("/settings/integrations")
+async def save_integrations(request: Request) -> RedirectResponse:
+    state = get_state()
+    form = await request.form()
+    i = state.settings.integrations
+    i.webhook_url = (form.get("webhook_url") or "").strip() or None
+    i.cloudflare_tunnel_hostname = (
+        (form.get("cloudflare_tunnel_hostname") or "").strip() or None
+    )
+    i.firmware_db_url = (form.get("firmware_db_url") or "").strip() or None
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/settings?saved=integrations", status_code=303)
+
+
+@router.post("/settings/daemon")
+async def save_daemon(request: Request) -> RedirectResponse:
+    state = get_state()
+    form = await request.form()
+    d = state.settings.daemon
+    old_host = d.host
+    old_port = d.port
+    d.host = (form.get("host") or d.host).strip()
+    port_v = form.get("port")
+    if port_v:
+        d.port = int(port_v)
+    restart_needed = old_host != d.host or old_port != d.port
+    await _save_settings_or_ignore(request)
+    suffix = "&restart=1" if restart_needed else ""
+    return RedirectResponse(url=f"/settings?saved=daemon{suffix}", status_code=303)
+
+
+@router.post("/settings/wizard-replay")
+async def replay_wizard(request: Request) -> RedirectResponse:
+    state = get_state()
+    state.settings.setup_completed = False
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/setup/1", status_code=303)
 
 
 @router.get("/reports/{serial}", response_class=HTMLResponse)

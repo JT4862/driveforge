@@ -6,45 +6,133 @@
   <div class="subtitle">All DriveForge configuration lives here. Changes persist to <code>/etc/driveforge/driveforge.yaml</code>.</div>
 </section>
 
-<section class="panel">
-  <h2>Grading thresholds</h2>
-  <dl class="kv">
-    <dt>Grade A max reallocated sectors</dt><dd>{{ settings.grading.grade_a_reallocated_max }}</dd>
-    <dt>Grade B max reallocated sectors</dt><dd>{{ settings.grading.grade_b_reallocated_max }}</dd>
-    <dt>Grade C max reallocated sectors</dt><dd>{{ settings.grading.grade_c_reallocated_max }}</dd>
-    <dt>Fail on pending sectors</dt><dd>{{ settings.grading.fail_on_pending_sectors }}</dd>
-    <dt>Fail on offline uncorrectable</dt><dd>{{ settings.grading.fail_on_offline_uncorrectable }}</dd>
-    <dt>Thermal excursion threshold (°C)</dt><dd>{{ settings.grading.thermal_excursion_c or "disabled" }}</dd>
-  </dl>
-</section>
+{% if restart_required %}
+<div class="banner warn-banner">
+  &#9888; Daemon bind host or port changed. Restart the daemon for the change to take effect:
+  <code>sudo systemctl restart driveforge-daemon</code>
+</div>
+{% endif %}
+
+<form class="panel" method="post" action="/settings/grading">
+  <div class="panel-head">
+    <h2>Grading thresholds</h2>
+    {% if saved_panel == "grading" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Grade A — max reallocated sectors</span>
+    <input type="number" name="grade_a_reallocated_max" value="{{ settings.grading.grade_a_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade B — max reallocated sectors</span>
+    <input type="number" name="grade_b_reallocated_max" value="{{ settings.grading.grade_b_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade C — max reallocated sectors</span>
+    <input type="number" name="grade_c_reallocated_max" value="{{ settings.grading.grade_c_reallocated_max }}" min="0">
+  </label>
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_pending_sectors"{% if settings.grading.fail_on_pending_sectors %} checked{% endif %}>
+    <span>Fail on any current-pending-sector count &gt; 0</span>
+  </label>
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_offline_uncorrectable"{% if settings.grading.fail_on_offline_uncorrectable %} checked{% endif %}>
+    <span>Fail on any offline-uncorrectable count &gt; 0</span>
+  </label>
+  <label class="field">
+    <span>Thermal excursion — demote to C above this °C (blank to disable)</span>
+    <input type="number" name="thermal_excursion_c" value="{{ settings.grading.thermal_excursion_c or '' }}" min="0">
+  </label>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save grading</button>
+  </div>
+</form>
+
+<form class="panel" method="post" action="/settings/printer">
+  <div class="panel-head">
+    <h2>Printer</h2>
+    {% if saved_panel == "printer" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Model</span>
+    <select name="model">
+      <option value="">— not configured —</option>
+      {% for m in ["QL-800", "QL-810W", "QL-820NWBc", "QL-1100", "QL-1110NWBc"] %}
+      <option value="{{ m }}"{% if settings.printer.model == m %} selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Connection</span>
+    <select name="connection">
+      {% for c in ["usb", "network", "bluetooth"] %}
+      <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>Label roll</span>
+    <select name="label_roll">
+      <option value="">— auto-detect (QL-820/810/1100 only) —</option>
+      {% for r in ["DK-1209", "DK-1208", "DK-1201", "DK-1221", "DK-22210"] %}
+      <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save printer</button>
+  </div>
+</form>
+
+<form class="panel" method="post" action="/settings/integrations">
+  <div class="panel-head">
+    <h2>Integrations</h2>
+    {% if saved_panel == "integrations" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Outbound webhook URL</span>
+    <input type="url" name="webhook_url" value="{{ settings.integrations.webhook_url or '' }}" placeholder="https://n8n.example.com/webhook/driveforge">
+  </label>
+  <label class="field">
+    <span>Cloudflare Tunnel hostname</span>
+    <input type="text" name="cloudflare_tunnel_hostname" value="{{ settings.integrations.cloudflare_tunnel_hostname or '' }}" placeholder="driveforge.example.com">
+  </label>
+  <label class="field">
+    <span>Firmware DB URL (blank = bundled default)</span>
+    <input type="url" name="firmware_db_url" value="{{ settings.integrations.firmware_db_url or '' }}" placeholder="https://example.com/firmware_db.yaml">
+  </label>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save integrations</button>
+  </div>
+</form>
+
+<form class="panel" method="post" action="/settings/daemon">
+  <div class="panel-head">
+    <h2>Daemon</h2>
+    {% if saved_panel == "daemon" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Bind host</span>
+    <input type="text" name="host" value="{{ settings.daemon.host }}">
+  </label>
+  <label class="field">
+    <span>Bind port</span>
+    <input type="number" name="port" value="{{ settings.daemon.port }}" min="1" max="65535">
+  </label>
+  <p class="muted small">Changes to host or port require a daemon restart to take effect.</p>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save daemon</button>
+  </div>
+</form>
 
 <section class="panel">
-  <h2>Printer</h2>
-  <dl class="kv">
-    <dt>Model</dt><dd>{{ settings.printer.model or "not configured" }}</dd>
-    <dt>Connection</dt><dd>{{ settings.printer.connection }}</dd>
-    <dt>Label roll</dt><dd>{{ settings.printer.label_roll or "auto-detect" }}</dd>
-  </dl>
+  <div class="panel-head">
+    <h2>Advanced</h2>
+  </div>
+  <p class="muted">Replay the first-run setup wizard. Existing settings stay in place until you change them during the wizard.</p>
+  <form method="post" action="/settings/wizard-replay">
+    <div class="form-actions">
+      <button type="submit" class="btn">Run setup wizard again</button>
+    </div>
+  </form>
 </section>
-
-<section class="panel">
-  <h2>Integrations</h2>
-  <dl class="kv">
-    <dt>Outbound webhook URL</dt><dd>{{ settings.integrations.webhook_url or "(not configured)" }}</dd>
-    <dt>Cloudflare Tunnel hostname</dt><dd>{{ settings.integrations.cloudflare_tunnel_hostname or "(not configured)" }}</dd>
-    <dt>Firmware DB URL</dt><dd>{{ settings.integrations.firmware_db_url or "bundled" }}</dd>
-  </dl>
-</section>
-
-<section class="panel">
-  <h2>Daemon</h2>
-  <dl class="kv">
-    <dt>Bind host</dt><dd>{{ settings.daemon.host }}</dd>
-    <dt>Bind port</dt><dd>{{ settings.daemon.port }}</dd>
-    <dt>Database</dt><dd>{{ settings.daemon.db_path }}</dd>
-    <dt>Reports directory</dt><dd>{{ settings.daemon.reports_dir }}</dd>
-  </dl>
-</section>
-
-<p class="muted">Edit forms land in Phase 6 / first-run wizard. For now, settings are read-only here.</p>
 {% endblock %}
