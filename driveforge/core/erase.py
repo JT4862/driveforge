@@ -21,29 +21,37 @@ class EraseError(RuntimeError):
     pass
 
 
-def _sata_secure_erase(device: str, password: str = "driveforge") -> None:
+def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str | None = None) -> None:
     # Enable security with a throwaway password
-    r1 = run(["hdparm", "--user-master", "u", "--security-set-pass", password, device])
+    r1 = run(
+        ["hdparm", "--user-master", "u", "--security-set-pass", password, device],
+        owner=owner,
+    )
     if not r1.ok:
         raise EraseError(f"failed to set ATA security pass on {device}: {r1.stderr}")
     # Issue the secure erase
     r2 = run(
         ["hdparm", "--user-master", "u", "--security-erase", password, device],
         timeout=6 * 60 * 60,  # generous — can run for hours
+        owner=owner,
     )
     if not r2.ok:
         raise EraseError(f"security-erase failed on {device}: {r2.stderr}")
 
 
-def _sas_secure_erase(device: str) -> None:
-    r = run(["sg_format", "--format", device], timeout=12 * 60 * 60)
+def _sas_secure_erase(device: str, *, owner: str | None = None) -> None:
+    r = run(["sg_format", "--format", device], timeout=12 * 60 * 60, owner=owner)
     if not r.ok:
         raise EraseError(f"sg_format failed on {device}: {r.stderr}")
 
 
-def _nvme_format(device: str) -> None:
+def _nvme_format(device: str, *, owner: str | None = None) -> None:
     # -s 1 = user-data erase; -f = force, suppress prompts
-    r = run(["nvme", "format", "-s", "1", "-f", device], timeout=60 * 60)
+    r = run(
+        ["nvme", "format", "-s", "1", "-f", device],
+        timeout=60 * 60,
+        owner=owner,
+    )
     if not r.ok:
         raise EraseError(f"nvme format failed on {device}: {r.stderr}")
 
@@ -65,10 +73,10 @@ def secure_erase(drive: Drive) -> None:
             effective = refined
 
     if effective == Transport.SATA:
-        _sata_secure_erase(drive.device_path)
+        _sata_secure_erase(drive.device_path, owner=drive.serial)
     elif effective == Transport.SAS:
-        _sas_secure_erase(drive.device_path)
+        _sas_secure_erase(drive.device_path, owner=drive.serial)
     elif effective == Transport.NVME:
-        _nvme_format(drive.device_path)
+        _nvme_format(drive.device_path, owner=drive.serial)
     else:
         raise EraseError(f"no erase path for transport={effective}")

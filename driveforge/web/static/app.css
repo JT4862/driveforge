@@ -204,6 +204,7 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
 .destructive-box p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; }
 .destructive-box .field input { border-color: rgba(248,81,73,0.45); }
 .destructive-box .field input:focus { border-color: var(--fail); }
+.destructive-note { font-size: 12px; color: var(--warn); line-height: 1.5; margin-top: -4px; }
 
 /* Telemetry charts */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }

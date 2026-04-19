@@ -48,6 +48,12 @@
       Data on those drives will be permanently destroyed. The OS boot disk is
       automatically excluded.
     </p>
+    <p class="destructive-note">
+      <strong>Do not abort a SAS drive mid-erase.</strong> <code>sg_format</code>
+      can leave the drive in a <em>medium format corrupted</em> state that
+      requires a full re-format to recover. Aborting during other phases
+      (pre-SMART, short test, badblocks) is always safe.
+    </p>
     <label class="field">
       <span>Type <code>ERASE</code> to confirm</span>
       <input type="text" name="confirm" placeholder="ERASE" required autocomplete="off">

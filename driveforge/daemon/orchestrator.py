@@ -19,7 +19,7 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from driveforge.core import badblocks, enclosures, erase, grading, smart, telemetry, webhook
+from driveforge.core import badblocks, enclosures, erase, grading, process, smart, telemetry, webhook
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -128,13 +128,21 @@ class Orchestrator:
         return batch_id
 
     async def abort_all(self) -> int:
-        """Cancel every in-flight drive task. Returns how many were cancelled."""
+        """Cancel every in-flight drive task + kill spawned subprocesses.
+
+        Returns how many drives were aborted.
+        """
         cancelled = 0
         for serial, task in list(self._tasks.items()):
             if not task.done():
+                # Kill any subprocess still holding the drive BEFORE cancelling
+                # the asyncio task — otherwise orphan processes keep running
+                # in thread pool executors with no way for asyncio to reach them.
+                killed = process.kill_owner(serial)
+                if killed:
+                    logger.warning("abort_all: killed %d subprocess(es) for %s", killed, serial)
                 task.cancel()
                 cancelled += 1
-        # Event-loop yield so cancellations propagate, then clear state
         await asyncio.sleep(0)
         self.state.bay_assignments.clear()
         self.state.active_phase.clear()
@@ -144,10 +152,13 @@ class Orchestrator:
         return cancelled
 
     async def abort_drive(self, serial: str) -> bool:
-        """Cancel one drive's pipeline."""
+        """Cancel one drive's pipeline + kill its subprocesses."""
         task = self._tasks.get(serial)
         if task is None or task.done():
             return False
+        killed = process.kill_owner(serial)
+        if killed:
+            logger.warning("abort_drive: killed %d subprocess(es) for %s", killed, serial)
         task.cancel()
         await asyncio.sleep(0)
         logger.warning("aborted drive %s", serial)
