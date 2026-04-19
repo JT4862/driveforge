@@ -17,6 +17,38 @@ cert-labeled drives come out — ready for the homelab.
 
 ---
 
+## What it looks like
+
+![DriveForge dashboard — live bay grid showing tested drives with grades](docs/screenshots/dashboard.png)
+
+The **dashboard** is the home screen — one card per physical drive bay, grouped
+by SAS enclosure (or falling back to virtual bays on direct-attach backplanes).
+Each card shows at a glance whether the drive is empty, installed-idle, actively
+testing, or carries a previous test result (pass / quick-mode pass / fail).
+
+![Drive detail page — full test-run history, SMART attributes, thermal chart, phase log](docs/screenshots/drive-detail.png)
+
+Click a bay card to see **full drive detail**: grade + rationale, suggested use
+tier, SMART attributes, test duration, temperature during test, phase-by-phase
+log output, hardware info, and full test history across every batch the drive
+has ever been in.
+
+![Public cert report — QR-coded, no-login, grading rationale included](docs/screenshots/report.png)
+
+Each completed drive gets a **public cert page** at `/reports/<serial>` — the
+target of the QR code on the printed label. No login required. Shows grade,
+rationale, SMART attrs, and test date. Quick-mode results are clearly marked
+as provisional. Exposable externally via Cloudflare Tunnel.
+
+![New batch form — drive selection, quick-mode toggle, type-ERASE confirm gate](docs/screenshots/new-batch.png)
+
+Starting a batch requires typing **ERASE** to confirm — every drive you select
+will be secure-erased. Quick mode (skip badblocks + long self-test) is a
+checkbox for faster turnaround on drives you don't need a full certification
+for.
+
+---
+
 ## What it does
 
 1. Auto-discovers drives on plug-in (udev hotplug) and the attached SAS
@@ -25,10 +57,10 @@ cert-labeled drives come out — ready for the homelab.
    JBOD expansion):
    - Pre-test SMART baseline
    - SMART short self-test
-   - Firmware check (opt-in auto-update for NVMe)
+   - Firmware version logged (manual updates only)
    - Secure erase (SATA `hdparm` / SAS `sg_format` / NVMe `nvme format`)
-   - `badblocks` destructive write/read
-   - SMART long self-test
+   - `badblocks` destructive write/read (skipped in quick mode)
+   - SMART long self-test (skipped in quick mode)
    - Post-test SMART diff → grade (A / B / C / fail) with per-rule rationale
    - Thermal printer cert label (Brother QL family)
    - Optional outbound webhook (n8n / Zapier / any HTTPS endpoint)
