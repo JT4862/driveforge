@@ -122,16 +122,61 @@ _MFR_PREFIXES = {
 }
 
 
-def detect_manufacturer(model: str, vendor_hint: str | None = None) -> str | None:
+# OEM firmware-revision signatures. Big-iron vendors (Dell, HP, NetApp, IBM)
+# buy raw drives from the actual manufacturers (Seagate, WD, HGST, Toshiba)
+# and flash a vendor-customized firmware before reselling them in their own
+# servers. The drive's INQUIRY VENDOR keeps reporting the real manufacturer
+# ("SEAGATE", "WDC"), but the firmware-revision string carries the OEM
+# signature. We use that to retag the drive with the OEM brand the operator
+# (and the chassis sticker) recognize.
+#
+# Patterns are matched against the firmware revision string; first match wins
+# and overrides any vendor/prefix-based detection.
+import re as _re  # noqa: E402
+
+_OEM_FIRMWARE_PATTERNS = [
+    # Dell-customized Seagate enterprise SAS drives. Confirmed on
+    # ST300MM0006 LS08 + LS0A pulled from a Dell PowerEdge. Vanilla retail
+    # Seagate ships these as "0003" or "B005" — the LS prefix is Dell's.
+    (_re.compile(r"^LS[0-9A-F]{2}$"), "Dell"),
+    # HP/HPE-customized Seagate/HGST drives commonly use HPGx / HPDx.
+    (_re.compile(r"^HP[A-Z0-9]{2}$"), "HPE"),
+    # NetApp-customized: NA0x.
+    (_re.compile(r"^NA[0-9A-F]{2}$"), "NetApp"),
+]
+
+
+def _detect_oem_from_firmware(firmware: str | None) -> str | None:
+    if not firmware:
+        return None
+    fw = firmware.strip().upper()
+    for pattern, name in _OEM_FIRMWARE_PATTERNS:
+        if pattern.match(fw):
+            return name
+    return None
+
+
+def detect_manufacturer(
+    model: str,
+    vendor_hint: str | None = None,
+    firmware: str | None = None,
+) -> str | None:
     """Best-effort manufacturer detection.
 
-    Prefers an explicit `vendor_hint` (e.g. from smartctl INQUIRY on SAS
-    drives), falls back to parsing the model string against a known-prefix
-    list. Seagate SATA/SAS models conventionally start with "ST" followed by
-    digits ("ST300MM0006", "ST4000NM0023") so we handle that pattern too.
+    Resolution order:
+      1. OEM firmware signature (Dell LS0x, HP HPGx, NetApp NAxx) — wins
+         even when INQUIRY VENDOR says the underlying manufacturer, because
+         the operator and the chassis sticker think of it as the OEM brand.
+      2. Explicit `vendor_hint` (e.g. smartctl INQUIRY on SAS drives).
+      3. Model-string prefix parse against the known-vendor list.
+      4. The "ST<digit>..." Seagate drive-code convention.
+
     Returns None if nothing matches; the caller should leave the column
     null rather than showing a wrong guess.
     """
+    oem = _detect_oem_from_firmware(firmware)
+    if oem:
+        return oem
     if vendor_hint:
         clean = vendor_hint.strip().upper()
         # smartctl on a SATA-behind-SAT tunnel often reports "ATA" as vendor;
@@ -150,24 +195,37 @@ def detect_manufacturer(model: str, vendor_hint: str | None = None) -> str | Non
     return None
 
 
-def probe_manufacturer(device_path: str, model: str) -> str | None:
-    """Enrollment-time probe: smartctl INQUIRY vendor + model fallback.
+def probe_manufacturer(
+    device_path: str,
+    model: str,
+    firmware: str | None = None,
+) -> str | None:
+    """Enrollment-time probe: smartctl INQUIRY + OEM firmware override.
 
     Only called at start_batch time (once per drive), never in the dashboard
-    hot path. Timeout-protected so a hung drive can't stall enrollment.
+    hot path. Timeout-protected so a hung drive can't stall enrollment. The
+    `firmware` arg lets the caller pass the lsblk REV value as a fallback
+    when smartctl can't be reached.
     """
     import json as _json
 
     vendor_hint: str | None = None
+    fw_from_smartctl: str | None = None
     try:
         result = run(["smartctl", "--json", "-i", device_path], timeout=15.0)
         if result.stdout:
             data = _json.loads(result.stdout)
             vendor_hint = (data.get("vendor") or "").strip() or None
+            fw_from_smartctl = (data.get("firmware_version") or "").strip() or None
     except Exception:  # noqa: BLE001
-        # smartctl failed / hung / not-JSON → fall back to model parse only
+        # smartctl failed / hung / not-JSON → fall back to model parse + the
+        # firmware we got from lsblk earlier.
         vendor_hint = None
-    return detect_manufacturer(model, vendor_hint=vendor_hint)
+    return detect_manufacturer(
+        model,
+        vendor_hint=vendor_hint,
+        firmware=fw_from_smartctl or firmware,
+    )
 
 
 def detect_true_transport(device_path: str) -> Transport | None:
@@ -251,6 +309,7 @@ def discover(include_root: bool = False) -> list[Drive]:
         # the same drive and timing out. Instead, the orchestrator re-probes
         # right before dispatching secure_erase — the only place it matters.
         model_str = (entry.get("model") or "Unknown").strip()
+        firmware = entry.get("rev")
         drives.append(
             Drive(
                 serial=serial,
@@ -259,11 +318,11 @@ def discover(include_root: bool = False) -> list[Drive]:
                 transport=transport,
                 device_path=device_path,
                 rotation_rate=(0 if rota_int == 0 else (7200 if rota_int == 1 else None)),
-                firmware_version=entry.get("rev"),
-                # Fast prefix parse only — smartctl probe happens at enrollment
-                # (probe_manufacturer) so the discovery hot path stays
-                # smartctl-free.
-                manufacturer=detect_manufacturer(model_str),
+                firmware_version=firmware,
+                # Fast prefix parse + firmware-pattern OEM override. No smartctl
+                # call here — the discovery hot path stays subprocess-free.
+                # probe_manufacturer() runs the full smartctl path at enrollment.
+                manufacturer=detect_manufacturer(model_str, firmware=firmware),
             )
         )
     return drives

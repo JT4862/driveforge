@@ -173,11 +173,15 @@ class Orchestrator:
                 # report tran=sas from lsblk but aren't rotational, so we can't
                 # just key off transport.
                 rota = None if d.rotation_rate is None else d.rotation_rate > 0
-                # Refine manufacturer via smartctl INQUIRY on SAS drives; for
-                # SATA this still returns the prefix-parse result set by
-                # discover(). One smartctl call per enrolled drive, not per
+                # Refine manufacturer via smartctl INQUIRY on SAS drives, with
+                # OEM firmware-pattern override (Dell LS0x, HP HPGx, NetApp NAxx)
+                # taking precedence over the underlying manufacturer's INQUIRY
+                # vendor. One smartctl call per enrolled drive, not per
                 # dashboard refresh — safe from the D-state pile-up pattern.
-                mfr = drive_mod.probe_manufacturer(d.device_path, d.model) or d.manufacturer
+                mfr = (
+                    drive_mod.probe_manufacturer(d.device_path, d.model, firmware=d.firmware_version)
+                    or d.manufacturer
+                )
                 existing = session.get(m.Drive, d.serial)
                 if existing is None:
                     session.add(
@@ -192,10 +196,13 @@ class Orchestrator:
                         )
                     )
                 else:
-                    # Backfill legacy rows + upgrade stale manufacturer.
+                    # Backfill legacy rows + always refresh manufacturer to
+                    # pick up improvements in the OEM-detection heuristic
+                    # (e.g. drives previously logged as "Seagate" that we now
+                    # recognize as Dell-OEM via the LS0x firmware pattern).
                     if existing.rotational is None and rota is not None:
                         existing.rotational = rota
-                    if not existing.manufacturer and mfr:
+                    if mfr and existing.manufacturer != mfr:
                         existing.manufacturer = mfr
             session.commit()
         # Stop any "safe to pull" blinkers for drives we're re-enrolling so

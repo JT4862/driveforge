@@ -157,11 +157,13 @@ def _bay_card(
         if last_run and last_run.error_message:
             msg = last_run.error_message.strip().split("\n", 1)[0]
             last_error = msg[:80] + ("…" if len(msg) > 80 else "")
-        # Prefer the DB's manufacturer (populated at enrollment via smartctl
-        # INQUIRY) over the live lsblk-driven prefix parse — it's more
-        # authoritative for SAS drives. Falls back to the discovered value.
+        # Prefer the live discover-time detection — it always reflects the
+        # newest detection rules (e.g. OEM firmware patterns added after the
+        # last enrollment). Falls back to the DB row when discover couldn't
+        # detect anything. The DB version still gets refreshed every time the
+        # drive is enrolled in a new batch.
         db_drive = session.get(m.Drive, installed_drive.serial)
-        mfr = (db_drive.manufacturer if db_drive else None) or installed_drive.manufacturer
+        mfr = installed_drive.manufacturer or (db_drive.manufacturer if db_drive else None)
         return {
             "bay": display_bay,
             "state": "installed",
