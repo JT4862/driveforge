@@ -41,6 +41,10 @@ class Drive(Base):
     model: Mapped[str] = mapped_column(String(128))
     capacity_bytes: Mapped[int] = mapped_column(Integer, default=0)
     transport: Mapped[str] = mapped_column(String(16), default="unknown")
+    # True = spinning HDD, False = SSD/NVMe, None = unknown (legacy rows).
+    # Drives the ETA coefficient pick so SATA/SAS SSDs aren't misclassified as
+    # HDDs just because lsblk reports tran=sas on a SAS-HBA-attached SSD.
+    rotational: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     firmware_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

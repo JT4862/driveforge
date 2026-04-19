@@ -114,20 +114,39 @@ def parse(payload: str, *, device: str = "") -> SmartSnapshot:
     )
 
 
-def snapshot(device: str) -> SmartSnapshot:
-    """Take a SMART snapshot of a device."""
-    result = run(["smartctl", "--json", "--all", device])
+# Per-call timeouts stop a hung drive from pinning the daemon's worker thread
+# in D-state. The old Seagate ST300MM0006 on this R720 demonstrated the
+# failure mode: firmware stopped responding, every smartctl piled up for the
+# 180s kernel SCSI timeout, dashboard rendering hung. Keep these short enough
+# that a failing drive gets flagged as dead rather than hanging the UI.
+SMARTCTL_INFO_TIMEOUT = 30.0
+SMARTCTL_TEST_START_TIMEOUT = 30.0
+SMARTCTL_TEST_STATUS_TIMEOUT = 15.0
+
+
+def snapshot(device: str, *, timeout: float = SMARTCTL_INFO_TIMEOUT) -> SmartSnapshot:
+    """Take a SMART snapshot of a device.
+
+    Raises `subprocess.TimeoutExpired` if smartctl hangs past `timeout` — the
+    caller should treat that as drive-dead rather than waiting forever.
+    """
+    result = run(["smartctl", "--json", "--all", device], timeout=timeout)
     # smartctl returns non-zero for minor warnings we still want to parse
     if not result.stdout:
         raise RuntimeError(f"smartctl returned no output for {device}: {result.stderr}")
     return parse(result.stdout, device=device)
 
 
-def start_self_test(device: str, *, kind: str = "short") -> None:
+def start_self_test(
+    device: str,
+    *,
+    kind: str = "short",
+    timeout: float = SMARTCTL_TEST_START_TIMEOUT,
+) -> None:
     """Start a SMART self-test. `kind` ∈ {'short', 'long'}."""
     if kind not in {"short", "long"}:
         raise ValueError(f"unsupported self-test kind: {kind}")
-    run(["smartctl", "--test", kind, device], check=True)
+    run(["smartctl", "--test", kind, device], check=True, timeout=timeout)
 
 
 class SelfTestStatus(BaseModel):
@@ -137,9 +156,13 @@ class SelfTestStatus(BaseModel):
     status_string: str = ""
 
 
-def self_test_status(device: str) -> SelfTestStatus:
+def self_test_status(
+    device: str,
+    *,
+    timeout: float = SMARTCTL_TEST_STATUS_TIMEOUT,
+) -> SelfTestStatus:
     """Query SMART self-test progress via smartctl (sync wrapper)."""
-    result = run(["smartctl", "--json", "-c", "-l", "selftest", device])
+    result = run(["smartctl", "--json", "-c", "-l", "selftest", device], timeout=timeout)
     if not result.stdout:
         return SelfTestStatus(in_progress=False)
     return parse_self_test_status(result.stdout)

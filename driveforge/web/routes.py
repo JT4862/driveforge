@@ -50,18 +50,29 @@ def _format_duration(seconds: float | int) -> str:
     return f"{h}h {m}m"
 
 
-# Rough per-GB seconds coefficients per phase + media type. Good to one
-# significant figure; refined with real-hardware telemetry later.
-_ETA_BADBLOCKS_SEC_PER_GB = {"hdd": 16.0, "ssd": 5.0, "nvme": 2.0}
-_ETA_ERASE_SEC_PER_GB = {"hdd": 6.0, "ssd": 0.5, "nvme": 0.1}
-_ETA_LONG_TEST_SEC_PER_GB = {"hdd": 12.0, "ssd": 0.5, "nvme": 0.5}
+# Rough per-GB seconds coefficients per phase + media type. Calibrated
+# against real-hardware measurements on an R720 with -b 1MiB -c 32 badblocks
+# against an Intel SSDSC2BB120G4 (SATA SSD on LSI 9207-8i SAS HBA):
+#   - badblocks: 8 passes × ~14 min = 112 min on 120 GB → ~56 sec/GB
+#   - secure erase (hdparm SECURITY ERASE UNIT): ~73 sec / 120 GB → 0.6 sec/GB
+# Numbers are pessimistic by design — an ETA that overshoots is more helpful
+# than one that lies about a drive being nearly done.
+_ETA_BADBLOCKS_SEC_PER_GB = {"hdd": 30.0, "ssd": 56.0, "nvme": 4.0}
+_ETA_ERASE_SEC_PER_GB = {"hdd": 6.0, "ssd": 0.7, "nvme": 0.1}
+_ETA_LONG_TEST_SEC_PER_GB = {"hdd": 12.0, "ssd": 1.0, "nvme": 0.5}
 
 
 def _media_kind(drive_row) -> str:
     if drive_row.transport == "nvme":
         return "nvme"
-    # Without rotation info on the DB row, assume SAS/SATA spinning for now.
-    # SSD detection can be refined later via the discovered drive metadata.
+    # Prefer the DB's rotational flag (populated from lsblk ROTA at enrollment).
+    # Legacy rows without the flag fall back to transport-based heuristic: SAS
+    # is usually spinning, SATA could be either — assume HDD to be conservative.
+    rotational = getattr(drive_row, "rotational", None)
+    if rotational is True:
+        return "hdd"
+    if rotational is False:
+        return "ssd"
     return "hdd"
 
 

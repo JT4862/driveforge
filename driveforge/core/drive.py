@@ -109,7 +109,12 @@ def detect_true_transport(device_path: str) -> Transport | None:
     """
     import json as _json
 
-    result = run(["smartctl", "--json", "-i", device_path])
+    # Short timeout: this probe runs in the erase dispatch critical path.
+    # A hung drive should fail fast, not wait 3 minutes for SCSI timeouts.
+    try:
+        result = run(["smartctl", "--json", "-i", device_path], timeout=15.0)
+    except Exception:  # subprocess.TimeoutExpired or anything else
+        return None
     if not result.stdout:
         return None
     try:

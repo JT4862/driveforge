@@ -167,6 +167,11 @@ class Orchestrator:
             batch = m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC))
             session.add(batch)
             for d in drives:
+                # rotational=True for spinning HDDs, False for SSDs/NVMe. Used
+                # by the dashboard's ETA computation — SATA SSDs on a SAS HBA
+                # report tran=sas from lsblk but aren't rotational, so we can't
+                # just key off transport.
+                rota = None if d.rotation_rate is None else d.rotation_rate > 0
                 existing = session.get(m.Drive, d.serial)
                 if existing is None:
                     session.add(
@@ -176,8 +181,12 @@ class Orchestrator:
                             capacity_bytes=d.capacity_bytes,
                             transport=d.transport.value,
                             firmware_version=d.firmware_version,
+                            rotational=rota,
                         )
                     )
+                elif existing.rotational is None and rota is not None:
+                    # Backfill legacy rows enrolled before this column existed.
+                    existing.rotational = rota
             session.commit()
         # Stop any "safe to pull" blinkers for drives we're re-enrolling so
         # they don't race real pipeline I/O.
