@@ -88,6 +88,22 @@ Separating daemon from UI means tests keep running whether or not anyone is
 watching, and both UIs are thin clients over the same REST surface — no
 duplicated logic.
 
+### Hotplug & Hardware Events
+
+The daemon owns a udev subscription (via `pyudev`) that reacts to kernel
+hardware events in real time. One monitor serves every hotplug use case:
+
+| Event | Daemon response |
+|---|---|
+| USB device added, VID `0x04F9` (Brother) | Identify model via PID, auto-configure printer, push UI notification ("Printer QL-810W connected"), flush any pending label queue |
+| USB device removed (printer) | Mark printer unavailable; pending cert labels queue to `/var/lib/driveforge/pending-labels/` |
+| Block device added (`/dev/sdX`) | Offer to add drive to the active batch; update dashboard bay card |
+| Block device removed mid-test | Abort the drive's pipeline cleanly, mark as "pulled during test" |
+
+Design implication: **no feature requires a config file restart**. Plug in
+a printer after first-run setup → it's usable within a second. Swap to a
+different Brother QL model → it's auto-detected and reconfigured.
+
 ### System package dependencies
 
 | Package | Purpose |
@@ -113,6 +129,7 @@ duplicated logic.
 | `sqlalchemy` + `alembic` | DB ORM + migrations |
 | `pydantic` | Type-safe models + config validation |
 | `brother_ql` | Brother QL raster driver via raw USB (skips CUPS overhead) |
+| `pyudev` | libudev bindings — hotplug detection for printer and drives |
 | `qrcode` | QR generation for cert labels |
 | `pytest` | Testing |
 
@@ -168,16 +185,72 @@ affordance. A primary **[+ New Batch]** button at the top, a corner
   actions: **Export CSV**, **Re-sync to CRM**, **Reprint any label**
 - **History**: flat searchable drive table (serial/model/grade/date/batch);
   read-only detail view with prominent **Reprint label** button
-- **Settings**: four panels — Grading (in-app threshold editor, writes
-  `/etc/driveforge/grading.yaml`), Printer (test print, template preview,
+- **Settings**: four panels — Grading (in-app threshold editor), Printer
+  (model dropdown, label-roll picker, test print, template preview,
   paper-out diagnostic), CRM (endpoint + token + test connection),
-  Integrations (n8n webhook, firmware DB source)
+  Integrations (n8n webhook, firmware DB source). **All config lives in
+  the UI**; YAML files on disk are written by the daemon and not intended
+  for hand-editing.
 - **System**: daemon status, DB size, printer status, R720 vitals, last 50
   errors with drive context
 
 ### Keybinds (TUI and web)
 
 `d` dashboard · `b` batches · `h` history · `,` settings · `?` help · `Esc` back
+
+### First-Run Setup Wizard
+
+On initial daemon start (no existing config), opening the web UI lands on
+a setup flow instead of the dashboard. Every step has sensible defaults
+and a **Skip** option, and the wizard auto-detects wherever it can rather
+than ask:
+
+1. **Welcome** — brief explanation of what happens next
+2. **Hardware discovery** — lists detected bays from `lsscsi` / `lsblk`,
+   confirms the HBA mode, reports iDRAC/IPMI availability
+3. **Printer** — USB scan via udev for Brother VID `0x04F9`; pre-fills
+   the model and loaded label roll if detected; inline **Test print**
+   button. Skippable — plug in a printer later and the hotplug monitor
+   auto-configures it.
+4. **Grading** — defaults preselected from shipped `grading.yaml.example`;
+   inline editor with "Reset to defaults"
+5. **Optional integrations** — Twenty CRM, n8n webhook, Cloudflare Tunnel.
+   Each has a **Test connection** button and is individually skippable.
+6. **Done** — lands on the dashboard, ready to run a batch
+
+### Printer Compatibility
+
+Any printer supported by the [`brother_ql`](https://github.com/pklaus/brother_ql)
+library works. Users pick from a dropdown in Settings — no file editing.
+
+| Tier | Model | Connectivity | Notes | ~Price |
+|---|---|---|---|---|
+| Budget | QL-800 | USB | 300 dpi, auto-cutter | $80 |
+| Budget+ | QL-810W | USB + WiFi | 300 dpi, auto-cutter | $120 |
+| **Mid (recommended)** | **QL-820NWBc** | USB + Ethernet + WiFi + BT | 300 dpi, LCD, label sensor | $130 |
+| Wide format | QL-1100 | USB | Up to 4" rolls | $170 |
+| Wide format+ | QL-1110NWBc | USB + Ethernet + WiFi + BT | Up to 4" rolls | $300 |
+
+Older `brother_ql`-compatible models (QL-500/550/700/710W/720NW/1050/1060N)
+appear in the dropdown as "untested — YMMV".
+
+### Label Rolls
+
+Brother QL-820/810/1100 printers have a **label sensor** that reports which
+DK roll is loaded. The daemon reads this and picks the matching cert
+template automatically — the user just loads a roll and prints.
+
+| Roll | Size | Template | Use case |
+|---|---|---|---|
+| **DK-1209** | 29×62mm die-cut | Standard (default) | 3.5" HDDs (recommended) |
+| DK-1208 | 38×90mm die-cut | Large (adds thermal chart thumbnail + POH) | Max info on 3.5" drives |
+| DK-1201 | 29×90mm die-cut | Longer | Extra text fields |
+| DK-1221 | 23×23mm square | Compact (QR + serial only) | 2.5" SSD faces |
+| DK-22210 | 29mm continuous | Standard, cut to template length | Power users, DIY sizing |
+
+Printers without a label sensor (QL-800, QL-1100) fall back to a manual
+dropdown in Settings. Anything outside this list falls back to a
+"best-effort" render with a warning in the UI.
 
 ### Explicitly out of MVP
 
@@ -273,10 +346,23 @@ output even from imperfect pulled stock.
 
 ## Certification Labels
 
-Each completed drive gets a printed adhesive label stuck directly on it. The
-Brother QL-820NWBc connects to the R720 via USB; DriveForge talks to it with
-[`brother_ql`](https://github.com/pklaus/brother_ql) (raw USB, no CUPS).
-Labels are Brother DK-1209 die-cut (29×62mm / 1.1"×2.4").
+Each completed drive gets a printed adhesive label stuck directly on it.
+DriveForge talks to the printer via [`brother_ql`](https://github.com/pklaus/brother_ql)
+(raw USB, no CUPS). Supported printer models and label rolls are listed
+under User Interface → Printer Compatibility / Label Rolls. The reference
+configuration is a Brother QL-820NWBc with DK-1209 die-cut rolls
+(29×62mm / 1.1"×2.4").
+
+### Pending-label queue
+
+Because tests run unattended for days, the printer may be offline or
+disconnected when a drive finishes grading. Rather than fail, the daemon:
+
+1. Renders the label to PNG and saves it to `/var/lib/driveforge/pending-labels/<serial>.png`
+2. Shows a pending-labels badge in the UI ("3 labels waiting to print")
+3. On printer reconnect (udev event) → automatically flushes the queue
+4. Settings → Printer also exposes a manual **[Print All Pending]** button
+   and per-label reprint from drive history
 
 Example label layout:
 
@@ -471,11 +557,13 @@ read-only report page on the LAN. Everything else is toggled on in Settings.
    curl -sSL https://raw.githubusercontent.com/JT4862/driveforge/main/scripts/install.sh | sudo bash
    ```
 3. Script: `apt install` system deps, downloads latest `.deb` from GitHub
-   Releases, installs it, creates `/etc/driveforge/grading.yaml` with
-   defaults, enables and starts `driveforge-daemon.service`
-4. Connect thermal printer via USB (optional — cert printing disabled
-   cleanly if no printer detected)
-5. Open `http://<server-ip>:8080` and run the first test
+   Releases, installs it, writes default configs under `/etc/driveforge/`,
+   enables and starts `driveforge-daemon.service`
+4. Connect thermal printer via USB (optional — can be plugged in later;
+   udev hotplug monitor auto-configures it)
+5. Open `http://<server-ip>:8080` → **First-run setup wizard** runs,
+   auto-detecting hardware and walking through optional integrations. No
+   files to edit by hand, ever.
 
 ### What we are explicitly NOT shipping
 
@@ -487,10 +575,11 @@ read-only report page on the LAN. Everything else is toggled on in Settings.
 
 - Hardware compatibility notes (HBA in IT mode, SATA/SAS/NVMe all supported,
   thermal printer optional)
+- Supported printer models (see User Interface → Printer Compatibility)
 - Link to Debian 12 download + install guide
 - The one-line bootstrap install command
-- "First test" walkthrough with screenshots
-- Config reference: `grading.yaml` tuning, optional integrations setup
+- Screenshots of the first-run setup wizard + dashboard
+- Note that all configuration happens in the web UI (no file editing)
 
 ---
 
