@@ -477,19 +477,6 @@ def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
-    with state.session_factory() as session:
-        approvals = session.query(m.FirmwareApproval).order_by(m.FirmwareApproval.approved_at.desc()).all()
-        approvals_view = [
-            {
-                "id": a.id,
-                "model": a.model,
-                "transport": a.transport,
-                "version": a.version,
-                "signature_verified": a.signature_verified,
-                "approved_at": a.approved_at,
-            }
-            for a in approvals
-        ]
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -497,7 +484,6 @@ def settings_page(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "saved_panel": saved,
             "restart_required": restart == "1",
-            "firmware_approvals": approvals_view,
         },
     )
 
@@ -553,7 +539,6 @@ async def save_integrations(request: Request) -> RedirectResponse:
     i.cloudflare_tunnel_hostname = (
         (form.get("cloudflare_tunnel_hostname") or "").strip() or None
     )
-    i.firmware_db_url = (form.get("firmware_db_url") or "").strip() or None
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/settings?saved=integrations", status_code=303)
 
@@ -579,68 +564,6 @@ async def save_daemon(request: Request) -> RedirectResponse:
     await _save_settings_or_ignore(request)
     suffix = "&restart=1" if restart_needed else ""
     return RedirectResponse(url=f"/settings?saved=daemon{suffix}", status_code=303)
-
-
-@router.post("/settings/firmware")
-async def save_firmware(request: Request) -> RedirectResponse:
-    state = get_state()
-    form = await request.form()
-    f = state.settings.firmware
-    f.auto_apply = form.get("auto_apply") == "on"
-    f.require_canary = form.get("require_canary") == "on"
-    f.trust_pubkey = (form.get("trust_pubkey") or "").strip()
-    await _save_settings_or_ignore(request)
-    return RedirectResponse(url="/settings?saved=firmware", status_code=303)
-
-
-@router.post("/firmware/approve-latest")
-async def approve_latest_firmware(request: Request) -> RedirectResponse:
-    """Approve the DB's latest known-good firmware for this drive's model."""
-    from pathlib import Path
-
-    from driveforge.core import firmware as fw_mod
-
-    form = await request.form()
-    serial = (form.get("drive_serial") or "").strip()
-    version = (form.get("version") or "").strip()
-    state = get_state()
-    with state.session_factory() as session:
-        drive = session.get(m.Drive, serial)
-        if drive is None or not version:
-            raise HTTPException(status_code=404, detail="drive or version not found")
-        # Look up the DB entry to pull sha256 + signature
-        db_path = Path(__file__).parent.parent / "data" / "firmware_db.yaml"
-        from driveforge.core.drive import Drive as DriveModel, Transport
-
-        d = DriveModel(
-            serial=drive.serial,
-            model=drive.model,
-            capacity_bytes=drive.capacity_bytes,
-            transport=Transport(drive.transport),
-            device_path=f"/dev/{drive.serial}",
-            firmware_version=drive.firmware_version,
-        )
-        check = fw_mod.check_firmware(d, db_path=db_path)
-        if not check.entry or check.entry.version != version:
-            raise HTTPException(status_code=404, detail="DB entry not found for version")
-        existing = (
-            session.query(m.FirmwareApproval)
-            .filter_by(model=check.entry.model, version=version)
-            .first()
-        )
-        if existing is None:
-            session.add(
-                m.FirmwareApproval(
-                    model=check.entry.model,
-                    transport=check.entry.transport.value,
-                    version=version,
-                    blob_sha256=(check.entry.sha256 or ""),
-                    signature_verified=False,
-                    notes=f"Approved via drive-detail button for {serial}",
-                )
-            )
-            session.commit()
-    return RedirectResponse(url=f"/drives/{serial}", status_code=303)
 
 
 @router.post("/settings/wizard-replay")

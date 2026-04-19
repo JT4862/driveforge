@@ -8,10 +8,8 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
 
 from driveforge.core import drive as drive_mod
-from driveforge.core import firmware
 from driveforge.daemon.state import get_state
 from driveforge.db import models as m
 
@@ -273,86 +271,6 @@ async def abort_drive(serial: str, request: Request) -> dict[str, Any]:
     if not ok:
         raise HTTPException(status_code=404, detail="drive not in-flight")
     return {"aborted": serial}
-
-
-class FirmwareApproveIn(BaseModel):
-    model: str
-    transport: str
-    version: str
-    blob_sha256: str
-    signature_verified: bool = False
-    notes: str | None = None
-
-
-@router.get("/firmware/approvals")
-def list_firmware_approvals() -> list[dict[str, Any]]:
-    state = get_state()
-    with state.session_factory() as session:
-        rows = session.execute(select(m.FirmwareApproval)).scalars().all()
-        return [
-            {
-                "id": r.id,
-                "model": r.model,
-                "transport": r.transport,
-                "version": r.version,
-                "blob_sha256": r.blob_sha256,
-                "signature_verified": r.signature_verified,
-                "approved_at": r.approved_at.isoformat() if r.approved_at else None,
-                "notes": r.notes,
-            }
-            for r in rows
-        ]
-
-
-@router.post("/firmware/approvals")
-def approve_firmware(body: FirmwareApproveIn) -> dict[str, Any]:
-    state = get_state()
-    with state.session_factory() as session:
-        row = m.FirmwareApproval(
-            model=body.model,
-            transport=body.transport,
-            version=body.version,
-            blob_sha256=body.blob_sha256,
-            signature_verified=body.signature_verified,
-            notes=body.notes,
-        )
-        session.add(row)
-        session.commit()
-        return {"id": row.id, "status": "approved"}
-
-
-@router.delete("/firmware/approvals/{approval_id}")
-def unapprove_firmware(approval_id: int) -> dict[str, str]:
-    state = get_state()
-    with state.session_factory() as session:
-        row = session.get(m.FirmwareApproval, approval_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="approval not found")
-        session.delete(row)
-        session.commit()
-        return {"status": "removed"}
-
-
-@router.get("/firmware/check/{serial}")
-def firmware_check(serial: str) -> dict[str, Any]:
-    state = get_state()
-    with state.session_factory() as session:
-        d = session.get(m.Drive, serial)
-        if d is None:
-            raise HTTPException(status_code=404, detail="drive not found")
-        drive_obj = drive_mod.Drive(
-            serial=d.serial,
-            model=d.model,
-            capacity_bytes=d.capacity_bytes,
-            transport=drive_mod.Transport(d.transport),
-            device_path=f"/dev/{d.serial}",  # placeholder — real path only known at test time
-            firmware_version=d.firmware_version,
-        )
-    from pathlib import Path
-
-    db_path = Path(__file__).parent.parent / "data" / "firmware_db.yaml"
-    check = firmware.check_firmware(drive_obj, db_path=db_path)
-    return check.model_dump(mode="json")
 
 
 def _test_run_to_out(r: m.TestRun) -> TestRunOut:

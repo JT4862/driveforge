@@ -19,9 +19,7 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from pathlib import Path
-
-from driveforge.core import badblocks, enclosures, erase, firmware, grading, process, smart, telemetry, webhook
+from driveforge.core import badblocks, enclosures, erase, grading, process, smart, telemetry, webhook
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -245,9 +243,15 @@ class Orchestrator:
         if short_ok is False:
             raise PipelineFailure("short_test", "SMART short self-test reported failure")
 
-        # Phase 3: firmware check + (gated) apply
+        # Phase 3: firmware — just log the current version. Drive firmware
+        # updates are a manual operation; we don't download or apply anything
+        # automatically. Users with a firmware blob can flash it via the
+        # vendor's tool and re-run the batch.
         await self._advance(run_id, "firmware_check", drive)
-        await self._run_firmware_check(run_id, drive, dev_mode=dev_mode, quick=quick)
+        if drive.firmware_version:
+            self._log(drive.serial, f"firmware: {drive.firmware_version} (manual updates only)")
+        if dev_mode:
+            await asyncio.sleep(0.2)
 
         # Phase 4: secure erase (ALWAYS runs — this is the destructive step)
         await self._advance(run_id, "secure_erase", drive)
@@ -365,208 +369,6 @@ class Orchestrator:
                 return status.last_result_passed
         logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
         return None
-
-    async def _run_firmware_check(
-        self, run_id: int, drive: Drive, *, dev_mode: bool, quick: bool
-    ) -> None:
-        """Check firmware — and apply if all safety gates pass.
-
-        Gating (all must be true to flash):
-          1. settings.firmware.auto_apply = True
-          2. DB entry exists for this (model, transport, version)
-          3. FirmwareApproval row exists for this (model, version, sha256)
-          4. blob_url is present on the entry
-          5. Downloaded blob's SHA-256 matches approval
-          6. Signature verifies against trust pubkey (fail-closed)
-          7. Not quick mode
-          8. If require_canary: this drive is canary OR canary of same
-             (model, target_version) in this batch has passed
-
-        Any missing gate → skip flashing, log which gate failed. Check
-        itself always runs and is logged regardless.
-        """
-        if dev_mode:
-            await asyncio.sleep(0.2)
-            return
-        db_path = Path(__file__).parent.parent / "data" / "firmware_db.yaml"
-        try:
-            check = firmware.check_firmware(drive, db_path=db_path)
-        except Exception as exc:  # noqa: BLE001
-            self._log(drive.serial, f"firmware check failed: {exc}")
-            return
-        # Log the outcome + persist it to the run
-        if check.update_available and check.entry:
-            self._log(
-                drive.serial,
-                f"firmware: {check.current_version} → {check.entry.version} available",
-            )
-        elif check.current_version and check.latest_version:
-            self._log(drive.serial, f"firmware: {check.current_version} (up to date)")
-        else:
-            self._log(drive.serial, f"firmware: {check.reason}")
-        self._persist_firmware_check(run_id, check)
-
-        # Quick mode never flashes, even with everything else green
-        if quick or not check.update_available or check.entry is None:
-            return
-        await self._maybe_apply_firmware(run_id, drive, check, check.entry)
-
-    def _persist_firmware_check(self, run_id: int, check: "firmware.FirmwareCheck") -> None:
-        with self.state.session_factory() as session:
-            run = session.get(m.TestRun, run_id)
-            if run is None:
-                return
-            existing_rules = list(run.rules) if run.rules else []
-            existing_rules.append(
-                {
-                    "name": "firmware_check",
-                    "passed": True,
-                    "detail": check.reason,
-                    "current_version": check.current_version,
-                    "latest_version": check.latest_version,
-                    "update_available": check.update_available,
-                }
-            )
-            run.rules = existing_rules
-            session.commit()
-
-    async def _maybe_apply_firmware(
-        self,
-        run_id: int,
-        drive: Drive,
-        check: "firmware.FirmwareCheck",
-        entry: "firmware.FirmwareEntry",
-    ) -> None:
-        fw_cfg = self.state.settings.firmware
-        serial = drive.serial
-        if not fw_cfg.auto_apply:
-            self._log(serial, "firmware apply: skipped (auto_apply disabled in Settings)")
-            return
-        # Approval lookup
-        with self.state.session_factory() as session:
-            approval = (
-                session.query(m.FirmwareApproval)
-                .filter_by(model=entry.model, version=entry.version)
-                .first()
-            )
-            approval_sha = approval.blob_sha256 if approval else None
-        if approval is None:
-            self._log(serial, f"firmware apply: skipped (no approval for {entry.model} v{entry.version})")
-            return
-        if not entry.blob_url or not entry.sha256:
-            self._log(serial, "firmware apply: skipped (DB entry has no blob URL or SHA-256)")
-            return
-        if entry.sha256.lower() != approval_sha.lower():
-            self._log(serial, "firmware apply: REFUSED (DB entry SHA-256 differs from approval)")
-            return
-        # Canary gate
-        is_canary, can_proceed = self._canary_claim(drive, entry)
-        if not can_proceed:
-            self._log(serial, f"firmware apply: deferred (awaiting canary for {entry.model} v{entry.version})")
-            return
-        # Download blob
-        cache_dir = self.state.settings.daemon.state_dir / "firmware_cache"
-        blob_path = cache_dir / f"{entry.model.replace(' ', '_')}_{entry.version}.bin"
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(None, firmware.download_blob, entry.blob_url, blob_path)
-        except firmware.FirmwareDownloadError as exc:
-            self._log(serial, f"firmware apply: download failed — {exc}")
-            self._canary_resolve(entry, passed=False)
-            self._record_firmware_op(run_id, drive, entry, is_canary, "failed", str(exc))
-            return
-        # SHA-256 verify
-        if not firmware.verify_blob(blob_path, entry.sha256):
-            self._log(serial, "firmware apply: REFUSED (blob SHA-256 mismatch)")
-            self._canary_resolve(entry, passed=False)
-            self._record_firmware_op(run_id, drive, entry, is_canary, "failed", "sha256 mismatch")
-            return
-        # Signature verify
-        from driveforge.core import signing
-
-        pubkey = signing.load_pubkey(fw_cfg.trust_pubkey or None)
-        sig_ok = signing.verify_signature(
-            model=entry.model,
-            transport=entry.transport.value,
-            version=entry.version,
-            sha256=entry.sha256,
-            signature_b64=entry.signature,
-            pubkey=pubkey,
-        )
-        if not sig_ok:
-            self._log(serial, "firmware apply: REFUSED (signature did not verify — fail-closed)")
-            self._canary_resolve(entry, passed=False)
-            self._record_firmware_op(run_id, drive, entry, is_canary, "failed", "sig mismatch")
-            return
-        # Flash!
-        self._log(serial, f"firmware apply: flashing {entry.version} ({'canary' if is_canary else 'sibling'})")
-        try:
-            result = await loop.run_in_executor(None, firmware.apply_nvme_firmware, drive, blob_path)
-        except Exception as exc:  # noqa: BLE001
-            self._log(serial, f"firmware apply: exception — {exc}")
-            self._canary_resolve(entry, passed=False)
-            self._record_firmware_op(run_id, drive, entry, is_canary, "failed", str(exc))
-            return
-        if result.outcome != firmware.ApplyOutcome.SUCCESS:
-            self._log(serial, f"firmware apply: {result.outcome} — {result.detail}")
-            self._canary_resolve(entry, passed=False)
-            self._record_firmware_op(run_id, drive, entry, is_canary, result.outcome, result.detail)
-            return
-        self._log(serial, f"firmware apply: {entry.version} committed; post-SMART will re-check version")
-        self._canary_resolve(entry, passed=True)
-        self._record_firmware_op(run_id, drive, entry, is_canary, "success", result.detail)
-
-    # Canary coordination — per (model, target_version) within a run of the
-    # orchestrator. Keeps a tiny in-memory map keyed by the firmware entry.
-    _canary_state: dict[tuple[str, str], str] = {}  # key → "running" | "passed" | "failed"
-    _canary_lock = asyncio.Lock() if False else None  # sentinel; lazy init below
-
-    def _canary_key(self, entry: "firmware.FirmwareEntry") -> tuple[str, str]:
-        return (entry.model, entry.version)
-
-    def _canary_claim(self, drive: Drive, entry: "firmware.FirmwareEntry") -> tuple[bool, bool]:
-        """Return (is_canary, can_proceed)."""
-        key = self._canary_key(entry)
-        state = self._canary_state.get(key)
-        if state is None:
-            self._canary_state[key] = "running"
-            return (True, True)
-        if state == "passed":
-            return (False, True)
-        if state == "running":
-            return (False, False)  # sibling, canary still running — defer
-        # failed
-        return (False, False)
-
-    def _canary_resolve(self, entry: "firmware.FirmwareEntry", *, passed: bool) -> None:
-        key = self._canary_key(entry)
-        self._canary_state[key] = "passed" if passed else "failed"
-
-    def _record_firmware_op(
-        self,
-        run_id: int,
-        drive: Drive,
-        entry: "firmware.FirmwareEntry",
-        is_canary: bool,
-        outcome: str,
-        detail: str,
-    ) -> None:
-        with self.state.session_factory() as session:
-            session.add(
-                m.FirmwareOperation(
-                    test_run_id=run_id,
-                    drive_serial=drive.serial,
-                    model=entry.model,
-                    from_version=None,  # could query pre-flash SMART here
-                    to_version=entry.version,
-                    is_canary=is_canary,
-                    dry_run=False,
-                    outcome=outcome,
-                    completed_at=datetime.now(UTC),
-                    error=detail if outcome != "success" else None,
-                )
-            )
-            session.commit()
 
     async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool) -> None:
         if dev_mode:

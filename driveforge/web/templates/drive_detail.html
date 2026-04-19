@@ -52,36 +52,6 @@
 </section>
 {% endif %}
 
-{% set firmware_rule = (latest.rules or []) | selectattr("name", "equalto", "firmware_check") | list | first %}
-{% if firmware_rule %}
-<section class="panel">
-  <h2>Firmware</h2>
-  <dl class="kv">
-    <dt>Current</dt><dd>{{ firmware_rule.current_version or "—" }}</dd>
-    <dt>Latest known-good</dt><dd>{{ firmware_rule.latest_version or "—" }}</dd>
-    <dt>Status</dt><dd>
-      {% if firmware_rule.update_available %}
-        <span class="bad">update available</span>
-      {% else %}
-        <span class="ok">{{ firmware_rule.detail }}</span>
-      {% endif %}
-    </dd>
-  </dl>
-  {% if firmware_rule.update_available and firmware_rule.latest_version %}
-  <p class="muted small" style="margin-top: 12px;">
-    Flashing requires: an approval for this (model, version), <code>auto_apply</code>
-    enabled in <a href="/settings">Settings → Firmware</a>, and a valid signature on
-    the DB entry. All gates fail-closed.
-  </p>
-  <form method="post" action="/firmware/approve-latest" style="margin-top: 8px;">
-    <input type="hidden" name="drive_serial" value="{{ drive.serial }}">
-    <input type="hidden" name="version" value="{{ firmware_rule.latest_version }}">
-    <button type="submit" class="btn">Approve {{ firmware_rule.latest_version }} for auto-apply</button>
-  </form>
-  {% endif %}
-</section>
-{% endif %}
-
 {% if latest.rules %}
 <section class="panel">
   <h2>Grading rules</h2>
@@ -89,13 +59,11 @@
     <thead><tr><th>Rule</th><th>Result</th><th>Detail</th></tr></thead>
     <tbody>
     {% for rule in latest.rules %}
-      {% if rule.name != "firmware_check" %}
       <tr class="{% if rule.passed %}ok{% else %}fail{% endif %}">
         <td>{{ rule.name }}</td>
         <td>{% if rule.passed %}✓{% else %}✗{% endif %}</td>
         <td>{{ rule.detail }}</td>
       </tr>
-      {% endif %}
     {% endfor %}
     </tbody>
   </table>

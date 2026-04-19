@@ -42,7 +42,6 @@ dependencies = [
   "rich>=13.7",
   "textual>=0.60",
   "brother-ql>=0.9.4",
-  "cryptography>=42",
 ]
 
 [project.optional-dependencies]

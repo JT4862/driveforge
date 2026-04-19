@@ -26,7 +26,7 @@ from driveforge import config as cfg
 from driveforge.core import drive as drive_mod
 from driveforge.core import enclosures
 from driveforge.core.process import run
-from driveforge.daemon.state import get_state
+from driveforge.daemon.state import get_state  # noqa: F401 (used via ctx)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=TEMPLATES_DIR)

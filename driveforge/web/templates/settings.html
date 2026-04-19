@@ -96,65 +96,10 @@
     <span>Cloudflare Tunnel hostname</span>
     <input type="text" name="cloudflare_tunnel_hostname" value="{{ settings.integrations.cloudflare_tunnel_hostname or '' }}" placeholder="driveforge.example.com">
   </label>
-  <label class="field">
-    <span>Firmware DB URL (blank = bundled default)</span>
-    <input type="url" name="firmware_db_url" value="{{ settings.integrations.firmware_db_url or '' }}" placeholder="https://example.com/firmware_db.yaml">
-  </label>
   <div class="form-actions">
     <button type="submit" class="btn primary">Save integrations</button>
   </div>
 </form>
-
-<form class="panel" method="post" action="/settings/firmware">
-  <div class="panel-head">
-    <h2>Firmware auto-apply</h2>
-    {% if saved_panel == "firmware" %}<span class="pill saved">saved</span>{% endif %}
-  </div>
-  <label class="field checkbox">
-    <input type="checkbox" name="auto_apply"{% if settings.firmware.auto_apply %} checked{% endif %}>
-    <span><strong>Enable firmware auto-apply</strong> — flash approved firmware during Phase 3. Default off.</span>
-  </label>
-  <label class="field checkbox">
-    <input type="checkbox" name="require_canary"{% if settings.firmware.require_canary %} checked{% endif %}>
-    <span>Require canary drive — flash one drive first per (model, version), wait for a passing grade, then flash siblings</span>
-  </label>
-  <label class="field">
-    <span>Trust public key (base64 Ed25519, blank = bundled)</span>
-    <input type="text" name="trust_pubkey" value="{{ settings.firmware.trust_pubkey }}" placeholder="(bundled)">
-  </label>
-  <p class="muted small">Firmware flashing can brick drives. DriveForge only flashes drives whose
-  (model, version, blob SHA-256) matches an approved entry below AND whose
-  signature verifies against this trust key. See the
-  <a href="https://github.com/JT4862/driveforge/blob/main/BUILD.md#firmware-updates">safety model</a>.</p>
-  <div class="form-actions">
-    <button type="submit" class="btn primary">Save firmware</button>
-  </div>
-</form>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Approved firmware entries ({{ firmware_approvals|length }})</h2>
-  </div>
-  {% if firmware_approvals %}
-  <table class="runs">
-    <thead><tr><th>Model</th><th>Transport</th><th>Version</th><th>Signature</th><th>Approved</th><th></th></tr></thead>
-    <tbody>
-    {% for a in firmware_approvals %}
-      <tr>
-        <td>{{ a.model }}</td>
-        <td>{{ a.transport|upper }}</td>
-        <td>{{ a.version }}</td>
-        <td>{% if a.signature_verified %}<span class="grade grade-A">VERIFIED</span>{% else %}<span class="grade grade-fail">UNVERIFIED</span>{% endif %}</td>
-        <td>{{ a.approved_at.isoformat() if a.approved_at else "—" }}</td>
-        <td><button class="btn" hx-delete="/api/firmware/approvals/{{ a.id }}" hx-confirm="Remove this approval? Future drives of this model/version won't auto-flash." hx-target="closest tr" hx-swap="outerHTML">Remove</button></td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">No firmware entries approved yet. Approvals come from the Firmware Check API or a future inbox-style UI.</p>
-  {% endif %}
-</section>
 
 <form class="panel" method="post" action="/settings/daemon">
   <div class="panel-head">
