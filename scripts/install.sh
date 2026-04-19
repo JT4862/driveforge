@@ -68,16 +68,12 @@ fi
 ok "user + dirs ready"
 
 log "Installing DriveForge Python package..."
-# Pre-alpha: install EDITABLE from the local checkout so subsequent code
-# updates (git pull or rsync into the source tree) are picked up by just
-# restarting the daemon — no reinstall needed. Swap to non-editable once we
-# ship wheels via GitHub Releases.
 python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
-  pip install --quiet -e "$SRC_DIR"
+  pip install --quiet "$SRC_DIR"
 else
   pip install --quiet driveforge
 fi
