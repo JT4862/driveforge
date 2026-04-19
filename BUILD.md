@@ -445,6 +445,55 @@ real drive testing.
 
 ---
 
+## OSS Distribution
+
+DriveForge is designed so any Debian 12 x86_64 server can run it with zero
+dependence on JT's homelab infrastructure. Fresh installs work end to end
+with local-only features; every external integration is opt-in.
+
+### Default-empty integrations
+
+| Setting | Default | Effect when empty |
+|---|---|---|
+| n8n webhook URL | empty | No notifications fire |
+| Twenty CRM endpoint + token | empty | Results stay local in SQLite + generated report files |
+| Cloudflare Tunnel | not configured | QR landing page serves on local LAN only |
+| Firmware lookup DB URL | bundled with app | Works out of the box; remote updates optional |
+
+A fresh install prints cert labels, saves reports locally, and serves a
+read-only report page on the LAN. Everything else is toggled on in Settings.
+
+### End-user install flow
+
+1. User installs Debian 12 on their own server hardware (OS out of scope)
+2. SSH in and run one bootstrap command:
+   ```bash
+   curl -sSL https://raw.githubusercontent.com/JT4862/driveforge/main/scripts/install.sh | sudo bash
+   ```
+3. Script: `apt install` system deps, downloads latest `.deb` from GitHub
+   Releases, installs it, creates `/etc/driveforge/grading.yaml` with
+   defaults, enables and starts `driveforge-daemon.service`
+4. Connect thermal printer via USB (optional — cert printing disabled
+   cleanly if no printer detected)
+5. Open `http://<server-ip>:8080` and run the first test
+
+### What we are explicitly NOT shipping
+
+- **Custom ISO / bootable image** — scope creep. Debian handles the OS.
+- **Docker container** — drive testing needs direct `/dev/sdX` access and
+  host-level tmux; container is the wrong abstraction.
+
+### README contents (at public release)
+
+- Hardware compatibility notes (HBA in IT mode, SATA/SAS/NVMe all supported,
+  thermal printer optional)
+- Link to Debian 12 download + install guide
+- The one-line bootstrap install command
+- "First test" walkthrough with screenshots
+- Config reference: `grading.yaml` tuning, optional integrations setup
+
+---
+
 ## Prior Art
 
 - **[disk-burnin.sh](https://github.com/Spearfoot/disk-burnin-and-testing)** —
