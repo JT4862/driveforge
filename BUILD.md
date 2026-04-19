@@ -57,9 +57,10 @@ overhead. Debian + Python app is ~5x faster to build and trivially extensible.
   (up to ~30) processed in multiple sequential rounds
 - **Boot drive**: small SSD in an internal bay or rear slot — NOT one of the 8
   front bays, those are reserved for drives under test
-- **Thermal printer**: USB-attached adhesive label printer for per-drive cert
-  stickers (Brother QL-series preferred — adhesive labels stick directly to
-  the drive and survive the inventory shelf)
+- **Thermal printer**: Brother QL-820NWBc (USB + Ethernet + WiFi, 300 dpi,
+  auto-cutter). Uses Brother DK-1209 die-cut labels (29×62mm / 1.1"×2.4",
+  800/roll) — adhesive, stick directly to the drive, survive the inventory
+  shelf. Driven over USB from the R720.
 - **Network**: R720 on the homelab LAN; reachable from laptop/phone
 
 ---
@@ -111,7 +112,7 @@ duplicated logic.
 | `httpx` | Async HTTP to Twenty CRM / n8n |
 | `sqlalchemy` + `alembic` | DB ORM + migrations |
 | `pydantic` | Type-safe models + config validation |
-| `python-escpos` | Thermal printer driver via raw USB (skips CUPS overhead) |
+| `brother_ql` | Brother QL raster driver via raw USB (skips CUPS overhead) |
 | `qrcode` | QR generation for cert labels |
 | `pytest` | Testing |
 
@@ -177,8 +178,9 @@ output even from imperfect pulled stock.
 ## Certification Labels
 
 Each completed drive gets a printed adhesive label stuck directly on it. The
-thermal printer connects to the R720 via USB; DriveForge talks to it with
-`python-escpos` (raw USB, no CUPS).
+Brother QL-820NWBc connects to the R720 via USB; DriveForge talks to it with
+[`brother_ql`](https://github.com/pklaus/brother_ql) (raw USB, no CUPS).
+Labels are Brother DK-1209 die-cut (29×62mm / 1.1"×2.4").
 
 Example label layout:
 
@@ -280,7 +282,7 @@ driveforge/
 │   │   ├── badblocks.py             # badblocks wrapper
 │   │   ├── grading.py               # A/B/C/fail logic
 │   │   ├── firmware.py              # NVMe updates + lookup
-│   │   ├── printer.py               # ESC/POS cert printing
+│   │   ├── printer.py               # Brother QL raster cert printing
 │   │   └── crm.py                   # Twenty CRM client
 │   └── db/
 │       ├── models.py                # SQLAlchemy schemas
@@ -378,8 +380,8 @@ real drive testing.
 
 1. **R720 boot drive**: repurpose an existing SSD or buy new? A 120GB
    Samsung/Kingston is ~$20 and gives headroom for logs + OS.
-2. **Thermal printer model**: Brother QL-800 or QL-820NWB (~$100, adhesive
-   labels, USB/network) is the preferred pick. Confirm before ordering.
+2. ~~**Thermal printer model**~~ — **Resolved**: Brother QL-820NWBc + DK-1209
+   die-cut labels (29×62mm).
 3. **Drive pool sizing**: How many Grade A drives to stockpile before starting
    the Ceph cluster build? Shapes how aggressively to process pulls.
 4. **Public release timing**: open-source from day one (nothing to hide, MIT
