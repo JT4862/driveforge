@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup — DriveForge</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="setup-body">
+<main class="setup-card">
+  <header class="setup-head">
+    <div class="brand"><a href="/">DriveForge</a></div>
+    <div class="setup-progress">
+      {% for n in range(1, total + 1) %}
+        <span class="dot {% if n == step %}active{% elif n < step %}done{% endif %}"></span>
+      {% endfor %}
+      <span class="step-count">Step {{ step }} of {{ total }}</span>
+    </div>
+  </header>
+  <section class="setup-body-inner">
+    <h1>{{ title }}</h1>
+    {% block body %}{% endblock %}
+  </section>
+</main>
+</body>
+</html>

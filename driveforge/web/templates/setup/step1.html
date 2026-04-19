@@ -1,0 +1,25 @@
+{% extends "setup/_base.html" %}
+{% block body %}
+<p class="lede">
+  Welcome to DriveForge. This one-time setup walks through five steps so
+  the daemon can start testing drives on your hardware.
+</p>
+
+<p>
+  Every optional integration can be skipped now and configured later in
+  Settings. DriveForge works end to end with local-only features — no
+  external services are required.
+</p>
+
+<ul class="setup-what">
+  <li>Auto-detect attached drives and the server's network info</li>
+  <li>Pick a thermal printer (or skip — DriveForge auto-configures when one is plugged in later)</li>
+  <li>Review grading thresholds (defaults are fine for most homelab use)</li>
+  <li>Connect optional integrations (outbound webhook, Cloudflare Tunnel) or skip</li>
+</ul>
+
+<form method="post" action="/setup/1" class="setup-actions">
+  <span></span>
+  <button type="submit" class="btn primary">Begin &rarr;</button>
+</form>
+{% endblock %}

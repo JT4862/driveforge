@@ -1,0 +1,41 @@
+{% extends "setup/_base.html" %}
+{% block body %}
+<p class="lede">
+  Review the A / B / C / Fail thresholds. Defaults match DriveForge's
+  recommended homelab rubric; tune for your own tolerance.
+</p>
+
+<form method="post" action="/setup/4" class="setup-panel">
+  <label class="field">
+    <span>Grade A — max reallocated sectors</span>
+    <input type="number" name="grade_a_reallocated_max" value="{{ settings.grading.grade_a_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade B — max reallocated sectors</span>
+    <input type="number" name="grade_b_reallocated_max" value="{{ settings.grading.grade_b_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade C — max reallocated sectors</span>
+    <input type="number" name="grade_c_reallocated_max" value="{{ settings.grading.grade_c_reallocated_max }}" min="0">
+  </label>
+
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_pending_sectors"{% if settings.grading.fail_on_pending_sectors %} checked{% endif %}>
+    <span>Fail on any current-pending-sector count &gt; 0</span>
+  </label>
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_offline_uncorrectable"{% if settings.grading.fail_on_offline_uncorrectable %} checked{% endif %}>
+    <span>Fail on any offline-uncorrectable count &gt; 0</span>
+  </label>
+
+  <label class="field">
+    <span>Thermal excursion — demote to Grade C if drive exceeds this °C during test (blank to disable)</span>
+    <input type="number" name="thermal_excursion_c" value="{{ settings.grading.thermal_excursion_c or '' }}" min="0">
+  </label>
+
+  <div class="setup-actions">
+    <a href="/setup/3" class="btn">&larr; Back</a>
+    <button type="submit" class="btn primary">Next &rarr;</button>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "setup/_base.html" %}
+{% block body %}
+<p class="lede">
+  Pick the thermal printer model you'll use for cert labels. You can
+  skip this step and plug a printer in later — DriveForge auto-configures
+  on USB connect.
+</p>
+
+<form method="post" action="/setup/3" class="setup-panel">
+  <label class="field">
+    <span>Printer model</span>
+    <select name="printer_model">
+      <option value="">— skip for now —</option>
+      {% for m in printer_models %}
+      <option value="{{ m }}"{% if settings.printer.model == m %} selected{% endif %}>{{ m }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <label class="field">
+    <span>Label roll</span>
+    <select name="label_roll">
+      <option value="">— auto-detect (QL-820/810/1100 only) —</option>
+      {% for r in label_rolls %}
+      <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <p class="muted">
+    DK-1209 is the recommended roll for 3.5" HDDs. If your printer has a
+    built-in label sensor (QL-820 / QL-810 / QL-1100 family), leave the
+    roll on auto-detect.
+  </p>
+
+  <div class="setup-actions">
+    <a href="/setup/2" class="btn">&larr; Back</a>
+    <button type="submit" class="btn primary">Next &rarr;</button>
+  </div>
+</form>
+{% endblock %}

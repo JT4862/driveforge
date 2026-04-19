@@ -1,0 +1,69 @@
+{% extends "setup/_base.html" %}
+{% block body %}
+<p class="lede">
+  Here's what DriveForge found on this host. Nothing is configurable on
+  this step — it's a confidence check that the daemon can see your
+  hardware.
+</p>
+
+<section class="setup-panel">
+  <h2>Drives</h2>
+  {% if drives %}
+  <table class="runs">
+    <thead><tr><th>Serial</th><th>Model</th><th>Capacity</th><th>Transport</th><th>Firmware</th></tr></thead>
+    <tbody>
+    {% for d in drives %}
+      <tr>
+        <td>{{ d.serial }}</td>
+        <td>{{ d.model }}</td>
+        <td>{{ "%.1f"|format(d.capacity_tb) }} TB</td>
+        <td>{{ d.transport.value|upper }}</td>
+        <td>{{ d.firmware_version or "—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">
+    Found {{ drives|length }} drive(s). New drives plugged in later are
+    picked up automatically via udev hotplug.
+  </p>
+  {% else %}
+  <p class="warn">
+    No drives discovered. DriveForge will start anyway — plug drives in
+    after setup and they'll appear on the dashboard.
+  </p>
+  {% endif %}
+</section>
+
+<section class="setup-panel">
+  <h2>Network</h2>
+  <dl class="kv wide">
+    <dt>Hostname</dt><dd>{{ network.hostname }}</dd>
+    <dt>LAN IP</dt><dd>{{ network.ip or "—" }}</dd>
+    <dt>Configuration</dt><dd>{{ network.dhcp }}</dd>
+  </dl>
+  {% if network.dhcp == "likely DHCP" %}
+  <p class="warn">
+    &#9888; This host is on DHCP. Your web-UI URL may change on reboot. For
+    a stable URL, set a static IP via Debian's netplan config.
+  </p>
+  {% endif %}
+</section>
+
+<section class="setup-panel">
+  <h2>Chassis telemetry</h2>
+  <p class="{{ 'muted' if ipmi_ok else 'warn' }}">
+    {% if ipmi_ok %}
+      &#10003; iDRAC / IPMI reachable — chassis power readings enabled.
+    {% else %}
+      &#9888; ipmitool could not reach the local iDRAC. DriveForge will
+      still run; chassis power telemetry will be unavailable.
+    {% endif %}
+  </p>
+</section>
+
+<form method="post" action="/setup/2" class="setup-actions">
+  <a href="/setup/1" class="btn">&larr; Back</a>
+  <button type="submit" class="btn primary">Next &rarr;</button>
+</form>
+{% endblock %}

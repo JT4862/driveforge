@@ -12,15 +12,17 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from driveforge import config as cfg
 from driveforge.daemon.api import router as api_router
 from driveforge.daemon.orchestrator import Orchestrator
-from driveforge.daemon.state import DaemonState, set_state
+from driveforge.daemon.state import DaemonState, get_state, set_state
 from driveforge.web.routes import router as web_router
 from driveforge.web.routes import templates as web_templates
+from driveforge.web.setup import router as setup_router
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,21 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    @app.middleware("http")
+    async def setup_gate(request: Request, call_next):
+        """Force users through the setup wizard until it completes."""
+        s = get_state().settings
+        path = request.url.path
+        if not s.setup_completed and not (
+            path.startswith("/setup")
+            or path.startswith("/static")
+            or path.startswith("/api")
+        ):
+            return RedirectResponse(url="/setup/1", status_code=303)
+        return await call_next(request)
+
     app.include_router(api_router)
+    app.include_router(setup_router)
     app.include_router(web_router)
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

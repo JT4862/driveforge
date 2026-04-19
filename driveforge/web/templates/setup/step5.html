@@ -1,0 +1,32 @@
+{% extends "setup/_base.html" %}
+{% block body %}
+<p class="lede">
+  Optional integrations. Both can be added or changed later from Settings
+  — skip now if you're not sure.
+</p>
+
+<form method="post" action="/setup/5" class="setup-panel">
+  <label class="field">
+    <span>Outbound webhook URL</span>
+    <input type="url" name="webhook_url" value="{{ settings.integrations.webhook_url or '' }}" placeholder="https://n8n.example.com/webhook/driveforge">
+  </label>
+  <p class="muted">
+    Fires a single JSON POST on batch completion. Route to n8n, Zapier,
+    or any HTTPS endpoint. Leave empty to disable notifications.
+  </p>
+
+  <label class="field">
+    <span>Cloudflare Tunnel hostname (optional)</span>
+    <input type="text" name="cloudflare_tunnel_hostname" value="{{ settings.integrations.cloudflare_tunnel_hostname or '' }}" placeholder="driveforge.example.com">
+  </label>
+  <p class="muted">
+    Used in QR codes so public cert reports are reachable from outside
+    the LAN. Leave empty for LAN-only deployment.
+  </p>
+
+  <div class="setup-actions">
+    <a href="/setup/4" class="btn">&larr; Back</a>
+    <button type="submit" class="btn primary">Finish setup</button>
+  </div>
+</form>
+{% endblock %}

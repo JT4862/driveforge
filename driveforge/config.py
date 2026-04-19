@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     grading: GradingConfig = Field(default_factory=GradingConfig)
 
+    # First-run state. Flipped to True when the wizard completes; user can
+    # flip back to False from Settings to replay the wizard.
+    setup_completed: bool = False
+
     # Dev-only
     dev_mode: bool = False
     fixtures_dir: Path | None = None
