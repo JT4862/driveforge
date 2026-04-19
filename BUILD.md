@@ -35,14 +35,15 @@ but the process needs to run unattended and reliably.
 
 **Workflow**: plug drives into the R720, tell DriveForge to process them, walk
 away. A few days later each drive has a grade (A/B/C/fail), a printed adhesive
-cert stuck to it, and a matching inventory record in Twenty CRM.
+cert stuck to it, a matching record in the local DB, and a report page
+served at `http://driveforge.local/reports/<serial>`.
 
 **Why an app, not a bootable OS**: an earlier version of this plan called for a
 ShredOS-style bootable USB distro (Buildroot, custom kernel, minimal image).
 That tradeoff only pays off if you want portability across unknown hardware.
 DriveForge runs on one dedicated R720 forever, so the portability benefit
 evaporates and the cost — slow Buildroot iteration, rebuild-ISO for any
-change, painful integration with Twenty CRM / n8n / thermal printer — is pure
+change, painful integration with the thermal printer and outbound webhooks — is pure
 overhead. Debian + Python app is ~5x faster to build and trivially extensible.
 
 ---
@@ -71,8 +72,8 @@ overhead. Debian + Python app is ~5x faster to build and trivially extensible.
 - **Debian 12 "Bookworm"** minimal install (no desktop environment)
 - **Python 3.11+** for the application layer
 - **systemd** for service management
-- **SQLite** for local test history + in-flight state
-- **Twenty CRM** as authoritative inventory after results sync
+- **SQLite** as authoritative local store for drives, batches, telemetry
+- **Generated HTML reports** served locally at `http://driveforge.local/reports/<serial>` — no external inventory system required
 
 ### Process layout
 
@@ -80,7 +81,7 @@ Three logical components, one codebase:
 
 | Component | Role |
 |---|---|
-| `driveforge-daemon` | systemd service. Owns orchestration, DB, printer, CRM sync. Exposes REST API on `localhost:8080`. |
+| `driveforge-daemon` | systemd service. Owns orchestration, DB, printer, outbound webhook dispatch. Exposes REST API on `localhost:8080`. |
 | `driveforge-tui` | Textual-based TUI. Talks to daemon via REST. For when you're at the crash cart or the web UI is down. |
 | `driveforge-web` | FastAPI + HTMX web UI served by the daemon. Primary interface. Reachable at `http://driveforge.local` on the LAN. |
 
@@ -125,7 +126,7 @@ different Brother QL model → it's auto-detected and reconfigured.
 | `fastapi` + `uvicorn` | Daemon REST API + web UI |
 | `jinja2` | Web templates |
 | `htmx` (client-side) | Dynamic web updates without an SPA |
-| `httpx` | Async HTTP to Twenty CRM / n8n |
+| `httpx` | Async HTTP for outbound webhook dispatch |
 | `sqlalchemy` + `alembic` | DB ORM + migrations |
 | `pydantic` | Type-safe models + config validation |
 | `brother_ql` | Brother QL raster driver via raw USB (skips CUPS overhead) |
@@ -150,7 +151,7 @@ are shared.
 1. **Dashboard** — live state of the 8 bays (home)
 2. **Batches** — active + historical batch list
 3. **History** — all drives ever processed, searchable
-4. **Settings** — grading thresholds, printer, CRM, n8n
+4. **Settings** — grading thresholds, printer, outbound webhook, Cloudflare Tunnel
 5. **System** — daemon health, logs, R720 vitals, printer status
 
 ### Dashboard
@@ -182,15 +183,14 @@ affordance. A primary **[+ New Batch]** button at the top, a corner
 ### Batches / History / Settings / System
 
 - **Batches**: list with A/B/C/F breakdown per batch; drill-in shows drives;
-  actions: **Export CSV**, **Re-sync to CRM**, **Reprint any label**
+  actions: **Export CSV**, **Re-fire webhook**, **Reprint any label**
 - **History**: flat searchable drive table (serial/model/grade/date/batch);
   read-only detail view with prominent **Reprint label** button
-- **Settings**: four panels — Grading (in-app threshold editor), Printer
+- **Settings**: three panels — Grading (in-app threshold editor), Printer
   (model dropdown, label-roll picker, test print, template preview,
-  paper-out diagnostic), CRM (endpoint + token + test connection),
-  Integrations (n8n webhook, firmware DB source). **All config lives in
-  the UI**; YAML files on disk are written by the daemon and not intended
-  for hand-editing.
+  paper-out diagnostic), Integrations (outbound webhook URL, Cloudflare
+  Tunnel, firmware DB source). **All config lives in the UI**; YAML files
+  on disk are written by the daemon and not intended for hand-editing.
 - **System**: daemon status, DB size, printer status, R720 vitals, last 50
   errors with drive context
 
@@ -214,8 +214,9 @@ than ask:
    auto-configures it.
 4. **Grading** — defaults preselected from shipped `grading.yaml.example`;
    inline editor with "Reset to defaults"
-5. **Optional integrations** — Twenty CRM, n8n webhook, Cloudflare Tunnel.
-   Each has a **Test connection** button and is individually skippable.
+5. **Optional integrations** — outbound webhook (for n8n / Zapier / custom
+   endpoints) and Cloudflare Tunnel. Each has a **Test** button and is
+   individually skippable.
 6. **Done** — lands on the dashboard, ready to run a batch
 
 ### Printer Compatibility
@@ -306,7 +307,7 @@ Phase 5: badblocks destructive write/read
          Time: 24-48 hours per 8TB drive
 Phase 6: SMART long self-test (10-20 hours)
 Phase 7: Post-test SMART snapshot
-Phase 8: Diff analysis → grade → print cert → Twenty CRM sync
+Phase 8: Diff analysis → grade → print cert → fire outbound webhook (if configured)
 ```
 
 Typical per-drive cycle: 3-5 days for 8TB+ HDDs, hours for NVMe.
@@ -317,7 +318,7 @@ Typical per-drive cycle: 3-5 days for 8TB+ HDDs, hours for NVMe.
 
 Commercial refurbishers grade drives in tiers because reality isn't binary.
 DriveForge assigns A/B/C/fail based on SMART attributes and test outcomes.
-Thresholds live in `/etc/driveforge/grading.yaml` and are user-tunable.
+Thresholds are tunable in-app via Settings → Grading.
 
 | Grade | Description | Typical use |
 |---|---|---|
@@ -376,39 +377,67 @@ Grade:    A
 Tested:   2026-04-19
 POH:      12,432 h
 
-[QR code → Twenty CRM record]
+[QR code → local report page]
 ```
 
 The QR code encodes a URL to the drive's **public report landing page**
-served by DriveForge (see Phase 6), which links to the Twenty CRM
-`HardwareAsset` record. The landing page is a read-only view of the drive's
-cert: model, serial, grade, test date, key SMART attributes, and thermal
-chart from the test run. Exposed externally via Cloudflare Tunnel so anyone
-with the label can scan and verify without a CRM login.
+served by DriveForge itself (see Phase 6). No external service required.
+The landing page is a read-only view of the drive's cert: model, serial,
+grade, test date, key SMART attributes, and thermal chart from the test
+run. Served from the local daemon at `http://driveforge.local/reports/<serial>`
+and optionally exposed externally via Cloudflare Tunnel so anyone with the
+label can scan and verify.
 
 ---
 
-## Twenty CRM Integration
+## Inventory & External Integration
 
-Each processed drive becomes a `HardwareAsset` record in Twenty CRM, synced in
-Phase 8. Batches group drives processed together for inventory reporting.
+DriveForge is **self-contained by default**. Drive records, batch history,
+and grading results live in the local SQLite DB and are served by the web
+UI at `http://driveforge.local`. There is no dependence on any external
+inventory system, CRM, or hosted service.
 
-`HardwareAsset` fields:
-- `serial` (primary identifier)
-- `model`
-- `capacity_tb`
-- `grade` (A/B/C/fail)
-- `tested_at`
-- `power_on_hours_at_test`
-- `reallocated_sectors`
-- `report_url`
-- `batch_id` (FK to `RefurbBatch`)
-- `source` (e.g., "LocalCo pull 2026-04-19")
+For users who want results pushed elsewhere (CRM, warehouse software,
+Notion, Airtable, Slack, email), the daemon fires a single outbound
+webhook on batch completion. Routing the payload to any specific system
+is the user's responsibility — typically via n8n, Zapier, or a small
+script. DriveForge itself is payload-agnostic.
 
-`RefurbBatch` aggregates per-batch results: "batch of 15 pulled 2026-04-19 —
-11 Grade A, 2 Grade B, 2 scrap." REST patterns are documented in
-`~/.claude/projects/-Users-jt/memory/twenty-crm.md`; stick to them to avoid
-re-deriving the response shapes.
+Sample webhook payload:
+
+```json
+{
+  "event": "batch.complete",
+  "batch_id": "01HT...",
+  "source": "LocalCo pull 2026-04-19",
+  "totals": {"A": 11, "B": 2, "C": 0, "fail": 2},
+  "drives": [
+    {
+      "serial": "V8G6X4RL",
+      "model": "HGST HUS726T6TALE6L4",
+      "capacity_tb": 6.0,
+      "grade": "A",
+      "tested_at": "2026-04-19T14:32:11Z",
+      "power_on_hours": 12432,
+      "reallocated_sectors": 0,
+      "report_url": "http://driveforge.local/reports/V8G6X4RL"
+    }
+  ]
+}
+```
+
+### Local DB schema (canonical)
+
+The SQLite DB is the source of truth. Relevant records:
+
+- **Drive**: serial (PK), model, capacity_tb, first_seen_at
+- **TestRun**: drive_serial (FK), batch_id (FK), started_at, completed_at,
+  grade, power_on_hours_at_test, reallocated_sectors, report_url
+- **Batch**: id (PK), source, started_at, completed_at, notes
+- **TelemetrySample**: drive_serial (FK), phase, ts, temp_c, chassis_w
+
+Every webhook payload is derived from these tables; the webhook is a
+projection of local state, never authoritative.
 
 ---
 
@@ -469,7 +498,8 @@ driveforge/
 │   │   ├── grading.py               # A/B/C/fail logic
 │   │   ├── firmware.py              # NVMe updates + lookup
 │   │   ├── printer.py               # Brother QL raster cert printing
-│   │   └── crm.py                   # Twenty CRM client
+│   │   ├── hotplug.py               # pyudev monitor (printer + drive events)
+│   │   └── webhook.py               # Outbound JSON webhook dispatch
 │   └── db/
 │       ├── models.py                # SQLAlchemy schemas
 │       └── migrations/              # Alembic
@@ -502,7 +532,7 @@ driveforge/
 | **2** | Textual TUI drives daemon via REST; 8-drive parallel orchestration via tmux | 1 week |
 | **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; first real A/B/C verdicts | 1 week |
 | **4** | Thermal printer + cert label design; auto-prints on completion | 3-4 days |
-| **5** | Twenty CRM sync (HardwareAsset + RefurbBatch); n8n webhook on batch complete | 3-4 days |
+| **5** | Outbound webhook on batch complete (JSON POST to configured URL); local report page scaffolding | 3-4 days |
 | **6** | Web UI (FastAPI + HTMX) as primary interface; telemetry charts; public-facing QR landing page + Cloudflare Tunnel exposure; TUI becomes fallback | 1-2 weeks |
 | **7** | NVMe firmware auto-update | 3-4 days |
 | **8+** | SATA/SAS firmware lookup DB; community drive-stats DB; public OSS release | ongoing |
@@ -541,8 +571,7 @@ with local-only features; every external integration is opt-in.
 
 | Setting | Default | Effect when empty |
 |---|---|---|
-| n8n webhook URL | empty | No notifications fire |
-| Twenty CRM endpoint + token | empty | Results stay local in SQLite + generated report files |
+| Outbound webhook URL | empty | No notifications fire; results stay local |
 | Cloudflare Tunnel | not configured | QR landing page serves on local LAN only |
 | Firmware lookup DB URL | bundled with app | Works out of the box; remote updates optional |
 
@@ -585,6 +614,7 @@ read-only report page on the LAN. Everything else is toggled on in Settings.
 
 ## Prior Art
 
+### Open-source tools and references
 - **[disk-burnin.sh](https://github.com/Spearfoot/disk-burnin-and-testing)** —
   the bash pipeline that's the direct inspiration for DriveForge's test logic.
   We reimplement in Python rather than vendor the shell script.
@@ -596,13 +626,50 @@ read-only report page on the LAN. Everything else is toggled on in Settings.
   diverged when we decided on a dedicated-server app instead of a portable
   ISO, but the test-flow inspiration still applies.
 
+### Commercial refurbishment pipelines
+
+DriveForge's phase ordering mirrors what commercial hard-drive refurbishers
+(Server Parts Deals, Water Panther, Bargain Hardware, etc.) actually run.
+Direct mapping:
+
+| DriveForge phase | Commercial equivalent |
+|---|---|
+| Pre-test SMART + short self-test | Intake triage / initial health screen |
+| Firmware check/update | Same (most shops do it) |
+| Secure erase (hdparm/sg_format/nvme format) | NIST 800-88 sanitization — same underlying commands |
+| badblocks destructive scan | "Burn-in" / surface scan |
+| Long self-test | Same |
+| Pre/post SMART diff | Degradation check post-burn-in |
+| Grading (A/B/C/Fail) | Tiered sorting — Recertified / Used Tested / Scrap |
+| Cert label + QR | Barcode label + inventory record |
+
+**What commercial shops do that DriveForge intentionally skips** — relevant
+at industrial scale, noise at homelab scale:
+- Robotic test benches for high-throughput automation
+- Signed NIST 800-88 sanitization certificates with audit trail
+- Warranty attachment (1–5 year commercial warranties)
+- Vendor proprietary diagnostics (SeaChest, WD DLGDiag, HGST WinDFT)
+- Thermal / vibration chamber testing
+- Power-cycle aging protocols
+
+**What DriveForge does better than commercial shops**:
+- **Open, tunable grading rubric** — commercial rubrics are proprietary
+- **Public QR cert pages** — anyone with the label verifies the grade, no login
+- **Community drive-stats contribution** (Phase 8+) — anonymized failure
+  data, Backblaze-style but crowdsourced from homelab refurbers
+
+**What DriveForge will never do**: SMART counter reset / POH fakery. That
+is gray-market fraud, not refurbishment.
+
 ---
 
 ## Integration Ideas (stretch, post-MVP)
 
 ### Homelab (easy, Phase 7+)
-- **n8n workflow** triggered on batch completion → summary email / Slack
-  (basic webhook is Phase 5; richer workflows layered on later)
+- **Route the outbound webhook to anything** — n8n workflow, Zapier, a
+  Discord bot, a Python script that writes to a CRM or inventory system.
+  The webhook ships in Phase 5; downstream routing is a user concern, not
+  a DriveForge concern.
 - **Remote admin access** via Cloudflare Tunnel — the public QR landing page
   ships in Phase 6; full admin UI exposure is a separate Phase 7+ decision
 - No ArgoCD — DriveForge is inherently tied to physical R720 hardware, not
