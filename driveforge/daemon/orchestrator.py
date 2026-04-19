@@ -147,6 +147,7 @@ class Orchestrator:
         self.state.bay_assignments.clear()
         self.state.active_phase.clear()
         self.state.active_percent.clear()
+        self.state.active_sublabel.clear()
         self._tasks.clear()
         logger.warning("abort_all cancelled %d drive task(s)", cancelled)
         return cancelled
@@ -191,6 +192,7 @@ class Orchestrator:
                 self.state.bay_assignments.pop(bay_key, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
+                self.state.active_sublabel.pop(drive.serial, None)
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.
@@ -297,6 +299,7 @@ class Orchestrator:
     async def _advance(self, run_id: int, phase: str, drive: Drive) -> None:
         self.state.active_phase[drive.serial] = phase
         self.state.active_percent[drive.serial] = 0.0
+        self.state.active_sublabel.pop(drive.serial, None)
         self._log(drive.serial, f"→ phase: {phase}")
         with self.state.session_factory() as session:
             run = session.get(m.TestRun, run_id)
@@ -393,12 +396,29 @@ class Orchestrator:
                 await asyncio.sleep(0.1)
             return (0, 0, 0)
         serial = drive.serial
-        self._log(serial, f"badblocks -wsv -b 4096 {drive.device_path}")
+        self._log(
+            serial,
+            f"badblocks -wsv -b {badblocks.BLOCK_SIZE} -c {badblocks.BLOCK_COUNT} "
+            f"{drive.device_path}",
+        )
         # Throttle log updates to every 10% so we don't fill the buffer
         last_logged_pct = [0.0]
+        last_pass_label = [""]
 
-        def on_progress(pct: float, errs: tuple[int, int, int]) -> None:
+        def on_progress(
+            pct: float,
+            errs: tuple[int, int, int],
+            pass_label: str | None,
+        ) -> None:
             self.state.active_percent[serial] = float(pct)
+            if pass_label is not None:
+                self.state.active_sublabel[serial] = pass_label
+                # Log once per pass transition so the phase log shows the
+                # sweep boundaries without drowning in per-% spam.
+                if pass_label != last_pass_label[0]:
+                    self._log(serial, f"badblocks: starting {pass_label}")
+                    last_pass_label[0] = pass_label
+                    self._persist_log(serial, run_id)
             if pct - last_logged_pct[0] >= 10.0:
                 self._log(serial, f"badblocks: {pct:.1f}% errors={errs[0]}/{errs[1]}/{errs[2]}")
                 last_logged_pct[0] = pct
@@ -406,7 +426,7 @@ class Orchestrator:
 
         try:
             errs = await badblocks.run_destructive_streaming(
-                drive.device_path, on_progress=on_progress
+                drive.device_path, on_progress=on_progress, owner=serial
             )
         except badblocks.BadblocksError as exc:
             raise PipelineFailure("badblocks", str(exc)) from exc

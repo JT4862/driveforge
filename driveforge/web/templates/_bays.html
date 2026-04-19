@@ -44,6 +44,7 @@
     <div class="drive-model">{{ bay.model }}</div>
     <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
     <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
+    {% if bay.sublabel %}<div class="phase-sub">{{ bay.sublabel }}</div>{% endif %}
     <div class="progress">
       <div class="bar" style="width: {{ bay.percent }}%"></div>
     </div>

@@ -118,6 +118,7 @@ def _bay_card(
                 "phase": phase,
                 "phase_class": _PHASE_CLASS.get(phase, "info"),
                 "percent": state.active_percent.get(serial, 0.0),
+                "sublabel": state.active_sublabel.get(serial),
                 "elapsed_label": _format_duration(elapsed_sec),
                 "eta_label": f"~{_format_duration(eta)}" if eta else None,
             }

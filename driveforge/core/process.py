@@ -108,6 +108,13 @@ def active_pids(owner: str) -> list[int]:
         return list(_ACTIVE.get(owner, []))
 
 
+# Public aliases for modules that spawn their own subprocesses (e.g. badblocks
+# streams output and can't use run()/run_async). These must be paired — always
+# unregister in a finally block so crashed callers don't leak stale PIDs.
+register_pid = _register
+unregister_pid = _unregister
+
+
 def kill_owner(owner: str, *, grace_sec: float = 3.0) -> int:
     """SIGTERM every subprocess tagged with `owner`, wait `grace_sec`, then SIGKILL.
 

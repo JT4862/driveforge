@@ -30,6 +30,10 @@ class DaemonState:
     # Latest phase per drive — for fast dashboard rendering
     active_phase: dict[str, str] = field(default_factory=dict)
     active_percent: dict[str, float] = field(default_factory=dict)
+    # Optional phase-scoped sub-label shown on the bay card — e.g. which of
+    # the 8 badblocks passes is running ("pass 3/8 · write 0xFF"). Cleared on
+    # phase transition.
+    active_sublabel: dict[str, str] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
 
