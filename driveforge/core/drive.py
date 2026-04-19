@@ -93,6 +93,41 @@ def _root_device_name() -> str | None:
     return name.rstrip("0123456789")
 
 
+def detect_true_transport(device_path: str) -> Transport | None:
+    """Probe smartctl for the drive's actual wire protocol.
+
+    lsblk's `tran` field reports the HBA-level transport, which isn't always
+    the drive's protocol. A SATA SSD attached to a SAS HBA shows up as
+    tran=sas at the block layer but speaks ATA over STP tunneling. This
+    matters for erase dispatch — sg_format (SCSI FORMAT UNIT) will fail
+    with "Illegal request" on such drives; they want hdparm instead.
+
+    smartctl reports:
+      "type": "sat", "protocol": "ATA"   → SATA drive (even via SAS HBA)
+      "type": "scsi", "protocol": "SCSI" → true SAS
+      "type": "nvme"                      → NVMe
+    """
+    import json as _json
+
+    result = run(["smartctl", "--json", "-i", device_path])
+    if not result.stdout:
+        return None
+    try:
+        data = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return None
+    device = data.get("device") or {}
+    dtype = (device.get("type") or "").lower()
+    protocol = (device.get("protocol") or "").lower()
+    if dtype == "nvme" or protocol == "nvme":
+        return Transport.NVME
+    if dtype.startswith("sat") or protocol == "ata":
+        return Transport.SATA
+    if dtype == "scsi" or protocol == "scsi":
+        return Transport.SAS
+    return None
+
+
 def discover(include_root: bool = False) -> list[Drive]:
     """Discover all attached disks, excluding the root device by default."""
     result = run(
@@ -126,13 +161,23 @@ def discover(include_root: bool = False) -> list[Drive]:
             rota_int = rota
         else:
             rota_int = None
+        device_path = f"/dev/{name}"
+        transport = _transport_of(entry)
+        # Only re-probe when lsblk reports SAS. SATA-on-SAS-HBA is the
+        # ambiguous case where the kernel says "sas" but the drive actually
+        # speaks ATA (STP tunneling). lsblk is trustworthy for nvme / usb /
+        # direct-attached SATA.
+        if transport == Transport.SAS:
+            refined = detect_true_transport(device_path)
+            if refined in (Transport.SATA, Transport.SAS):
+                transport = refined
         drives.append(
             Drive(
                 serial=serial,
                 model=(entry.get("model") or "Unknown").strip(),
                 capacity_bytes=int(entry.get("size") or 0),
-                transport=_transport_of(entry),
-                device_path=f"/dev/{name}",
+                transport=transport,
+                device_path=device_path,
                 rotation_rate=(0 if rota_int == 0 else (7200 if rota_int == 1 else None)),
                 firmware_version=entry.get("rev"),
             )
