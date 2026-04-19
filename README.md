@@ -109,8 +109,10 @@ Any of these works:
 4. **Hostname**: set to `driveforge` (this is what mDNS advertises, so
    `http://driveforge.local:8080` works without further config)
 5. **Domain**: leave blank or set to `.local`
-6. Root password + first user — your preference. The first user will get
-   sudo access.
+6. Root password + first user — **pick any login name except
+   `driveforge`**. That name is reserved for the DriveForge daemon's
+   system account; reusing it collapses the service/admin boundary.
+   Common picks: your own name, `admin`, `ops`.
 7. **Partitioning**: select **"Guided – use entire disk"** on the boot SSD.
    Do **not** pick a front-bay drive — DriveForge assumes those are
    test-under-test targets.

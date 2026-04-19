@@ -38,7 +38,17 @@ apt-get install -y --no-install-recommends \
 ok "system packages installed"
 
 log "Creating driveforge user and directories..."
-id -u driveforge >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/driveforge driveforge
+if id -u driveforge >/dev/null 2>&1; then
+  EXISTING_UID=$(id -u driveforge)
+  EXISTING_SHELL=$(getent passwd driveforge | cut -d: -f7)
+  if [[ $EXISTING_UID -ge 1000 ]] || [[ "$EXISTING_SHELL" != "/usr/sbin/nologin" && "$EXISTING_SHELL" != "/bin/false" ]]; then
+    warn "The 'driveforge' user already exists as a login account (UID $EXISTING_UID, shell $EXISTING_SHELL)."
+    warn "The daemon will run as this account. For a cleaner service/admin"
+    warn "boundary, use a different login name and reinstall."
+  fi
+else
+  useradd -r -s /usr/sbin/nologin -d /var/lib/driveforge driveforge
+fi
 # Grant access to raw block + SCSI-generic devices. `disk` covers /dev/sdX
 # and /dev/nvme*; `cdrom` covers /dev/sg* on most Debian setups. The daemon
 # needs these to open devices for smartctl, hdparm, sg_format, nvme-cli,
