@@ -447,27 +447,64 @@ projection of local state, never authoritative.
 
 ## Firmware Updates
 
-### MVP (Phase 1): NVMe only
-NVMe firmware updates are standardized via the NVMe spec:
-```
-nvme fw-download -f firmware.bin /dev/nvmeN
-nvme fw-commit -s <slot> -a <action> /dev/nvmeN
-```
+DriveForge uses a **firmware lookup DB** — a mapping of
+`drive model → known-good firmware version + blob URL + SHA256 + signature`
+— to both detect and optionally apply firmware updates during Phase 3 of
+the pipeline.
 
-If DriveForge has a firmware blob matching the drive's model with a newer
-known-good version, update it in Phase 3. Otherwise skip cleanly.
+### Update mechanisms
 
-### Future (Phase 5-6): SATA/SAS best-effort
-SATA and SAS firmware is vendor-specific and gated:
-- Some vendors publish firmware (Seagate SeaChest, Intel/Solidigm, HGST via
-  WDC's support site for older Ultrastars)
-- Most Dell/HP-branded drives require support contracts
-- Update mechanism: `sg_write_buffer` if the blob is available
+| Drive type | Command | Notes |
+|---|---|---|
+| **NVMe** | `nvme fw-download` + `nvme fw-commit` | NVMe spec, universal |
+| **SATA** | `hdparm --fwdownload` (generic ATA) or vendor tool | Seagate SeaChest, Intel/Solidigm `isdct`, etc. when available |
+| **SAS** | `sg_write_buffer` (SCSI WRITE BUFFER) | Works on most enterprise SAS drives |
 
-Approach: build a lookup DB `model → known-good-firmware`, cache locally,
-optionally community-contributed. Never update silently on errors. Phase 6+
-stretch: publish the DB as a community resource alongside anonymized
-drive-stats contributions.
+### Safety model — opt-in, never silent
+
+Firmware flashing can brick a drive. Defaults reflect that:
+
+1. **Check-only by default.** Phase 3 reports "firmware update available:
+   v2.1.5 → v2.3.0" in the drive detail UI. No flash happens.
+2. **Auto-apply is an explicit opt-in** in Settings → Firmware; default off.
+3. **Dry-run mode** — downloads blob, verifies signature and SHA256, does
+   not flash. Useful for testing DB entries before enabling auto-apply.
+4. **Signed community DB entries** — DriveForge refuses to apply unsigned
+   blobs. A poisoned DB entry should not be able to brick fleets.
+5. **Post-update re-check** — re-query firmware version after commit; fail
+   loud if it doesn't match the expected value.
+6. **Per-drive skip flag** — even with auto-apply on, a "skip firmware
+   update" flag on the drive (settable in UI before batch start) wins.
+
+### Known limitations — drives we cannot update
+
+The UI will flag these cases clearly rather than failing quietly. Document
+them in the user-facing README too:
+
+- **Dell / HP / NetApp OEM-branded drives** — custom firmware strings that
+  don't match retail blobs. Retail firmware usually refuses to install on
+  OEM-stamped firmware. Skipped with a "vendor-locked firmware" badge.
+- **Vendor tools that are Windows-only** — Samsung Magician, some HGST
+  WinDFT-only blobs, several WD Gold firmware packages. Reported as
+  "update exists, manual flash required" with a link to the vendor's tool.
+- **Drives requiring a physical power cycle after flash** — DriveForge
+  can't power-cycle individual bays on the R720 backplane. For affected
+  models, the UI pauses after commit and prompts the user to reseat the
+  drive before continuing the pipeline.
+- **Drives under active vendor support contracts** (most Dell/HP enterprise
+  stock) — firmware is gated behind a support login we can't access.
+  Flagged as "firmware gated by vendor".
+- **Anything without a DB entry** — if no match, the drive skips firmware
+  cleanly. No failure, no blocking.
+
+### Phase mapping
+
+- **Phase 3 (MVP)**: NVMe firmware **check** only — reports availability,
+  no apply, no DB writes
+- **Phase 7**: NVMe auto-apply (opt-in), signing, dry-run, post-update verify
+- **Phase 8+**: SATA/SAS lookup DB → check → opt-in auto-apply, same
+  safety model; community-contributed signed entries; potential public
+  firmware DB release alongside anonymized drive-stats
 
 ---
 
@@ -647,6 +684,11 @@ trusted public cert for the QR landing page.
 - The one-line bootstrap install command
 - Screenshots of the first-run setup wizard + dashboard
 - Note that all configuration happens in the web UI (no file editing)
+- **Firmware update limitations** — prominent section listing drive
+  categories DriveForge cannot auto-update (OEM-branded Dell/HP/NetApp,
+  Windows-only vendor tool drives, drives requiring physical power cycle,
+  drives gated behind vendor support contracts). Mirror the Known
+  Limitations list from the Firmware Updates section.
 
 ---
 
