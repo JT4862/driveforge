@@ -496,64 +496,41 @@ projection of local state, never authoritative.
 
 ## Firmware Updates
 
-DriveForge uses a **firmware lookup DB** — a mapping of
-`drive model → known-good firmware version + blob URL + SHA256 + signature`
-— to both detect and optionally apply firmware updates during Phase 3 of
-the pipeline.
+**Scoped to display-only.** DriveForge reads the drive's current firmware
+version via lsblk's `REV` field on discovery and logs it during Phase 3 of
+the pipeline. It does not look up newer versions, download blobs, or
+apply firmware. Updates are an explicit manual step by the operator using
+vendor tools when they have the blob.
 
-### Update mechanisms
+### Why not auto-update?
 
-| Drive type | Command | Notes |
-|---|---|---|
-| **NVMe** | `nvme fw-download` + `nvme fw-commit` | NVMe spec, universal |
-| **SATA** | `hdparm --fwdownload` (generic ATA) or vendor tool | Seagate SeaChest, Intel/Solidigm `isdct`, etc. when available |
-| **SAS** | `sg_write_buffer` (SCSI WRITE BUFFER) | Works on most enterprise SAS drives |
+An earlier design had a signed community firmware DB + per-pair approval
+rows + canary drives + fail-closed safety gates. We ripped it out
+mid-session. Reasons:
 
-### Safety model — opt-in, never silent
+- **There is no public "apt repo" for drive firmware.** Every vendor
+  distributes separately; most enterprise drives are gated behind support
+  contracts; redistributing blobs is legally murky.
+- **DriveForge's target scale is homelab** (~30 drives at a time, one
+  operator). The defense-in-depth designed to stop a poisoned community
+  DB from bricking fleets was overkill.
+- **Existing tooling handles it fine** — when an operator has a firmware
+  blob in hand, Seagate SeaChest / Intel `isdct` / `nvme-cli` / `hdparm
+  --fwdownload` already do the job reliably. DriveForge duplicating that
+  with a thin wrapper added little.
 
-Firmware flashing can brick a drive. Defaults reflect that:
+### What DriveForge does surface
 
-1. **Check-only by default.** Phase 3 reports "firmware update available:
-   v2.1.5 → v2.3.0" in the drive detail UI. No flash happens.
-2. **Auto-apply is an explicit opt-in** in Settings → Firmware; default off.
-3. **Dry-run mode** — downloads blob, verifies signature and SHA256, does
-   not flash. Useful for testing DB entries before enabling auto-apply.
-4. **Signed community DB entries** — DriveForge refuses to apply unsigned
-   blobs. A poisoned DB entry should not be able to brick fleets.
-5. **Post-update re-check** — re-query firmware version after commit; fail
-   loud if it doesn't match the expected value.
-6. **Per-drive skip flag** — even with auto-apply on, a "skip firmware
-   update" flag on the drive (settable in UI before batch start) wins.
+- Current firmware version in Drive Detail → Hardware panel
+- A log line during Phase 3: `firmware: <version> (manual updates only)`
+- Nothing else — no "update available" prompts, no download UI, no
+  approvals
 
-### Known limitations — drives we cannot update
+### If firmware needs updating
 
-The UI will flag these cases clearly rather than failing quietly. Document
-them in the user-facing README too:
-
-- **Dell / HP / NetApp OEM-branded drives** — custom firmware strings that
-  don't match retail blobs. Retail firmware usually refuses to install on
-  OEM-stamped firmware. Skipped with a "vendor-locked firmware" badge.
-- **Vendor tools that are Windows-only** — Samsung Magician, some HGST
-  WinDFT-only blobs, several WD Gold firmware packages. Reported as
-  "update exists, manual flash required" with a link to the vendor's tool.
-- **Drives requiring a physical power cycle after flash** — DriveForge
-  can't power-cycle individual bays on the R720 backplane. For affected
-  models, the UI pauses after commit and prompts the user to reseat the
-  drive before continuing the pipeline.
-- **Drives under active vendor support contracts** (most Dell/HP enterprise
-  stock) — firmware is gated behind a support login we can't access.
-  Flagged as "firmware gated by vendor".
-- **Anything without a DB entry** — if no match, the drive skips firmware
-  cleanly. No failure, no blocking.
-
-### Phase mapping
-
-- **Phase 3 (MVP)**: NVMe firmware **check** only — reports availability,
-  no apply, no DB writes
-- **Phase 7**: NVMe auto-apply (opt-in), signing, dry-run, post-update verify
-- **Phase 8+**: SATA/SAS lookup DB → check → opt-in auto-apply, same
-  safety model; community-contributed signed entries; potential public
-  firmware DB release alongside anonymized drive-stats
+Operator runs the vendor tool out-of-band, reboots or re-inserts the
+drive, and re-runs a batch. The new firmware version will appear in the
+next test run's record automatically.
 
 ---
 
@@ -628,18 +605,19 @@ driveforge/
 
 | Phase | Goal | Status |
 |---|---|---|
-| **1** | Daemon skeleton; drive discovery; smartctl + badblocks + erase wrappers; logs to `/var/log/driveforge` | ✅ Fixture-complete (real-hardware pending) |
-| **2** | Textual TUI drives daemon via REST; parallel orchestration | ✅ Fixture-complete |
-| **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; first real A/B/C verdicts | ✅ Fixture-complete |
-| **4** | Thermal printer + cert label design; auto-prints on completion | ✅ Code + Pillow rendering complete; physical print pending real hardware |
-| **5** | Outbound webhook on batch complete (JSON POST to configured URL); local report page scaffolding | ✅ Complete |
-| **6** | Web UI (FastAPI + HTMX) as primary interface; telemetry charts (Chart.js); public-facing QR landing page; first-run setup wizard; editable Settings | ✅ Complete (Cloudflare Tunnel exposure deferred) |
-| **7** | NVMe firmware auto-apply (approval model + signing + canary decision function) | 🟡 Decision logic + signing complete; orchestrator flash dispatch pending real hardware |
-| **8+** | SATA/SAS firmware lookup DB; community drive-stats DB; slot LED control via sg_ses; public OSS release | ongoing |
+| **1** | Daemon skeleton; drive discovery; smartctl + badblocks + erase wrappers; logs to `/var/log/driveforge` | ✅ Real-hardware quick-mode validated on R720 |
+| **2** | Textual TUI drives daemon via REST; parallel orchestration | ✅ Fixture-complete (real-hardware parallel batches untested) |
+| **3** | Grading logic + pre/post SMART diff; telemetry collection (drive temp + chassis power); writes reports; real A/B/C verdicts | ✅ Working on real hardware (quick-mode Intel SSD → Grade B) |
+| **4** | Thermal printer + cert label design; auto-prints on completion | ✅ Code + Pillow rendering complete; physical print pending printer purchase |
+| **5** | Outbound webhook on batch complete (JSON POST to configured URL); local report page | ✅ Complete |
+| **6** | Web UI (FastAPI + HTMX) — live dashboard, telemetry charts, public QR landing page, first-run setup wizard, editable Settings, quick-mode provisional marking | ✅ Complete; validated on R720 |
+| **7** | ~~NVMe firmware auto-apply~~ | ❌ **Removed** — scope decision to keep firmware as manual-only. See Firmware Updates section. |
+| **8+** | Slot LED control via sg_ses (requires SES-capable backplane); public OSS release | ongoing |
 
-**Current status** (2026-04-19): Phases 1-6 complete and runnable against
-fixtures. 39 unit tests passing. First real-hardware install has not yet
-happened — the next meaningful milestone is a Debian VM / R720 dry run.
+**Current status** (2026-04-19, end of session): 31 tests passing (down
+from 44 after firmware rip-out). Real-hardware quick-mode validated on
+R720 with Intel SSD (Grade B). Full-mode run on real hardware still
+pending (takes 6+ hours on a 300GB SAS drive).
 
 ---
 
