@@ -61,12 +61,24 @@
     <dt>Latest known-good</dt><dd>{{ firmware_rule.latest_version or "—" }}</dd>
     <dt>Status</dt><dd>
       {% if firmware_rule.update_available %}
-        <span class="bad">update available</span> — approve in Settings → Firmware to auto-apply on future runs
+        <span class="bad">update available</span>
       {% else %}
         <span class="ok">{{ firmware_rule.detail }}</span>
       {% endif %}
     </dd>
   </dl>
+  {% if firmware_rule.update_available and firmware_rule.latest_version %}
+  <p class="muted small" style="margin-top: 12px;">
+    Flashing requires: an approval for this (model, version), <code>auto_apply</code>
+    enabled in <a href="/settings">Settings → Firmware</a>, and a valid signature on
+    the DB entry. All gates fail-closed.
+  </p>
+  <form method="post" action="/firmware/approve-latest" style="margin-top: 8px;">
+    <input type="hidden" name="drive_serial" value="{{ drive.serial }}">
+    <input type="hidden" name="version" value="{{ firmware_rule.latest_version }}">
+    <button type="submit" class="btn">Approve {{ firmware_rule.latest_version }} for auto-apply</button>
+  </form>
+  {% endif %}
 </section>
 {% endif %}
 

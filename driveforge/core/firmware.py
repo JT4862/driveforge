@@ -164,6 +164,23 @@ def verify_blob(blob_path: Path, expected_sha256: str) -> bool:
     return _sha256_of(blob_path) == expected_sha256.lower()
 
 
+class FirmwareDownloadError(RuntimeError):
+    pass
+
+
+def download_blob(url: str, dest: Path, *, timeout: float = 120.0) -> Path:
+    """Download a firmware blob to `dest`. Synchronous; call from executor."""
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            dest.write_bytes(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        raise FirmwareDownloadError(f"failed to download {url}: {exc}") from exc
+    return dest
+
+
 @dataclass(frozen=True)
 class ApplyDecision:
     """Describes what the orchestrator should do for this drive's firmware."""
