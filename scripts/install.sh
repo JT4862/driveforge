@@ -39,6 +39,12 @@ ok "system packages installed"
 
 log "Creating driveforge user and directories..."
 id -u driveforge >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d /var/lib/driveforge driveforge
+# Grant access to raw block + SCSI-generic devices. `disk` covers /dev/sdX
+# and /dev/nvme*; `cdrom` covers /dev/sg* on most Debian setups. The daemon
+# needs these to open devices for smartctl, hdparm, sg_format, nvme-cli,
+# and badblocks. CAP_SYS_RAWIO alone is not enough — open() is gated by
+# filesystem permissions before capabilities apply.
+usermod -a -G disk,cdrom driveforge
 install -d -o driveforge -g driveforge -m 0755 /var/lib/driveforge /var/log/driveforge
 # Daemon needs to write to /etc/driveforge/ when the user saves settings in
 # the UI — owned by the driveforge user, not root.
