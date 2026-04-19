@@ -139,17 +139,20 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     grade_x = size[0] - grade_w - padding
     grade_y = padding + 70  # below title separator, vertically centered-ish
 
-    # QR sits below the title, in the column between body text and grade
+    # QR sits below the title, in the column between body text and grade.
+    # Wide left column (380 px) so 26-char rows like
+    # "Model: INTEL SSDSC2BB120G4" don't collide with the QR on the top rows
+    # where they vertically overlap.
     qr = qrcode.QRCode(box_size=3, border=1)
     qr.add_data(data.report_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     qr_top = padding + 52  # just below the title separator line
+    qr_x = padding + 380
     qr_size_cap = size[1] - qr_top - 32  # leave room for footer
-    qr_size = min(qr_size_cap, grade_x - (padding + 320) - 12, 160)
+    qr_size = min(qr_size_cap, grade_x - qr_x - 12, 150)
     qr_size = max(qr_size, 80)
     qr_img = qr_img.resize((qr_size, qr_size))
-    qr_x = padding + 320
     img.paste(qr_img, (qr_x, qr_top))
 
     draw.text((grade_x, grade_y), grade_text, font=font_grade, fill="black")
