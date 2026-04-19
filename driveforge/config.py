@@ -45,7 +45,14 @@ class GradingConfig(BaseModel):
     override on a per-install basis.
     """
 
-    grade_a_reallocated_max: int = 0
+    # Reallocated-sector thresholds. Grade A used to require strictly 0, but
+    # that's over-strict: every commercial drive ships with a spare-sector pool
+    # and a handful of stable reallocations has no correlation with imminent
+    # failure (Backblaze multi-year data). The `no_degradation_reallocated_sectors`
+    # rule already fails a drive that reallocates MORE during its own test, so
+    # the absolute count just gates the initial bucketing. 3 is a good "pristine
+    # with minor wear" ceiling for Grade A.
+    grade_a_reallocated_max: int = 3
     grade_b_reallocated_max: int = 8
     grade_c_reallocated_max: int = 40
     fail_on_pending_sectors: bool = True

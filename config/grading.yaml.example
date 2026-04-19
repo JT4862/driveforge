@@ -12,7 +12,7 @@
 # Fail   : pending sectors, offline-uncorrectable, test failures, or any
 #          attribute degradation between pre- and post-test snapshots
 
-grade_a_reallocated_max: 0
+grade_a_reallocated_max: 3
 grade_b_reallocated_max: 8
 grade_c_reallocated_max: 40
 fail_on_pending_sectors: true
