@@ -21,7 +21,11 @@ AmbientCapabilities=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
 
 NoNewPrivileges=false
-ProtectHome=true
+# ProtectHome intentionally disabled pre-alpha: install.sh uses
+# `pip install -e <src>` where <src> lives in the admin's home dir. Re-enable
+# once we ship non-editable wheels and the runtime dir is self-contained
+# under /opt/driveforge/.
+ProtectHome=false
 ProtectSystem=strict
 PrivateTmp=true
 ReadWritePaths=/var/lib/driveforge /var/log/driveforge /etc/driveforge
