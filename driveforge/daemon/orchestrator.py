@@ -19,7 +19,7 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from driveforge.core import badblocks, enclosures, erase, grading, process, smart, telemetry, webhook
+from driveforge.core import badblocks, blinker, enclosures, erase, grading, process, smart, telemetry, webhook
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -86,6 +86,37 @@ class Orchestrator:
             run.log_tail = "\n".join(buf)
             session.commit()
 
+    def _spawn_done_blinker(self, drive: Drive, outcome: str) -> None:
+        """Start the post-pipeline activity-LED blinker for this drive.
+
+        Cancels any previous blinker for the same serial first. The task is
+        stored in state.done_blinkers so start_batch / abort_all can clear
+        it when the drive is re-enrolled or globally stopped.
+        """
+        old = self.state.done_blinkers.pop(drive.serial, None)
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def _wrapped() -> None:
+            try:
+                await blinker.blink_done(drive.device_path, pattern=outcome)
+            finally:
+                # Self-cleanup so a naturally-exiting blinker (drive pulled)
+                # doesn't leak its entry in state.
+                self.state.done_blinkers.pop(drive.serial, None)
+
+        task = asyncio.create_task(_wrapped())
+        self.state.done_blinkers[drive.serial] = task
+        logger.info(
+            "drive %s blinker started (outcome=%s, device=%s)",
+            drive.serial, outcome, drive.device_path,
+        )
+
+    def _cancel_blinker(self, serial: str) -> None:
+        task = self.state.done_blinkers.pop(serial, None)
+        if task is not None and not task.done():
+            task.cancel()
+
     async def start_batch(
         self,
         drives: list[Drive],
@@ -112,6 +143,10 @@ class Orchestrator:
                         )
                     )
             session.commit()
+        # Stop any "safe to pull" blinkers for drives we're re-enrolling so
+        # they don't race real pipeline I/O.
+        for drive in drives:
+            self._cancel_blinker(drive.serial)
         used_keys = set(self.state.bay_assignments.keys())
         for drive in drives:
             bay_key = enclosures.bay_key_for_device(plan, drive.device_path)
@@ -148,6 +183,10 @@ class Orchestrator:
         self.state.active_phase.clear()
         self.state.active_percent.clear()
         self.state.active_sublabel.clear()
+        # Stop all post-pipeline blinkers too — abort implies "don't touch
+        # anything on these devices anymore."
+        for serial in list(self.state.done_blinkers):
+            self._cancel_blinker(serial)
         self._tasks.clear()
         logger.warning("abort_all cancelled %d drive task(s)", cancelled)
         return cancelled
@@ -176,18 +215,37 @@ class Orchestrator:
                 drive.serial,
                 f"start {drive.device_path} {drive.model} ({drive.transport.value}){' [quick]' if quick else ''}",
             )
+            # Outcome drives the post-pipeline activity-LED blinker:
+            #   "pass" → 3-pulse heartbeat, "fail" → slow single pulse,
+            #   None → no blink (user aborted, or drive already removed).
+            outcome: str | None = "pass"
             try:
                 await self._execute_pipeline(batch_id, bay_key, drive, quick=quick)
             except asyncio.CancelledError:
                 logger.warning("drive %s cancelled mid-pipeline", drive.serial)
                 self._record_failure(drive, phase="aborted", detail="aborted by user")
+                outcome = None
             except PipelineFailure as exc:
                 logger.error("drive %s failed in %s: %s", drive.serial, exc.phase, exc.detail)
                 self._record_failure(drive, phase=exc.phase, detail=exc.detail)
+                outcome = "fail"
             except Exception:
                 tb = traceback.format_exc()
                 logger.exception("drive %s pipeline crashed", drive.serial)
                 self._record_failure(drive, phase="error", detail=tb)
+                outcome = "fail"
+            else:
+                # Normal completion — a grading "fail" verdict is not an
+                # exception, so refine outcome from the DB grade.
+                with self.state.session_factory() as session:
+                    latest = (
+                        session.query(m.TestRun)
+                        .filter_by(drive_serial=drive.serial)
+                        .order_by(m.TestRun.started_at.desc())
+                        .first()
+                    )
+                    if latest and latest.grade == "fail":
+                        outcome = "fail"
             finally:
                 self.state.bay_assignments.pop(bay_key, None)
                 self.state.active_phase.pop(drive.serial, None)
@@ -196,6 +254,8 @@ class Orchestrator:
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.
+                if outcome is not None:
+                    self._spawn_done_blinker(drive, outcome)
 
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
         self._log(drive.serial, f"✗ {phase}: {detail}")

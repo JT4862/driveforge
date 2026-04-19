@@ -7,6 +7,7 @@ in-flight batch tracking, and the async queue bridging events to the UI.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +37,9 @@ class DaemonState:
     active_sublabel: dict[str, str] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
+    # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
+    # Populated when a run completes, cancelled on drive pull / abort / new batch.
+    done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)
 
     # Cached enclosure discovery. Refreshed on boot + udev events.
     bay_plan: enclosures.BayPlan = field(
