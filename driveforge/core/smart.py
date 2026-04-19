@@ -169,13 +169,35 @@ def self_test_status(device: str) -> SelfTestStatus:
             status_string=status.get("string", ""),
         )
     # Not in progress; was the last completed test a pass?
+    last_passed: bool | None = None
+    # ATA self-test log
     last_log = (data.get("ata_smart_self_test_log") or {}).get("standard") or {}
     table = last_log.get("table") or []
-    last_passed: bool | None = None
     if table:
         top = table[0]
         st = (top.get("status") or {}).get("string", "").lower()
-        last_passed = "completed without error" in st or "without error" in st
+        if "without error" in st or "completed without" in st:
+            last_passed = True
+        elif any(word in st for word in ("fail", "error", "aborted")):
+            last_passed = False
+    # SCSI / SAS self-test log — scsi_self_test_0 is most recent. In-progress
+    # reported via status code 15 per SPC-4.
+    for i in range(20):
+        entry = data.get(f"scsi_self_test_{i}")
+        if not entry:
+            continue
+        sts = (entry.get("status") or {}).get("value")
+        if sts == 15:
+            # In progress — percent_remaining is often available separately
+            pct_remaining = data.get("scsi_percentage_of_test_remaining")
+            return SelfTestStatus(
+                in_progress=True,
+                percent_complete=(100 - int(pct_remaining)) if isinstance(pct_remaining, int) else None,
+                status_string=(entry.get("status") or {}).get("string", ""),
+            )
+        if isinstance(sts, int) and last_passed is None:
+            last_passed = sts == 0  # 0 = "Completed without error"
+            break
     # NVMe path: self_test_log.current_self_test_operation
     nvme = (data.get("nvme_self_test_log") or {}).get("current_self_test_operation") or {}
     nvme_op_value = nvme.get("value")

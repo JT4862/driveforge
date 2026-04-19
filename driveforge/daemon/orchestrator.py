@@ -348,7 +348,9 @@ class Orchestrator:
             if status.percent_complete is not None:
                 self.state.active_percent[drive.serial] = float(status.percent_complete)
             if not status.in_progress:
-                return bool(status.last_result_passed)
+                # None = couldn't determine (unsupported log format, SAS,
+                # first-ever test, etc.) → neutral, not a failure
+                return status.last_result_passed
         logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
         return None
 
