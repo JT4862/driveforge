@@ -40,6 +40,7 @@ class CertLabelData:
     tested_date: date
     power_on_hours: int
     report_url: str
+    quick_mode: bool = False
 
 
 def _load_font(size: int) -> ImageFont.ImageFont:
@@ -69,7 +70,8 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
       | Capacity: 6.0 TB                           |
       | Serial:   V8G6X4RL                         |
       | Tested:   2026-04-19          [QR code]    |
-      | POH:      12,432 h                         |
+      | Hours on: 12,432 h                         |
+      | Wipe:     NIST 800-88 Purge + 4-pass       |
       | Scan QR to verify — printed text           |
       | alone is not authoritative.                |
       +--------------------------------------------+
@@ -110,12 +112,18 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
 
     # Body column on the left
     body_y = padding + 52
+    wipe_line = (
+        "Wipe:     NIST 800-88 Purge*"
+        if data.quick_mode
+        else "Wipe:     NIST 800-88 Purge + 4-pass"
+    )
     lines = [
         f"Model:    {data.model[:28]}",
         f"Capacity: {data.capacity_tb:.1f} TB",
         f"Serial:   {data.serial}",
         f"Tested:   {data.tested_date.isoformat()}",
-        f"POH:      {data.power_on_hours:,} h",
+        f"Hours on: {data.power_on_hours:,} h",
+        wipe_line,
     ]
     for line in lines:
         draw.text((padding, body_y), line, font=font_body, fill="black")

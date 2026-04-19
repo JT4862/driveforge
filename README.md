@@ -70,6 +70,48 @@ for.
 
 ---
 
+## Sanitization standard
+
+DriveForge's erase pipeline meets **NIST SP 800-88 Rev. 1 — Purge**, the
+current authoritative media-sanitization standard (which superseded DoD
+5220.22-M for media sanitization in 2007). The pipeline is two stacked
+phases, both of which happen on every drive:
+
+**Phase 1 — Drive-level secure erase** (firmware-initiated, always runs):
+
+| Transport | Command | Mechanism |
+|-----------|---------|-----------|
+| SATA | `hdparm --security-erase` | ATA SECURITY ERASE UNIT |
+| SAS | `sg_format --format` | SCSI FORMAT UNIT |
+| NVMe | `nvme format` | NVMe Format NVM (crypto or user-data erase) |
+
+On SSDs this rotates the internal encryption key or block-erases the
+entire flash **including over-provisioned reserve blocks that the host
+cannot address** — data the host OS has no way to reach on its own. On
+HDDs it's a vendor-firmware full-surface sanitize.
+
+**Phase 2 — Verified overwrite** (full mode only; skipped in quick mode):
+
+Four full-drive write/read passes via `badblocks -wsv` using patterns
+`0xAA → 0x55 → 0xFF → 0x00`. Every sector is written with each pattern
+then read back and verified. Unrecoverable errors feed into the grade.
+
+### How this compares
+
+| Standard | Requirement | DriveForge |
+|----------|-------------|------------|
+| **NIST 800-88 Clear** | 1 overwrite pass | ✓ satisfied by any single badblocks pattern |
+| **NIST 800-88 Purge** | Crypto-erase *or* firmware secure erase | ✓ Phase 1 (both quick and full mode) |
+| DoD 5220.22-M (deprecated) | 3 overwrite passes | ✓ exceeded — full mode runs 4 verified passes |
+| DoD 5220.22-M ECE (deprecated) | 7 overwrite passes | ✗ not matched by pass count, but Phase 1 + Phase 2 exceeds the intent |
+
+Each cert report page (`/reports/<serial>`) includes a **Sanitization**
+section spelling out which phases ran for that specific drive. Quick-mode
+results are clearly marked: Purge compliance is intact, but the 4-pass
+verification was skipped — re-run in full mode for a full cert.
+
+---
+
 ## 1. Hardware prerequisites
 
 **Recommended** (what DriveForge is built around):
