@@ -68,14 +68,16 @@ fi
 ok "user + dirs ready"
 
 log "Installing DriveForge Python package..."
-# In a real release this grabs the wheel/.deb from a GitHub release. For now,
-# the installer assumes the package is checked out locally adjacent to this
-# script, or that `driveforge` is already on PYTHONPATH.
+# Pre-alpha: install EDITABLE from the local checkout so subsequent code
+# updates (git pull or rsync into the source tree) are picked up by just
+# restarting the daemon — no reinstall needed. Swap to non-editable once we
+# ship wheels via GitHub Releases.
 python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
-if [[ -f "$(dirname "$0")/../pyproject.toml" ]]; then
-  pip install --quiet "$(dirname "$0")/.."
+SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
+  pip install --quiet -e "$SRC_DIR"
 else
   pip install --quiet driveforge
 fi
