@@ -303,6 +303,8 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
                 "phase": r.phase,
                 "grade": r.grade,
                 "report_url": r.report_url,
+                "error_message": r.error_message,
+                "quick_mode": bool(r.quick_mode),
             }
             for r in runs
         ]

@@ -9,7 +9,10 @@
 
 {% if latest %}
 <section class="panel">
-  <h2>Latest test run</h2>
+  <h2>Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}</h2>
+  {% if latest.error_message %}
+  <div class="banner warn-banner" style="white-space: pre-wrap;">&#9888; {{ latest.error_message }}</div>
+  {% endif %}
   <dl class="kv">
     <dt>Phase</dt><dd>{{ latest.phase|replace("_", " ") }}</dd>
     <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}">{{ latest.grade|upper }}</span>{% else %}—{% endif %}</dd>

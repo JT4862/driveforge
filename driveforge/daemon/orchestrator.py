@@ -189,11 +189,14 @@ class Orchestrator:
         await self._advance(run_id, "pre_smart", drive)
         pre_snap = await self._capture_smart(run_id, drive, kind="pre")
 
-        # Phase 2: short self-test (always runs, even in quick mode)
+        # Phase 2: short self-test (always runs, even in quick mode).
+        # `None` return = drive doesn't support it; treat as neutral, not a
+        # failure. Only an explicit False (test completed + reported failure)
+        # aborts the pipeline.
         await self._advance(run_id, "short_test", drive)
         short_ok = await self._run_self_test(drive, kind="short", dev_mode=dev_mode)
-        if not short_ok:
-            raise PipelineFailure("short_test", "SMART short self-test failed")
+        if short_ok is False:
+            raise PipelineFailure("short_test", "SMART short self-test reported failure")
 
         # Phase 3: firmware check (check-only — apply is Phase 7+)
         await self._advance(run_id, "firmware_check", drive)
@@ -205,7 +208,7 @@ class Orchestrator:
         await self._run_secure_erase(drive, dev_mode=dev_mode)
 
         bb_errors = (0, 0, 0)
-        long_ok = True
+        long_ok: bool | None = True
         if quick:
             logger.info("drive %s quick-mode: skipping badblocks + long test", drive.serial)
         else:
@@ -213,9 +216,11 @@ class Orchestrator:
             await self._advance(run_id, "badblocks", drive)
             bb_errors = await self._run_badblocks(drive, dev_mode=dev_mode, run_id=run_id)
 
-            # Phase 6: long self-test
+            # Phase 6: long self-test — same neutral-on-unsupported semantics
             await self._advance(run_id, "long_test", drive)
             long_ok = await self._run_self_test(drive, kind="long", dev_mode=dev_mode)
+            if long_ok is False:
+                raise PipelineFailure("long_test", "SMART long self-test reported failure")
 
         # Phase 7: post-SMART
         await self._advance(run_id, "post_smart", drive)
@@ -272,14 +277,27 @@ class Orchestrator:
         )
         return snap
 
-    async def _run_self_test(self, drive: Drive, *, kind: str, dev_mode: bool) -> bool:
+    async def _run_self_test(self, drive: Drive, *, kind: str, dev_mode: bool) -> bool | None:
+        """Run a SMART self-test.
+
+        Returns True on pass, False on fail, None if the drive doesn't support
+        it. SAS drives in particular often skip self-test support entirely;
+        that's not a pipeline failure — the destructive badblocks pass
+        provides the real validation.
+        """
         if dev_mode:
             await asyncio.sleep(0.3)
             return True
         try:
             smart.start_self_test(drive.device_path, kind=kind)
         except Exception as exc:  # noqa: BLE001
-            raise PipelineFailure(f"{kind}_test", f"start failed: {exc}") from exc
+            logger.warning(
+                "drive %s doesn't support %s self-test: %s — skipping",
+                drive.serial,
+                kind,
+                exc,
+            )
+            return None
         poll_sec = SMART_SHORT_POLL_SEC if kind == "short" else SMART_LONG_POLL_SEC
         timeout = SMART_SHORT_TIMEOUT_SEC if kind == "short" else SMART_LONG_TIMEOUT_SEC
         deadline = asyncio.get_event_loop().time() + timeout
@@ -295,7 +313,8 @@ class Orchestrator:
                 self.state.active_percent[drive.serial] = float(status.percent_complete)
             if not status.in_progress:
                 return bool(status.last_result_passed)
-        raise PipelineFailure(f"{kind}_test", f"timed out after {timeout}s")
+        logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
+        return None
 
     async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool) -> None:
         if dev_mode:

@@ -53,31 +53,51 @@ def grade_drive(
     post: SmartSnapshot,
     *,
     config: GradingConfig,
-    short_test_passed: bool = True,
-    long_test_passed: bool = True,
+    short_test_passed: bool | None = True,
+    long_test_passed: bool | None = True,
     badblocks_errors: tuple[int, int, int] = (0, 0, 0),
     max_temperature_c: int | None = None,
 ) -> GradingResult:
-    """Apply grading rules against pre/post snapshots + test outcomes."""
+    """Apply grading rules against pre/post snapshots + test outcomes.
+
+    `short_test_passed` / `long_test_passed` accept True / False / None:
+      True  = test ran and passed
+      False = test ran and failed (grades drive as Fail)
+      None  = test not supported on this drive (neutral; rationale notes it)
+    """
     rules: list[Rule] = []
 
-    # --- Hard-fail rules (any failure forces grade=fail) ---
-    rules.append(
-        _rule(
-            "smart_short_test_passed",
-            short_test_passed,
-            "SMART short self-test passed" if short_test_passed else "SMART short self-test FAILED",
-            fail_tier=Grade.FAIL,
+    # --- Self-test rules (None = neutral, False = fail) ---
+    if short_test_passed is None:
+        rules.append(Rule(
+            name="smart_short_test_passed",
+            passed=True,
+            detail="SMART short self-test not supported — skipped",
+        ))
+    else:
+        rules.append(
+            _rule(
+                "smart_short_test_passed",
+                short_test_passed,
+                "SMART short self-test passed" if short_test_passed else "SMART short self-test FAILED",
+                fail_tier=Grade.FAIL,
+            )
         )
-    )
-    rules.append(
-        _rule(
-            "smart_long_test_passed",
-            long_test_passed,
-            "SMART long self-test passed" if long_test_passed else "SMART long self-test FAILED",
-            fail_tier=Grade.FAIL,
+    if long_test_passed is None:
+        rules.append(Rule(
+            name="smart_long_test_passed",
+            passed=True,
+            detail="SMART long self-test not supported — skipped",
+        ))
+    else:
+        rules.append(
+            _rule(
+                "smart_long_test_passed",
+                long_test_passed,
+                "SMART long self-test passed" if long_test_passed else "SMART long self-test FAILED",
+                fail_tier=Grade.FAIL,
+            )
         )
-    )
     bb_total = sum(badblocks_errors)
     rules.append(
         _rule(

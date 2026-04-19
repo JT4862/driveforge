@@ -40,6 +40,8 @@ class TestRunOut(BaseModel):
     power_on_hours: int | None
     reallocated_sectors: int | None
     report_url: str | None
+    quick_mode: bool = False
+    error_message: str | None = None
 
 
 class BatchOut(BaseModel):
@@ -366,4 +368,6 @@ def _test_run_to_out(r: m.TestRun) -> TestRunOut:
         power_on_hours=r.power_on_hours_at_test,
         reallocated_sectors=r.reallocated_sectors,
         report_url=r.report_url,
+        quick_mode=bool(r.quick_mode),
+        error_message=r.error_message,
     )

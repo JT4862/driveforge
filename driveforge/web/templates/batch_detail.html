@@ -18,14 +18,14 @@
 </section>
 
 <table class="runs">
-  <thead><tr><th>Serial</th><th>Bay</th><th>Phase</th><th>Grade</th><th>Report</th></tr></thead>
+  <thead><tr><th>Serial</th><th>Phase</th><th>Grade</th><th>Notes</th><th>Report</th></tr></thead>
   <tbody>
     {% for r in runs %}
     <tr>
       <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
-      <td>{{ r.bay or "—" }}</td>
-      <td>{{ r.phase|replace("_", " ") }}</td>
+      <td>{{ r.phase|replace("_", " ") }}{% if r.quick_mode %} <span class="pill">quick</span>{% endif %}</td>
       <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
+      <td class="muted">{{ r.error_message[:120] if r.error_message else "—" }}{% if r.error_message and r.error_message|length > 120 %}…{% endif %}</td>
       <td>{% if r.report_url %}<a href="{{ r.report_url }}">view</a>{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}
