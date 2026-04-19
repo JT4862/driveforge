@@ -66,7 +66,16 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .bay-card.installed.graded.graded-A { border-left: 3px solid var(--grade-a); }
 .bay-card.installed.graded.graded-B { border-left: 3px solid var(--grade-b); }
 .bay-card.installed.graded.graded-C { border-left: 3px solid var(--grade-c); }
-.bay-card.installed.graded.graded-fail { border-left: 3px solid var(--grade-fail); }
+.bay-card.installed.graded.graded-fail {
+  border-left: 4px solid var(--grade-fail);
+  background: linear-gradient(90deg, rgba(248,81,73,0.08) 0%, var(--panel) 50%);
+}
+.bay-card.installed.graded.graded-fail:hover { border-color: var(--grade-fail); }
+.bay-card .fail-text { color: var(--fail); font-weight: 600; font-style: normal; }
+.bay-card .fail-detail {
+  color: var(--muted); font-family: var(--mono); font-size: 11px;
+  margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .bay-card .bay-num { display: flex; justify-content: space-between; align-items: center; }
 .grade-corner { font-size: 11px; padding: 1px 6px; }
 .bay-card.empty { border-style: dashed; opacity: 0.55; }

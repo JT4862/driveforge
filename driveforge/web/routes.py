@@ -123,7 +123,7 @@ def _bay_card(
             }
     if installed_drive is not None:
         # Look up the most recent completed test for this drive so the card
-        # shows "Grade B · tested 2026-04-19" instead of a bland "idle" line.
+        # shows "Grade B · tested 2026-04-19" or "✗ Failed" at a glance.
         last_run = (
             session.query(m.TestRun)
             .filter_by(drive_serial=installed_drive.serial)
@@ -133,6 +133,12 @@ def _bay_card(
         )
         last_grade = last_run.grade if last_run else None
         last_tested = last_run.completed_at if last_run else None
+        last_phase = last_run.phase if last_run else None
+        last_error = None
+        if last_run and last_run.error_message:
+            # Extract the "[phase]" portion and a short summary for the card
+            msg = last_run.error_message.strip().split("\n", 1)[0]
+            last_error = msg[:80] + ("…" if len(msg) > 80 else "")
         return {
             "bay": display_bay,
             "state": "installed",
@@ -142,6 +148,8 @@ def _bay_card(
             "capacity_tb": installed_drive.capacity_tb,
             "last_grade": last_grade,
             "last_tested": last_tested,
+            "last_phase": last_phase,
+            "last_error": last_error,
         }
     return {"bay": display_bay, "state": "empty", "key": bay_key}
 
