@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}New Batch — DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <a href="/" class="back">&larr; Dashboard</a>
+  <h1>Start a new batch</h1>
+  <div class="subtitle">Discovered {{ drives|length }} drives. Select which to include — default is all.</div>
+</section>
+
+<form method="post" action="/batches/new" class="panel">
+  <label class="field">
+    <span>Source / label</span>
+    <input type="text" name="source" placeholder='e.g. "LocalCo pull 2026-04-19"'>
+  </label>
+  <table class="runs">
+    <thead>
+      <tr><th>Include</th><th>Serial</th><th>Model</th><th>Capacity</th><th>Transport</th></tr>
+    </thead>
+    <tbody>
+    {% for d in drives %}
+      <tr>
+        <td><input type="checkbox" name="drive" value="{{ d.serial }}" checked></td>
+        <td>{{ d.serial }}</td>
+        <td>{{ d.model }}</td>
+        <td>{{ "%.1f"|format(d.capacity_tb) }} TB</td>
+        <td>{{ d.transport.value|upper }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="form-actions">
+    <a href="/" class="btn">Cancel</a>
+    <button type="submit" class="btn primary">Start Batch</button>
+  </div>
+</form>
+{% endblock %}

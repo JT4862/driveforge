@@ -6,17 +6,17 @@
   <div class="subtitle">Up to 500 most recently completed test runs.</div>
 </section>
 
-{% if runs %}
+{% if rows %}
 <table class="runs">
   <thead><tr><th>Completed</th><th>Serial</th><th>Drive</th><th>Grade</th><th>POH</th><th>Batch</th></tr></thead>
   <tbody>
-    {% for r in runs %}
+    {% for r in rows %}
     <tr>
       <td>{{ r.completed_at.isoformat() if r.completed_at else "" }}</td>
       <td><a href="/drives/{{ r.drive_serial }}">{{ r.drive_serial }}</a></td>
-      <td>{{ r.drive.model if r.drive else "—" }}</td>
+      <td>{{ r.model }}</td>
       <td>{% if r.grade %}<span class="grade grade-{{ r.grade }}">{{ r.grade|upper }}</span>{% else %}—{% endif %}</td>
-      <td>{{ "{:,}".format(r.power_on_hours_at_test) if r.power_on_hours_at_test else "—" }}</td>
+      <td>{{ "{:,}".format(r.power_on_hours) if r.power_on_hours else "—" }}</td>
       <td>{% if r.batch_id %}<a href="/batches/{{ r.batch_id }}">{{ r.batch_id[:8] }}</a>{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}

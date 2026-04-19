@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import joinedload
 
+from driveforge.core import drive as drive_mod
 from driveforge.daemon.state import get_state
 from driveforge.db import models as m
 
@@ -113,15 +115,48 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
 def batches(request: Request) -> HTMLResponse:
     state = get_state()
     with state.session_factory() as session:
-        rows = session.query(m.Batch).order_by(m.Batch.started_at.desc()).all()
+        rows = (
+            session.query(m.Batch)
+            .options(joinedload(m.Batch.test_runs))
+            .order_by(m.Batch.started_at.desc())
+            .all()
+        )
         batches_view = []
         for b in rows:
             totals = {"A": 0, "B": 0, "C": 0, "fail": 0}
             for run in b.test_runs:
                 if run.grade in totals:
                     totals[run.grade] += 1
-            batches_view.append({"batch": b, "totals": totals, "count": len(b.test_runs)})
+            batches_view.append(
+                {
+                    "id": b.id,
+                    "source": b.source,
+                    "started_at": b.started_at,
+                    "completed_at": b.completed_at,
+                    "totals": totals,
+                    "count": len(b.test_runs),
+                }
+            )
     return templates.TemplateResponse(request, "batches.html", {"batches": batches_view})
+
+
+@router.get("/batches/new", response_class=HTMLResponse)
+def new_batch_form(request: Request) -> HTMLResponse:
+    drives = drive_mod.discover()
+    return templates.TemplateResponse(request, "new_batch.html", {"drives": drives})
+
+
+@router.post("/batches/new")
+async def new_batch_submit(request: Request) -> RedirectResponse:
+    form = await request.form()
+    source = form.get("source") or None
+    selected = form.getlist("drive")
+    drives = [d for d in drive_mod.discover() if d.serial in selected]
+    if not drives:
+        drives = drive_mod.discover()
+    orch = request.app.state.orchestrator
+    await orch.start_batch(drives, source=source)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @router.get("/batches/{batch_id}", response_class=HTMLResponse)
@@ -136,10 +171,26 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
         for r in runs:
             if r.grade in totals:
                 totals[r.grade] += 1
+        batch_view = {
+            "id": batch.id,
+            "source": batch.source,
+            "started_at": batch.started_at,
+            "completed_at": batch.completed_at,
+        }
+        runs_view = [
+            {
+                "drive_serial": r.drive_serial,
+                "bay": r.bay,
+                "phase": r.phase,
+                "grade": r.grade,
+                "report_url": r.report_url,
+            }
+            for r in runs
+        ]
     return templates.TemplateResponse(
         request,
         "batch_detail.html",
-        {"batch": batch, "runs": runs, "totals": totals},
+        {"batch": batch_view, "runs": runs_view, "totals": totals},
     )
 
 
@@ -149,12 +200,24 @@ def history(request: Request) -> HTMLResponse:
     with state.session_factory() as session:
         runs = (
             session.query(m.TestRun)
+            .options(joinedload(m.TestRun.drive))
             .filter(m.TestRun.completed_at.isnot(None))
             .order_by(m.TestRun.completed_at.desc())
             .limit(500)
             .all()
         )
-    return templates.TemplateResponse(request, "history.html", {"runs": runs})
+        rows = [
+            {
+                "completed_at": r.completed_at,
+                "drive_serial": r.drive_serial,
+                "model": r.drive.model if r.drive else "—",
+                "grade": r.grade,
+                "power_on_hours": r.power_on_hours_at_test,
+                "batch_id": r.batch_id,
+            }
+            for r in runs
+        ]
+    return templates.TemplateResponse(request, "history.html", {"rows": rows})
 
 
 @router.get("/settings", response_class=HTMLResponse)

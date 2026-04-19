@@ -11,10 +11,10 @@
   <tbody>
     {% for b in batches %}
     <tr>
-      <td><a href="/batches/{{ b.batch.id }}">{{ b.batch.id[:12] }}</a></td>
-      <td>{{ b.batch.source or "—" }}</td>
-      <td>{{ b.batch.started_at.isoformat() if b.batch.started_at else "—" }}</td>
-      <td>{{ b.batch.completed_at.isoformat() if b.batch.completed_at else "—" }}</td>
+      <td><a href="/batches/{{ b.id }}">{{ b.id[:12] }}</a></td>
+      <td>{{ b.source or "—" }}</td>
+      <td>{{ b.started_at.isoformat() if b.started_at else "—" }}</td>
+      <td>{{ b.completed_at.isoformat() if b.completed_at else "—" }}</td>
       <td>{{ b.count }}</td>
       <td>{{ b.totals.A }}</td>
       <td>{{ b.totals.B }}</td>

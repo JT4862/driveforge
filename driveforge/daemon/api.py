@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from driveforge.core import drive as drive_mod
@@ -159,6 +159,31 @@ def get_test_run(run_id: int) -> TestRunOut:
         if r is None:
             raise HTTPException(status_code=404, detail="test run not found")
         return _test_run_to_out(r)
+
+
+class StartBatchIn(BaseModel):
+    source: str | None = None
+    drive_serials: list[str] | None = None  # None = start with all discovered
+
+
+@router.post("/batches", response_model=BatchOut)
+async def start_batch(body: StartBatchIn, request: Request) -> BatchOut:
+    """Start a new batch. With no drive_serials, uses all discovered drives."""
+    orch = request.app.state.orchestrator
+    drives = drive_mod.discover()
+    if body.drive_serials:
+        wanted = set(body.drive_serials)
+        drives = [d for d in drives if d.serial in wanted]
+    if not drives:
+        raise HTTPException(status_code=400, detail="no drives to start")
+    batch_id = await orch.start_batch(drives, source=body.source)
+    return BatchOut(
+        id=batch_id,
+        source=body.source,
+        started_at=None,
+        completed_at=None,
+        totals={"A": 0, "B": 0, "C": 0, "fail": 0},
+    )
 
 
 @router.get("/firmware/check/{serial}")

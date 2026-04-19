@@ -113,3 +113,10 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
 .rationale li.ok .mark { color: var(--ok); }
 .rationale li.fail .mark { color: var(--fail); }
 .rationale li .name { font-family: var(--mono); color: var(--muted); }
+
+/* Forms */
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.field > span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.field input[type="text"], .field input[type="url"] { background: var(--bg); color: var(--text); border: 1px solid var(--panel-border); border-radius: 6px; padding: 8px 10px; font: inherit; font-family: var(--mono); }
+.field input:focus { outline: none; border-color: var(--accent); }
+.form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
