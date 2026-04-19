@@ -158,6 +158,13 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
 .banner.warn-banner { background: rgba(210,153,34,0.12); border: 1px solid rgba(210,153,34,0.35); color: var(--warn); }
 .small { font-size: 12px; }
 
+/* Destructive-action box on the New Batch form */
+.destructive-box { border: 1px solid rgba(248,81,73,0.45); background: rgba(248,81,73,0.06); border-radius: 8px; padding: 16px; margin: 18px 0; }
+.destructive-box h3 { margin: 0 0 8px; color: var(--fail); font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; }
+.destructive-box p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; }
+.destructive-box .field input { border-color: rgba(248,81,73,0.45); }
+.destructive-box .field input:focus { border-color: var(--fail); }
+
 /* Telemetry charts */
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }

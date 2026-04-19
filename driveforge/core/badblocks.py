@@ -1,14 +1,15 @@
 """badblocks wrapper.
 
 Runs a destructive write/read scan. Can take 24-48 hours on an 8TB HDD, so
-we run async and let the orchestrator poll for completion.
+the orchestrator streams progress line-by-line instead of blocking on a
+single await.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
-
-from driveforge.core.process import run_async, ProcessResult
+from collections.abc import Callable
 
 
 class BadblocksError(RuntimeError):
@@ -30,14 +31,63 @@ def parse_progress(line: str) -> tuple[float, tuple[int, int, int]] | None:
     return float(m["pct"]), (int(m["r"]), int(m["w"]), int(m["c"]))
 
 
-async def run_destructive(device: str, *, timeout: float = 72 * 60 * 60) -> ProcessResult:
-    """Run `badblocks -w` destructively.
+async def run_destructive_streaming(
+    device: str,
+    *,
+    on_progress: Callable[[float, tuple[int, int, int]], None] | None = None,
+    timeout: float = 72 * 60 * 60,
+) -> tuple[int, int, int]:
+    """Run `badblocks -wsv` and stream progress via `on_progress` callback.
 
-    Caller is responsible for ensuring the drive is out of use. Returns the
-    full ProcessResult; parse `stdout` with `parse_progress()` if streaming.
+    Returns the final (read_errors, write_errors, compare_errors) tuple.
+    Raises BadblocksError if badblocks exits non-zero.
     """
-    # -w: destructive write-mode test
-    # -s: show progress
-    # -b 4096: 4k block size — sane default, override per-drive if needed
-    # -v: verbose (puts progress on stderr)
-    return await run_async(["badblocks", "-wsv", "-b", "4096", device], timeout=timeout)
+    argv = ["badblocks", "-wsv", "-b", "4096", device]
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    errors: tuple[int, int, int] = (0, 0, 0)
+
+    async def pump(stream: asyncio.StreamReader) -> None:
+        nonlocal errors
+        buf = b""
+        while True:
+            chunk = await stream.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            # badblocks uses \r for progress updates (not \n)
+            while b"\r" in buf or b"\n" in buf:
+                sep = min(
+                    (buf.find(b"\r") if b"\r" in buf else len(buf) + 1),
+                    (buf.find(b"\n") if b"\n" in buf else len(buf) + 1),
+                )
+                line = buf[:sep].decode("utf-8", errors="replace")
+                buf = buf[sep + 1 :]
+                if not line:
+                    continue
+                parsed = parse_progress(line)
+                if parsed is not None:
+                    pct, errs = parsed
+                    errors = errs
+                    if on_progress is not None:
+                        try:
+                            on_progress(pct, errs)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(pump(proc.stdout), pump(proc.stderr)),  # type: ignore[arg-type]
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    rc = await proc.wait()
+    if rc != 0:
+        raise BadblocksError(f"badblocks exited {rc} on {device}")
+    return errors

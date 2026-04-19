@@ -78,6 +78,9 @@ class TestRun(Base):
     rules: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)  # grading rationale
     report_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     label_printed: Mapped[bool] = mapped_column(Boolean, default=False)
+    quick_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)  # last N lines of phase output
 
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")

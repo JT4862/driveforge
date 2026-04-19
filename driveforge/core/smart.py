@@ -128,3 +128,67 @@ def start_self_test(device: str, *, kind: str = "short") -> None:
     if kind not in {"short", "long"}:
         raise ValueError(f"unsupported self-test kind: {kind}")
     run(["smartctl", "--test", kind, device], check=True)
+
+
+class SelfTestStatus(BaseModel):
+    in_progress: bool
+    percent_complete: int | None = None  # 0-100, None if not in progress
+    last_result_passed: bool | None = None  # None if no test has completed
+    status_string: str = ""
+
+
+def self_test_status(device: str) -> SelfTestStatus:
+    """Query SMART self-test progress. Works for ATA; parses NVMe status separately."""
+    result = run(["smartctl", "--json", "-c", "-l", "selftest", device])
+    if not result.stdout:
+        return SelfTestStatus(in_progress=False)
+    import json as _json
+
+    try:
+        data = _json.loads(result.stdout)
+    except _json.JSONDecodeError:
+        return SelfTestStatus(in_progress=False)
+    # ATA path: ata_smart_data.self_test.status
+    ata = (data.get("ata_smart_data") or {}).get("self_test") or {}
+    status = ata.get("status") or {}
+    remaining = status.get("remaining_percent")
+    value = status.get("value")
+    if remaining is not None:
+        return SelfTestStatus(
+            in_progress=True,
+            percent_complete=100 - int(remaining),
+            status_string=status.get("string", ""),
+        )
+    # ATA status values >= 0x80 mean in-progress; < 0x80 means completed
+    if isinstance(value, int) and value >= 0x80:
+        # Low nibble × 10 = percent remaining
+        pct_remaining = (value & 0x0F) * 10
+        return SelfTestStatus(
+            in_progress=True,
+            percent_complete=100 - pct_remaining,
+            status_string=status.get("string", ""),
+        )
+    # Not in progress; was the last completed test a pass?
+    last_log = (data.get("ata_smart_self_test_log") or {}).get("standard") or {}
+    table = last_log.get("table") or []
+    last_passed: bool | None = None
+    if table:
+        top = table[0]
+        st = (top.get("status") or {}).get("string", "").lower()
+        last_passed = "completed without error" in st or "without error" in st
+    # NVMe path: self_test_log.current_self_test_operation
+    nvme = (data.get("nvme_self_test_log") or {}).get("current_self_test_operation") or {}
+    nvme_op_value = nvme.get("value")
+    if isinstance(nvme_op_value, int) and nvme_op_value != 0:
+        nvme_completion = data.get("nvme_self_test_log", {}).get("current_self_test_completion") or {}
+        nvme_pct = nvme_completion.get("percent_remaining")
+        return SelfTestStatus(
+            in_progress=True,
+            percent_complete=(100 - int(nvme_pct)) if nvme_pct is not None else None,
+            status_string=nvme.get("string", ""),
+        )
+    return SelfTestStatus(
+        in_progress=False,
+        last_result_passed=last_passed,
+        status_string=status.get("string", ""),
+    )

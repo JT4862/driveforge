@@ -7,6 +7,13 @@
   <div class="subtitle">Discovered {{ drives|length }} drives. Select which to include — default is all.</div>
 </section>
 
+{% if err == "confirm" %}
+<div class="banner warn-banner">
+  &#9888; Batch not started — you must type <code>ERASE</code> in the confirmation box
+  to acknowledge that selected drives will be destructively wiped.
+</div>
+{% endif %}
+
 <form method="post" action="/batches/new" class="panel">
   <label class="field">
     <span>Source / label</span>
@@ -28,9 +35,28 @@
     {% endfor %}
     </tbody>
   </table>
+
+  <label class="field checkbox">
+    <input type="checkbox" name="quick">
+    <span><strong>Quick mode</strong> &mdash; skip badblocks + long SMART test (faster, not a full certification)</span>
+  </label>
+
+  <div class="destructive-box">
+    <h3>&#9888; Destructive operation</h3>
+    <p>
+      Starting this batch will <strong>secure-erase</strong> every selected drive.
+      Data on those drives will be permanently destroyed. The OS boot disk is
+      automatically excluded.
+    </p>
+    <label class="field">
+      <span>Type <code>ERASE</code> to confirm</span>
+      <input type="text" name="confirm" placeholder="ERASE" required autocomplete="off">
+    </label>
+  </div>
+
   <div class="form-actions">
     <a href="/" class="btn">Cancel</a>
-    <button type="submit" class="btn primary">Start Batch</button>
+    <button type="submit" class="btn danger">Start Batch</button>
   </div>
 </form>
 {% endblock %}

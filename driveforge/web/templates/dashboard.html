@@ -9,8 +9,8 @@
   </div>
   <div class="actions">
     <a class="btn primary" href="/batches/new">+ New Batch</a>
-    <form method="post" action="/api/abort-all" class="inline">
-      <button class="btn danger" type="submit" onclick="return confirm('Abort all active drives?')">Abort All</button>
+    <form method="post" action="/abort-all" class="inline">
+      <button class="btn danger" type="submit" onclick="return confirm('Abort every active drive? Their current phase will be cancelled and the test runs marked failed.')">Abort All</button>
     </form>
   </div>
 </section>

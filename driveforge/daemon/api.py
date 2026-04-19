@@ -234,6 +234,7 @@ def get_test_run(run_id: int) -> TestRunOut:
 class StartBatchIn(BaseModel):
     source: str | None = None
     drive_serials: list[str] | None = None  # None = start with all discovered
+    quick: bool = False
 
 
 @router.post("/batches", response_model=BatchOut)
@@ -246,7 +247,7 @@ async def start_batch(body: StartBatchIn, request: Request) -> BatchOut:
         drives = [d for d in drives if d.serial in wanted]
     if not drives:
         raise HTTPException(status_code=400, detail="no drives to start")
-    batch_id = await orch.start_batch(drives, source=body.source)
+    batch_id = await orch.start_batch(drives, source=body.source, quick=body.quick)
     return BatchOut(
         id=batch_id,
         source=body.source,
@@ -254,6 +255,22 @@ async def start_batch(body: StartBatchIn, request: Request) -> BatchOut:
         completed_at=None,
         totals={"A": 0, "B": 0, "C": 0, "fail": 0},
     )
+
+
+@router.post("/abort-all")
+async def abort_all(request: Request) -> dict[str, Any]:
+    orch = request.app.state.orchestrator
+    cancelled = await orch.abort_all()
+    return {"cancelled": cancelled}
+
+
+@router.post("/drives/{serial}/abort")
+async def abort_drive(serial: str, request: Request) -> dict[str, Any]:
+    orch = request.app.state.orchestrator
+    ok = await orch.abort_drive(serial)
+    if not ok:
+        raise HTTPException(status_code=404, detail="drive not in-flight")
+    return {"aborted": serial}
 
 
 class FirmwareApproveIn(BaseModel):

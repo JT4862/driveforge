@@ -247,7 +247,10 @@ def batches(request: Request) -> HTMLResponse:
 @router.get("/batches/new", response_class=HTMLResponse)
 def new_batch_form(request: Request) -> HTMLResponse:
     drives = drive_mod.discover()
-    return templates.TemplateResponse(request, "new_batch.html", {"drives": drives})
+    err = request.query_params.get("err")
+    return templates.TemplateResponse(
+        request, "new_batch.html", {"drives": drives, "err": err}
+    )
 
 
 @router.post("/batches/new")
@@ -255,11 +258,23 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
     form = await request.form()
     source = form.get("source") or None
     selected = form.getlist("drive")
+    quick = form.get("quick") == "on"
+    confirm = (form.get("confirm") or "").strip().upper()
+    if confirm != "ERASE":
+        # Round-trip back to the form with an error banner
+        return RedirectResponse(url="/batches/new?err=confirm", status_code=303)
     drives = [d for d in drive_mod.discover() if d.serial in selected]
     if not drives:
         drives = drive_mod.discover()
     orch = request.app.state.orchestrator
-    await orch.start_batch(drives, source=source)
+    await orch.start_batch(drives, source=source, quick=quick)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/abort-all")
+async def abort_all_web(request: Request) -> RedirectResponse:
+    orch = request.app.state.orchestrator
+    await orch.abort_all()
     return RedirectResponse(url="/", status_code=303)
 
 
