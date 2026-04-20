@@ -153,22 +153,23 @@ async def _poll_io_rates(state: DaemonState) -> None:
         try:
             rates = tracker.poll()
             if rates and state.bay_assignments:
-                # Map device basenames (sda, sdb, ...) back to serials by
-                # looking up each active drive's current device_path.
-                with state.session_factory() as session:
-                    fresh: dict[str, dict[str, float]] = {}
-                    for serial in list(state.bay_assignments.values()):
-                        drive = session.get(m.Drive, serial)
-                        if drive is None or not drive.device_path:
-                            continue
-                        dev_name = drive.device_path.rsplit("/", 1)[-1]
-                        rate = rates.get(dev_name)
-                        if rate is None:
-                            continue
-                        fresh[serial] = {
-                            "read_mbps": round(rate.read_mbps, 1),
-                            "write_mbps": round(rate.write_mbps, 1),
-                        }
+                # Map device basenames back to serials via the cache the
+                # orchestrator populates when a drive enters bay_assignments.
+                # We *can't* read device_path from the DB — `m.Drive` doesn't
+                # persist it, since kernel letters drift across reboots and
+                # hotplug shuffles.
+                fresh: dict[str, dict[str, float]] = {}
+                for serial in list(state.bay_assignments.values()):
+                    dev_name = state.device_basenames.get(serial)
+                    if not dev_name:
+                        continue
+                    rate = rates.get(dev_name)
+                    if rate is None:
+                        continue
+                    fresh[serial] = {
+                        "read_mbps": round(rate.read_mbps, 1),
+                        "write_mbps": round(rate.write_mbps, 1),
+                    }
                 # Replace wholesale so serials that just left bay_assignments
                 # drop out of the display instead of showing stale rates.
                 state.active_io_rate = fresh

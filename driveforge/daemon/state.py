@@ -40,6 +40,12 @@ class DaemonState:
     # renderer. Unit: MB/s (decimal megabytes). Cleared when a drive leaves
     # bay_assignments.
     active_io_rate: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Serial → kernel device basename ("sda", "nvme0n1") for drives currently
+    # in bay_assignments. The DB doesn't persist device_path (kernel letters
+    # drift), so the I/O rate poller needs this to map its diskstats basename
+    # rows back to the active drives. Populated by the orchestrator when a
+    # batch starts, cleared when a drive leaves bay_assignments.
+    device_basenames: dict[str, str] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.

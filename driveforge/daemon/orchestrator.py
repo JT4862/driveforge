@@ -276,6 +276,10 @@ class Orchestrator:
                     bay_key = enclosures.unbayed_key(drive.serial)
             used_keys.add(bay_key)
             self.state.bay_assignments[bay_key] = drive.serial
+            # Cache the basename so the diskstats poller can map back from
+            # its per-device rows to the active serial without hitting the DB
+            # (which doesn't store device_path).
+            self.state.device_basenames[drive.serial] = drive.device_path.rsplit("/", 1)[-1]
             task = asyncio.create_task(self._run_drive(batch_id, bay_key, drive, quick=quick))
             self._tasks[drive.serial] = task
         asyncio.create_task(self._on_batch_complete(batch_id, [d.serial for d in drives]))
@@ -367,6 +371,7 @@ class Orchestrator:
                         outcome = "fail"
             finally:
                 self.state.bay_assignments.pop(bay_key, None)
+                self.state.device_basenames.pop(drive.serial, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
                 self.state.active_sublabel.pop(drive.serial, None)
