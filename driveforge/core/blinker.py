@@ -8,7 +8,7 @@ the bay, so we piggyback on that.
 
 Two patterns, simple and visually distinct at a glance across the room:
 
-- PASS (heartbeat): three short 4 KB pulses, 1.5 s dark. Reads as
+- PASS (heartbeat): three short 64 KB pulses, 1.5 s dark. Reads as
   "chirp-chirp-chirp … pause". Fires for any successful run regardless
   of grade (A / B / C all look the same from across the room — the
   operator pulls them all the same way).
@@ -38,16 +38,23 @@ logger = logging.getLogger(__name__)
 Pattern = Literal["pass", "fail"]
 
 # Offsets to rotate through so repeated reads actually hit the device
-# instead of being served from page cache. Stays inside the first ~1 GiB
-# of every drive we'd plausibly see.
-_PROBE_OFFSETS = [i * (50 * 1024 * 1024) for i in range(20)]
-_PROBE_SIZE = 4096
+# instead of being served from page cache OR the drive's own onboard DRAM
+# cache (typically 16-64 MiB on modern HDDs). 500 offsets × 50 MiB stride
+# spans ~25 GiB, well beyond any drive's internal cache, so even after
+# kernel page-cache warms we're still hitting fresh platter for most reads.
+_PROBE_OFFSETS = [i * (50 * 1024 * 1024) for i in range(500)]
+# 64 KB per probe — a 4 KB read completes in ~5 ms on HDD which the human
+# eye can miss entirely against the 1.5 s quiet gap in the heartbeat.
+# 64 KB takes ~25-30 ms on spinning rust: visibly flashes AND generates
+# enough cache pressure for POSIX_FADV_DONTNEED to actually get honored
+# (advisory hints only trigger eviction when there's something to evict FOR).
+_PROBE_SIZE = 64 * 1024
 
 # FAIL lighthouse timing
 _FAIL_ON_DURATION_SEC = 1.5
 _FAIL_OFF_DURATION_SEC = 1.5
-# 64 KB per read — fewer syscalls, each read takes long enough on rotational
-# media (~5 ms) that consecutive reads merge into a visible "solid" LED.
+# Same 64 KB size as the heartbeat probe — each read long enough on
+# rotational media that consecutive reads merge into a visibly "solid" LED.
 _FAIL_READ_SIZE = 64 * 1024
 
 
@@ -78,7 +85,7 @@ def _physical_read(device_path: str, offset: int, size: int) -> None:
 
 
 async def _heartbeat_cycle(device_path: str, idx_ref: list[int]) -> bool:
-    """Three 4 KB chirps + 1.5 s dark. Returns False if drive is gone."""
+    """Three 64 KB chirps + 1.5 s dark. Returns False if drive is gone."""
     for _ in range(3):
         offset = _PROBE_OFFSETS[idx_ref[0] % len(_PROBE_OFFSETS)]
         idx_ref[0] += 1
