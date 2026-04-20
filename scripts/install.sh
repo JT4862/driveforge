@@ -110,11 +110,18 @@ ok "defaults written to /etc/driveforge/"
 log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/
+install -m 0644 "$(dirname "$0")/../systemd/driveforge-issue.service" /etc/systemd/system/
+install -m 0755 "$(dirname "$0")/../scripts/driveforge-update-issue.sh" /usr/local/sbin/driveforge-update-issue
 systemctl daemon-reload
 # Avahi usually autostarts on Debian but enable explicitly so
 # driveforge.local is reachable on first boot.
 systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 systemctl enable driveforge-daemon.service
+# Refresh /etc/issue on every boot with the current IP + dashboard URL so
+# the TTY login banner shows where to point a browser (Proxmox-style).
+systemctl enable driveforge-issue.service
+# Run it once now so the banner is right on first login BEFORE a reboot.
+/usr/local/sbin/driveforge-update-issue || true
 # Restart (not just start) so re-running install.sh after a code update
 # picks up the new package instead of keeping the old daemon in memory.
 systemctl restart driveforge-daemon.service

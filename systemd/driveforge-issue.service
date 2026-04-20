@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh /etc/issue with the DriveForge dashboard URL
+Documentation=file:///usr/local/sbin/driveforge-update-issue
+# Need network up to learn our IP. avahi-daemon is already in the
+# daemon's After= chain; getty reads /etc/issue on login prompt show,
+# which is a live read so re-writing the file mid-session is fine.
+After=network-online.target
+Wants=network-online.target
+# Make sure getty doesn't cache an old /etc/issue before we update it.
+Before=getty@tty1.service serial-getty@ttyS0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/driveforge-update-issue
+# Not a long-running service — fire once per boot.
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
