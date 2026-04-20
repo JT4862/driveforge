@@ -40,6 +40,22 @@ Do not assume prior sessions wrote anything — check `git log` first.
 See BUILD.md → Implementation Phases for current status. Phases 1-7 are
 fixture-complete. Real-hardware iteration is now the active loop.
 
+## Current state (as of 2026-04-19 / 04-20 session)
+
+**Latest tag**: `v0.0.1` ([release page](https://github.com/JT4862/driveforge/releases/tag/v0.0.1)) — first tagged snapshot. Pre-alpha.
+**Active branches**:
+- `main` — production-ish, on `v0.0.1`. Daemon on R720 runs from here.
+- `feature/iso-installer` — Docker-built bootable installer ISO. ISO produced + boot-tested in QEMU; preseed has 4 known quirks documented in [memory/driveforge_backlog.md](file:///Users/jt/.claude/projects/-Users-jt-Homelab-driveforge/memory/driveforge_backlog.md). Not merged.
+
+**Deploy workflow**:
+- Code change → tar-over-ssh sync → `sudo ./scripts/install.sh` on R720 (non-editable pip + systemctl restart). ~30s per iteration.
+- For users (eventually): `git clone && sudo ./scripts/install.sh` from a fresh Debian 12 box. ISO path will replace this once the iso-installer branch merges.
+
+**Build/test patterns**:
+- ISO build on Mac: `./scripts/build-iso-docker.sh` (needs Docker Desktop)
+- ISO smoke-test on Mac: QEMU + VNC pattern documented in [memory/driveforge_iso_build.md](file:///Users/jt/.claude/projects/-Users-jt-Homelab-driveforge/memory/driveforge_iso_build.md)
+- ISO real-hardware test: flash to USB or mount via iDRAC virtual media on a non-R720 test machine
+
 ## Real-hardware deployment state (as of 2026-04-19, end of session)
 
 - **Server**: R720 at `10.10.10.101` (hostname `driveforge`, mDNS alias
