@@ -233,10 +233,20 @@ class Orchestrator:
             batch = m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC))
             session.add(batch)
             for d in drives:
+                # Refine transport for drives lsblk reports as SAS: the
+                # `tran=sas` field just says "attached to a SAS HBA" — actual
+                # SATA drives connected through the same HBA carry that tag
+                # too. smartctl sees the wire protocol and returns the real
+                # one. Without this refinement the DB and dashboard mislabel
+                # SATA-on-SAS drives as SAS (erase.py re-probes internally
+                # so correctness is fine, only the display was wrong).
+                # Only probe on SAS to avoid unnecessary smartctl calls.
+                if d.transport == Transport.SAS:
+                    refined = drive_mod.detect_true_transport(d.device_path)
+                    if refined is not None and refined != d.transport:
+                        d = d.model_copy(update={"transport": refined})
                 # rotational=True for spinning HDDs, False for SSDs/NVMe. Used
-                # by the dashboard's ETA computation — SATA SSDs on a SAS HBA
-                # report tran=sas from lsblk but aren't rotational, so we can't
-                # just key off transport.
+                # by the dashboard's ETA computation.
                 rota = None if d.rotation_rate is None else d.rotation_rate > 0
                 # Refine manufacturer via smartctl INQUIRY on SAS drives, with
                 # OEM firmware-pattern override (Dell LS0x, HP HPGx, NetApp NAxx)
@@ -269,6 +279,10 @@ class Orchestrator:
                         existing.rotational = rota
                     if mfr and existing.manufacturer != mfr:
                         existing.manufacturer = mfr
+                    # Correct legacy rows with a stale lsblk-level transport
+                    # (e.g. "sas" for an Intel SATA SSD on a SAS HBA).
+                    if existing.transport != d.transport.value:
+                        existing.transport = d.transport.value
             session.commit()
         # Stop any "safe to pull" blinkers for drives we're re-enrolling so
         # they don't race real pipeline I/O.

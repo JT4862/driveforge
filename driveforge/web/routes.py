@@ -149,6 +149,12 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     # OEM rules); fall back to the DB row written at last enrollment.
     db_drive = session.get(m.Drive, drive.serial)
     mfr = drive.manufacturer or (db_drive.manufacturer if db_drive else None)
+    # Prefer the DB's transport over the lsblk-based live value: lsblk
+    # reports `tran=sas` for SATA drives on a SAS HBA, but the orchestrator
+    # refines this at enrollment via smartctl and writes the true wire
+    # protocol to the Drive row. Drives never enrolled fall through to
+    # the live lsblk value.
+    transport = (db_drive.transport if db_drive and db_drive.transport else None) or drive.transport.value
     return {
         "state": "installed",
         "key": drive.serial,
@@ -156,7 +162,7 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "model": drive.model,
         "manufacturer": mfr,
         "capacity_tb": drive.capacity_tb,
-        "transport": drive.transport.value,
+        "transport": transport,
         "last_grade": last_grade,
         "last_tested": last_tested,
         "last_phase": last_phase,
