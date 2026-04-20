@@ -8,14 +8,18 @@ wired to the bay, so we piggyback on that.
 
 Two patterns, maximally distinct at a glance across the room:
 
-- PASS (solid green): continuous 64 KB reads with no dark gap. To the
-  eye the activity LED stays lit. Fires for any successful run
-  regardless of grade (A / B / C — the operator pulls them all the
-  same way).
-- FAIL (lighthouse): 1.5 s of continuous reads (LED solid-on), then
-  1.5 s of full dark. Reads as "solid ON … solid OFF, solid ON …
-  solid OFF" — clearly different from a running drive's natural
-  activity OR from the always-on pass pattern.
+- PASS: continuous back-to-back reads, no dark gap in our control loop.
+  On HDDs each I/O takes ~25 ms so the LED sustains as true solid green.
+  On SSDs each I/O completes in microseconds and the LED driver's
+  minimum off-time between pulses dominates — the observable result is
+  a rapid blink rather than solid. Both HDD-solid and SSD-rapid-blink
+  communicate the same "done, ready to pull" signal and are visually
+  distinct from the fail pattern below. Fires for any successful run
+  regardless of grade (A / B / C — operator pulls them the same way).
+- FAIL (lighthouse): 1.5 s of continuous reads, then 1.5 s of FULL dark.
+  The 1.5 s dark gap is the key visual — no drive's natural activity or
+  any pass pattern ever sits dark that long, so the ON-OFF-ON-OFF
+  rhythm is unambiguously "this drive failed."
 
 No blinker for aborted runs (operator knew they cancelled; no LED
 noise needed) or for drives that have never completed a run.
