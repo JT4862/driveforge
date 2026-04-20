@@ -47,10 +47,12 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         yield
         logger.info("driveforge-daemon shutting down")
 
+    from driveforge.version import __version__ as DRIVEFORGE_VERSION
+
     app = FastAPI(
         title="DriveForge",
         description="In-house enterprise drive refurbishment pipeline",
-        version="0.1.0",
+        version=DRIVEFORGE_VERSION,
         lifespan=lifespan,
     )
     @app.middleware("http")
@@ -74,6 +76,9 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     # Expose templates for web routes
     app.state.templates = web_templates  # type: ignore[attr-defined]
     app.state.orchestrator = orch  # type: ignore[attr-defined]
+    # Make __version__ available to every Jinja template (used by base.html
+    # footer + the About panel) so version bumps only touch version.py.
+    web_templates.env.globals["driveforge_version"] = DRIVEFORGE_VERSION
     return app
 
 
