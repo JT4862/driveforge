@@ -2,55 +2,62 @@
 {% block body %}
 <p class="lede">
   Here's what DriveForge found on this host. Nothing is configurable on
-  this step — it's a confidence check that the daemon can see your
+  this step &mdash; it's a confidence check that the daemon can see your
   hardware.
 </p>
 
 <section class="setup-panel">
-  <h2>Drive bays</h2>
-  {% if plan.has_real_enclosures %}
-    {# Enclosures with sg_device are SES-based (full slot count + LED control).
-       Enclosures with sg_device=None are SAS-layer fallback (real slot numbers,
-       but only populated slots visible; no LED control). #}
-    {% set ses_count = plan.enclosures|selectattr('sg_device')|list|length %}
-    {% set sas_count = plan.enclosures|rejectattr('sg_device')|list|length %}
-    <p class="muted">
-      Detected
-      {%- if ses_count and sas_count %}
-        {{ ses_count }} SES enclosure{{ 's' if ses_count != 1 else '' }} +
-        {{ sas_count }} SAS-layer enclosure{{ 's' if sas_count != 1 else '' }},
-      {%- elif ses_count %}
-        {{ ses_count }} SES enclosure{{ 's' if ses_count != 1 else '' }},
-      {%- else %}
-        {{ sas_count }} expander-only enclosure{{ 's' if sas_count != 1 else '' }} (no SES),
-      {%- endif %}
-      {{ plan.total_bays }} {{ 'total bays' if ses_count else 'slots visible' }}:
-    </p>
-    <ul class="setup-what">
-    {% for enc in plan.enclosures %}
-      <li>
-        {{ enc.label }} &middot; {{ enc.slot_count }} slots ({{ enc.populated_count }} populated)
-        {%- if enc.sg_device %} &middot; {{ enc.sg_device }}
-        {%- else %} &middot; no SES (LED control unavailable)
-        {%- endif %}
-      </li>
-    {% endfor %}
-    </ul>
-    {% if sas_count and not ses_count %}
-    <p class="muted small">
-      Expander-only backplanes don't announce empty bays to the OS &mdash; slots
-      will appear as drives are inserted. Total chassis bay count may be higher
-      than shown here.
-    </p>
-    {% endif %}
-  {% else %}
-    <p class="muted">
-      Direct-attach or no-SES hardware &mdash; using virtual bays
-      ({{ plan.virtual_bay_count }} slots; tunable in Settings &rarr; Daemon).
-      Common on R720 LFF direct-attach backplanes and consumer PCs.
-      Drives plugged into front bays will still appear on the dashboard.
-    </p>
-  {% endif %}
+  <h2>Hardware capabilities</h2>
+  <p class="muted small">
+    Three yes/no checks the daemon uses to decide what features to enable.
+    All three are optional &mdash; DriveForge runs fine without any of them.
+  </p>
+  <ul class="setup-what">
+    <li>
+      {% if capabilities.led_control %}
+        <span class="ok">&#10003;</span>
+        <strong>Amber fault LEDs:</strong> controllable via SES on this backplane.
+        Drives that fail a run will light an amber LED; drives that pass will
+        briefly heartbeat-flash for safe removal.
+      {% else %}
+        <span class="muted">&#8226;</span>
+        <strong>Amber fault LEDs:</strong> not available on this hardware (no
+        SES target detected). Drive-test outcomes still render on the dashboard;
+        only the physical LED hook is a no-op.
+      {% endif %}
+    </li>
+    <li>
+      {% if capabilities.chassis_power %}
+        <span class="ok">&#10003;</span>
+        <strong>Chassis power telemetry:</strong> reading watts via BMC (IPMI DCMI).
+      {% else %}
+        <span class="muted">&#8226;</span>
+        <strong>Chassis power telemetry:</strong> not available. Either no BMC
+        on this host, or the daemon can't read <code>/dev/ipmi0</code>.
+      {% endif %}
+    </li>
+    <li>
+      {% if capabilities.chassis_temperature %}
+        <span class="ok">&#10003;</span>
+        <strong>Chassis temperature:</strong> reading inlet / exhaust / CPU
+        temps via BMC.
+        {% if chassis_temps %}
+          <span class="muted small">
+            {%- set shown = [] -%}
+            {%- for label in ["Inlet Temp", "Exhaust Temp"] -%}
+              {%- if label in chassis_temps -%}
+                {%- set _ = shown.append(label ~ " " ~ chassis_temps[label] ~ "&deg;C") -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {% if shown %}&mdash; {{ shown|join(", ")|safe }}{% endif %}
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="muted">&#8226;</span>
+        <strong>Chassis temperature:</strong> not available (no BMC SDR data).
+      {% endif %}
+    </li>
+  </ul>
 </section>
 
 <section class="setup-panel">
@@ -71,13 +78,13 @@
     </tbody>
   </table>
   <p class="muted">
-    Found {{ drives|length }} drive(s). New drives plugged in later are
-    picked up automatically via udev hotplug.
+    Found {{ drives|length }} drive{{ 's' if drives|length != 1 else '' }}. New
+    drives plugged in later are picked up automatically via udev hotplug.
   </p>
   {% else %}
-  <p class="warn">
-    No drives discovered. DriveForge will start anyway — plug drives in
-    after setup and they'll appear on the dashboard.
+  <p class="muted">
+    No drives detected yet &mdash; that's fine. Plug them in after setup and
+    they'll appear on the dashboard as they're enumerated.
   </p>
   {% endif %}
 </section>
@@ -95,19 +102,6 @@
     a stable URL, set a static IP via Debian's netplan config.
   </p>
   {% endif %}
-</section>
-
-<section class="setup-panel">
-  <h2>Chassis telemetry</h2>
-  <p class="{{ 'muted' if ipmi_ok else 'warn' }}">
-    {% if ipmi_ok %}
-      &#10003; BMC reachable via IPMI &mdash; chassis power readings enabled.
-    {% else %}
-      &#9888; ipmitool can't reach the local BMC. Either IPMI isn't available
-      on this host, or the daemon lacks access to <code>/dev/ipmi0</code>.
-      DriveForge will still run; chassis power telemetry will be unavailable.
-    {% endif %}
-  </p>
 </section>
 
 <form method="post" action="/setup/2" class="setup-actions">

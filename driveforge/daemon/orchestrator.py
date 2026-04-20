@@ -20,7 +20,7 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from driveforge.core import badblocks, blinker, enclosures, erase, grading, process, smart, telemetry, timing, webhook
+from driveforge.core import badblocks, blinker, erase, grading, process, smart, telemetry, timing, webhook
 from driveforge.core import drive as drive_mod
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
@@ -107,7 +107,7 @@ class Orchestrator:
         overwrite the task handle, orphan the first pipeline, and race the
         same device with parallel smartctl/hdparm/badblocks calls.
         """
-        return set(self._tasks) | set(self.state.bay_assignments.values())
+        return set(self._tasks) | self.state.active_serials()
 
     def _spawn_done_blinker(self, drive: Drive, outcome: str) -> None:
         """Start the post-pipeline activity-LED blinker for this drive.
@@ -155,13 +155,13 @@ class Orchestrator:
         `drive` from `drive_mod.discover()` so its device_path is current.
 
         No-op in three cases:
-          - Drive is currently under test (serial is in bay_assignments).
+          - Drive is currently under test (serial is in state.active_phase).
           - Drive has no completed test runs in the DB.
           - The latest run was user-aborted (phase=="aborted"). Aborts are
             operator-initiated; re-showing a fail LED on re-insert would
             misrepresent what happened.
         """
-        if drive.serial in self.state.bay_assignments.values():
+        if drive.serial in self.state.active_phase:
             return
         if drive.serial in self.state.done_blinkers:
             # Already blinking — no need to restart.
@@ -266,21 +266,12 @@ class Orchestrator:
         # they don't race real pipeline I/O.
         for drive in drives:
             self._cancel_blinker(drive.serial)
-        used_keys = set(self.state.bay_assignments.keys())
         for drive in drives:
-            bay_key = enclosures.bay_key_for_device(plan, drive.device_path)
-            if bay_key is None:
-                if plan.virtual_bay_count > 0:
-                    bay_key = enclosures.assign_virtual_bay(plan, used_keys)
-                if bay_key is None:
-                    bay_key = enclosures.unbayed_key(drive.serial)
-            used_keys.add(bay_key)
-            self.state.bay_assignments[bay_key] = drive.serial
             # Cache the basename so the diskstats poller can map back from
             # its per-device rows to the active serial without hitting the DB
             # (which doesn't store device_path).
             self.state.device_basenames[drive.serial] = drive.device_path.rsplit("/", 1)[-1]
-            task = asyncio.create_task(self._run_drive(batch_id, bay_key, drive, quick=quick))
+            task = asyncio.create_task(self._run_drive(batch_id, drive, quick=quick))
             self._tasks[drive.serial] = task
         asyncio.create_task(self._on_batch_complete(batch_id, [d.serial for d in drives]))
         return batch_id
@@ -302,7 +293,6 @@ class Orchestrator:
                 task.cancel()
                 cancelled += 1
         await asyncio.sleep(0)
-        self.state.bay_assignments.clear()
         self.state.active_phase.clear()
         self.state.active_percent.clear()
         self.state.active_sublabel.clear()
@@ -329,7 +319,7 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ pipeline
 
-    async def _run_drive(self, batch_id: str, bay_key: str, drive: Drive, *, quick: bool) -> None:
+    async def _run_drive(self, batch_id: str, drive: Drive, *, quick: bool) -> None:
         """Per-drive pipeline."""
         async with self._semaphore:
             # Fresh log buffer for this run
@@ -343,7 +333,7 @@ class Orchestrator:
             #   None → no blink (user aborted, or drive already removed).
             outcome: str | None = "pass"
             try:
-                await self._execute_pipeline(batch_id, bay_key, drive, quick=quick)
+                await self._execute_pipeline(batch_id, drive, quick=quick)
             except asyncio.CancelledError:
                 logger.warning("drive %s cancelled mid-pipeline", drive.serial)
                 self._record_failure(drive, phase="aborted", detail="aborted by user")
@@ -370,7 +360,6 @@ class Orchestrator:
                     if latest and latest.grade == "fail":
                         outcome = "fail"
             finally:
-                self.state.bay_assignments.pop(bay_key, None)
                 self.state.device_basenames.pop(drive.serial, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
@@ -400,7 +389,7 @@ class Orchestrator:
             session.commit()
 
     async def _execute_pipeline(
-        self, batch_id: str, bay_key: str, drive: Drive, *, quick: bool
+        self, batch_id: str, drive: Drive, *, quick: bool
     ) -> None:
         with self.state.session_factory() as session:
             test_run = m.TestRun(

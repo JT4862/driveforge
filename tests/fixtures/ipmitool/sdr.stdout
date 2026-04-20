@@ -1,0 +1,17 @@
+SEL              | Not Readable      | ns
+Intrusion        | 0x00              | ok
+Fan1             | 4800 RPM          | ok
+Fan2             | 4800 RPM          | ok
+Fan3             | 4680 RPM          | ok
+Fan4             | 4560 RPM          | ok
+Fan5             | 4800 RPM          | ok
+Fan6             | 4800 RPM          | ok
+Inlet Temp       | 17 degrees C      | ok
+Exhaust Temp     | 22 degrees C      | ok
+Temp             | 38 degrees C      | ok
+Temp             | 40 degrees C      | ok
+DIMM PG          | 0x00              | ok
+CMOS Battery     | 0x00              | ok
+ROMB Battery     | Not Readable      | ns
+VCORE PG         | 0x00              | ok
+System Level     | 108 Watts         | ok

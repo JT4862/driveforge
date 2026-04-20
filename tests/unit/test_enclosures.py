@@ -94,25 +94,41 @@ def test_discover_multi_enclosure_r720_plus_md1200(tmp_path: Path) -> None:
     plan = enclosures.build_bay_plan(sys_root=tmp_path)
     assert plan.has_real_enclosures
     assert len(plan.enclosures) == 2
-    assert plan.total_bays == 20
-    assert plan.virtual_bay_count == 0
+    # Two enclosures, 8 + 12 slots = 20 total
+    assert sum(e.slot_count for e in plan.enclosures) == 20
     labels = {e.label for e in plan.enclosures}
     assert "PERC H710" in labels
     assert "MD1200" in labels
 
 
-def test_no_enclosures_falls_back_to_virtual(tmp_path: Path) -> None:
-    # Empty sysfs tree — simulating consumer PC
-    plan = enclosures.build_bay_plan(sys_root=tmp_path, virtual_bays_fallback=4)
+def test_no_enclosures_means_empty_plan(tmp_path: Path) -> None:
+    # Empty sysfs tree — simulating consumer PC. The drive-centric dashboard
+    # doesn't care; drives just render from discover() regardless.
+    plan = enclosures.build_bay_plan(sys_root=tmp_path)
     assert not plan.has_real_enclosures
     assert plan.enclosures == []
-    assert plan.virtual_bay_count == 4
-    assert plan.total_bays == 4
 
 
-def test_virtual_bays_zero_when_fallback_zero(tmp_path: Path) -> None:
-    plan = enclosures.build_bay_plan(sys_root=tmp_path, virtual_bays_fallback=0)
-    assert plan.total_bays == 0
+def test_slot_lookup_by_device_path(tmp_path: Path) -> None:
+    # The plan's slot_for_device() is used internally for LED targeting —
+    # given a /dev/sdX, return the Slot (with element_index + enclosure).
+    _make_enclosure(
+        tmp_path,
+        enc_name="0:0:32:0",
+        vendor="DELL",
+        product="PERC H710",
+        logical_id="0xabc",
+        sg_name="sg3",
+        slots=[(0, "OK", "sda"), (1, "OK", "sdb"), (2, "Unknown", None)],
+    )
+    plan = enclosures.build_bay_plan(sys_root=tmp_path)
+    slot = plan.slot_for_device("/dev/sdb")
+    assert slot is not None
+    assert slot.slot_number == 1
+    assert plan.slot_for_device("/dev/sdz") is None  # unknown device
+    enc = plan.enclosure_for_device("/dev/sda")
+    assert enc is not None
+    assert enc.product == "PERC H710"
 
 
 def test_slot_without_device_is_still_in_slot_list(tmp_path: Path) -> None:
@@ -257,8 +273,7 @@ def test_build_bay_plan_prefers_sas_when_ses_empty(tmp_path: Path) -> None:
     )
     plan = enclosures.build_bay_plan(sys_root=tmp_path)
     assert plan.has_real_enclosures
-    assert plan.virtual_bay_count == 0
-    assert plan.total_bays == 1
+    assert len(plan.enclosures) == 1
     assert plan.enclosures[0].slots[0].slot_number == 5
 
 
@@ -288,7 +303,7 @@ def test_build_bay_plan_dedupes_when_ses_and_sas_both_present(tmp_path: Path) ->
     # Only the SES enclosure should survive the dedupe
     assert len(plan.enclosures) == 1
     assert plan.enclosures[0].sg_device == "/dev/sg3"
-    assert plan.total_bays == 2
+    assert plan.enclosures[0].slot_count == 2
 
 
 def test_sas_end_device_without_enclosure_identifier_is_skipped(tmp_path: Path) -> None:

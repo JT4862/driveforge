@@ -15,6 +15,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from driveforge.config import Settings
+from driveforge.core import capabilities as capabilities_mod
 from driveforge.core import enclosures
 from driveforge.core.process import FixtureRunner, set_fixture_runner
 from driveforge.db.session import make_engine, init_db, make_session_factory
@@ -26,25 +27,26 @@ class DaemonState:
     engine: Engine
     session_factory: sessionmaker
 
-    # In-flight: bay_key -> active drive serial. Driven by the orchestrator.
-    bay_assignments: dict[str, str] = field(default_factory=dict)
-    # Latest phase per drive — for fast dashboard rendering
+    # Per-drive active-phase state — the source of truth for "which drives
+    # are currently under test". A drive serial is considered active iff
+    # it has an entry here. The orchestrator sets/clears these three maps
+    # atomically at phase transitions + run completion.
     active_phase: dict[str, str] = field(default_factory=dict)
     active_percent: dict[str, float] = field(default_factory=dict)
-    # Optional phase-scoped sub-label shown on the bay card — e.g. which of
-    # the 8 badblocks passes is running ("pass 3/8 · write 0xFF"). Cleared on
-    # phase transition.
+    # Optional phase-scoped sub-label shown on the drive card — e.g. which
+    # of the 8 badblocks passes is running ("pass 3/8 · write 0xFF"). Cleared
+    # on phase transition.
     active_sublabel: dict[str, str] = field(default_factory=dict)
     # Live per-drive I/O rate during active phases. Written by a periodic
-    # /proc/diskstats poller in the daemon lifespan; read by the bay-card
+    # /proc/diskstats poller in the daemon lifespan; read by the drive-card
     # renderer. Unit: MB/s (decimal megabytes). Cleared when a drive leaves
-    # bay_assignments.
+    # active_phase.
     active_io_rate: dict[str, dict[str, float]] = field(default_factory=dict)
     # Serial → kernel device basename ("sda", "nvme0n1") for drives currently
-    # in bay_assignments. The DB doesn't persist device_path (kernel letters
+    # in active_phase. The DB doesn't persist device_path (kernel letters
     # drift), so the I/O rate poller needs this to map its diskstats basename
     # rows back to the active drives. Populated by the orchestrator when a
-    # batch starts, cleared when a drive leaves bay_assignments.
+    # drive starts running, cleared when it leaves active_phase.
     device_basenames: dict[str, str] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
@@ -52,18 +54,34 @@ class DaemonState:
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)
 
-    # Cached enclosure discovery. Refreshed on boot + udev events.
+    # Cached enclosure discovery. Refreshed on boot + udev events. Kept for
+    # internal LED targeting (sg_ses needs the slot's element_index) and as
+    # informational metadata; the dashboard itself no longer renders drives
+    # by enclosure/slot — it's a flat drive-centric list.
     bay_plan: enclosures.BayPlan = field(
-        default_factory=lambda: enclosures.BayPlan(enclosures=[], virtual_bay_count=0, total_bays=0)
+        default_factory=lambda: enclosures.BayPlan(enclosures=[])
+    )
+    # Cached hardware capabilities — led control, chassis power, chassis temp.
+    # Refreshed alongside bay_plan because led_control is derived from it.
+    # Used by the Setup Wizard Step 2 "capabilities" panel + Settings page.
+    capabilities: capabilities_mod.HardwareCapabilities = field(
+        default_factory=lambda: capabilities_mod.HardwareCapabilities(
+            led_control=False, chassis_power=False, chassis_temperature=False
+        )
     )
 
     def refresh_bay_plan(self) -> enclosures.BayPlan:
-        """Re-discover enclosures. Called on daemon start and udev add/remove."""
+        """Re-discover enclosures + capabilities. Called on daemon start
+        and on udev add/remove events."""
         self.bay_plan = enclosures.build_bay_plan(
             sys_root=self.settings.daemon.sysfs_root,
-            virtual_bays_fallback=self.settings.daemon.virtual_bays,
         )
+        self.capabilities = capabilities_mod.detect(plan=self.bay_plan)
         return self.bay_plan
+
+    def active_serials(self) -> set[str]:
+        """Serials currently in the test pipeline. Single source of truth."""
+        return set(self.active_phase.keys())
 
     @classmethod
     def boot(cls, settings: Settings) -> "DaemonState":

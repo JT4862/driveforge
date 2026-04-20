@@ -1,30 +1,31 @@
-"""Enclosure / bay detection.
+"""Enclosure detection.
 
-Three detection paths, tried in order:
+Two detection paths, tried in order:
 
 1. **SES (SCSI Enclosure Services)** — preferred. Server-class SAS
    backplanes (R720 internal, MD1200, most storage shelves) expose a
    standard SES target that reports slot count, which slot holds which
-   drive, fault/ident LEDs (settable via sg_ses/ledctl), and sometimes
-   per-slot temp + power. DriveForge reads this via the kernel's
-   `enclosure` sysfs class (`/sys/class/enclosure/<name>/<slot>/`) —
-   no external dep, works without root.
+   drive, and fault/ident LEDs (settable via sg_ses/ledctl).
 
 2. **SAS layer (expander-only)** — fallback for hardware that has a
-   SAS expander but no embedded SES processor. Some backplanes
-   (including certain NX-3200 SKUs) advertise slot topology via SAS
-   SMP — the kernel's `sas_device` class exposes `bay_identifier` +
-   `enclosure_identifier` on each end_device — but don't expose an
-   SES target. Without SES we can still show the real slot numbers,
-   just not control LEDs (ledctl/ledmon require SES on SAS).
+   SAS expander but no embedded SES processor. The kernel's
+   `sas_device` class exposes `bay_identifier` + `enclosure_identifier`
+   on each end_device, but these backplanes don't expose an SES target,
+   so LED control via sg_ses/ledctl is not available.
 
-3. **Virtual bays** — final fallback for consumer PCs / NVMe-only
-   rigs. The daemon uses `virtual_bays` from config, a user-chosen
-   number of slots drives are assigned to in insertion order.
+Detection results are used for two things only:
 
-For LED control (set fault/ident), we fall back to `sg_ses` since kernel
-sysfs is read-only for those attributes on most distros. On SAS-layer
-enclosures (path 2), LED control is not available from userspace tools.
+  - **LED targeting** — when DriveForge turns an amber fault LED on a
+    specific drive, we look up the drive's PHY/slot in the enclosure
+    data to find the sg device + element_index to write.
+  - **Capability reporting** — the presence of any enclosure with an
+    SES `sg_device` drives the `HardwareCapabilities.led_control` flag
+    shown on the setup wizard and Settings pages.
+
+The dashboard is drive-centric and does NOT render enclosures or empty
+slots. Drives show up as cards when they're plugged in; cards go away
+when drives are pulled. Slot numbers are not surfaced in the UI — the
+LED is the physical pointer, the serial is the logical identity.
 """
 
 from __future__ import annotations
@@ -319,75 +320,49 @@ def discover_sas_enclosures(*, sys_root: Path = Path("/")) -> list[Enclosure]:
 
 @dataclass
 class BayPlan:
-    """Computed bay map used by the dashboard + orchestrator.
+    """Detected enclosure topology on this host.
 
-    Bays are assigned a unique `global_bay` id across the entire rig.
-    Real slots are grouped by their enclosure for display; virtual bays
-    (for hosts without SES) sit in their own group.
+    Carried for internal LED-targeting and capability reporting only —
+    the dashboard is drive-centric and doesn't render enclosures or
+    slots. Empty list is the common case on direct-attach hardware.
     """
 
     enclosures: list[Enclosure]
-    virtual_bay_count: int  # 0 if any real enclosures were found
-    total_bays: int  # sum of real slots + virtual bays
 
     @property
     def has_real_enclosures(self) -> bool:
         return bool(self.enclosures)
 
+    def slot_for_device(self, device_path: str) -> Slot | None:
+        """Look up the enclosure slot backing a `/dev/sdX`. Used by the LED
+        targeting code to map a drive to its SES element_index."""
+        for enc in self.enclosures:
+            for slot in enc.slots:
+                if slot.device == device_path:
+                    return slot
+        return None
 
-def build_bay_plan(*, sys_root: Path = Path("/"), virtual_bays_fallback: int = 8) -> BayPlan:
-    """Compute the bay plan for this host.
+    def enclosure_for_device(self, device_path: str) -> Enclosure | None:
+        for enc in self.enclosures:
+            for slot in enc.slots:
+                if slot.device == device_path:
+                    return enc
+        return None
 
-    Tries three detection paths in order:
 
-      1. SES — preferred, full slot info + LED control.
-      2. SAS layer — fallback for expander-only backplanes (no SES target).
-         Gives real slot numbers but no LED control.
-      3. Virtual bays — final fallback for consumer PCs / NVMe-only rigs.
+def build_bay_plan(*, sys_root: Path = Path("/")) -> BayPlan:
+    """Discover enclosures on this host.
 
-    If SES enclosures are found, SAS-layer enclosures are deduplicated
-    against them by `enclosure_identifier` / logical_id so we don't show
-    the same backplane twice. In practice only one of the two paths ever
-    has data on a given host, but the dedupe is defensive.
+    Tries SES first (kernel `enclosure` class), falls back to the SAS
+    layer (`sas_device` class with `bay_identifier` / `enclosure_identifier`).
+    Deduplicates SAS-layer results against SES results on `logical_id` so
+    hosts where both paths see the same backplane don't report it twice.
 
-    Virtual bays are only added when NO real enclosures (SES or SAS) are
-    found — mixing virtual + real is confusing and error-prone. Drives
-    not in any real enclosure still show up on the dashboard; they go
-    into the "Unbayed" bucket rather than a virtual slot.
+    Empty list is fine — consumer PCs and direct-attach hardware just have
+    no enclosures. The dashboard renders drives regardless.
     """
     ses_enclosures = discover_enclosures(sys_root=sys_root)
     sas_enclosures = discover_sas_enclosures(sys_root=sys_root)
-
-    # Dedupe SAS results against SES results on logical_id (SES encloses
-    # carry the expander/backplane SAS address too, typically).
     ses_ids = {e.logical_id for e in ses_enclosures if e.logical_id}
     sas_enclosures = [e for e in sas_enclosures if e.logical_id not in ses_ids]
-
-    enclosures = ses_enclosures + sas_enclosures
-    if enclosures:
-        total = sum(e.slot_count for e in enclosures)
-        return BayPlan(enclosures=enclosures, virtual_bay_count=0, total_bays=total)
-    n = max(0, int(virtual_bays_fallback))
-    return BayPlan(enclosures=[], virtual_bay_count=n, total_bays=n)
-
-
-def bay_key_for_device(plan: BayPlan, device_path: str) -> str | None:
-    """Find the bay_key for a given `/dev/sdX` if it's in an enclosure slot."""
-    for enc_idx, enc in enumerate(plan.enclosures):
-        for slot in enc.slots:
-            if slot.device == device_path:
-                return f"e{enc_idx}:s{slot.slot_number}"
-    return None
-
-
-def assign_virtual_bay(plan: BayPlan, used_keys: set[str]) -> str | None:
-    """Pick the next unused virtual bay key. Returns None if all are used."""
-    for i in range(plan.virtual_bay_count):
-        key = f"v{i}"
-        if key not in used_keys:
-            return key
-    return None
-
-
-def unbayed_key(serial: str) -> str:
-    return f"u:{serial}"
+    return BayPlan(enclosures=ses_enclosures + sas_enclosures)

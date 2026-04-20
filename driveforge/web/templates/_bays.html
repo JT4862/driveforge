@@ -1,66 +1,68 @@
-{% macro bay_card(bay) -%}
-{% if bay.state == "empty" %}
-<div class="bay-card empty">
-  <div class="bay-num">Bay {{ bay.bay }}</div>
-  <div class="bay-body">
-    <div class="empty-msg">Empty</div>
-    <div class="empty-hint">Insert a drive to enroll</div>
-  </div>
-</div>
-{% elif bay.state == "installed" %}
-<div class="bay-card installed{% if bay.last_grade %} graded graded-{{ bay.last_grade }}{% endif %}">
-  <a class="bay-card-main" href="/drives/{{ bay.serial }}">
-    <div class="bay-num">Bay {{ bay.bay }}</div>
+{#
+  Drive-centric dashboard view. Two flat sections:
+    - Active   — drives currently in the test pipeline (one card each)
+    - Installed — drives present on the host but not being tested
+
+  No enclosure groupings, no slot numbers, no empty placeholders. Drives
+  appear when plugged in, disappear when pulled. LED is the physical
+  pointer; drive serial is the logical identity.
+
+  The card macro handles two states — `active` (in-flight pipeline) and
+  `installed` (idle drive with optional last-grade info).
+#}
+{% macro drive_card(card) -%}
+{% if card.state == "installed" %}
+<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}">
+  <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
-      <div class="drive-model">{% if bay.manufacturer %}<span class="mfr">{{ bay.manufacturer }}</span> {% endif %}{{ bay.model }}</div>
-      <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
-      {% if bay.last_grade == "fail" %}
-        <div class="phase last-test fail-text">✗ Failed {{ bay.last_tested.strftime('%Y-%m-%d') }}{% if bay.last_phase %} &middot; {{ bay.last_phase|replace("_", " ") }}{% endif %}</div>
-        {% if bay.last_error %}
-        <div class="fail-detail" title="{{ bay.last_error }}">{{ bay.last_error }}</div>
+      <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+      <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB{% if card.transport %} &middot; {{ card.transport|upper }}{% endif %}</div>
+      {% if card.last_grade == "fail" %}
+        <div class="phase last-test fail-text">✗ Failed {{ card.last_tested.strftime('%Y-%m-%d') }}{% if card.last_phase %} &middot; {{ card.last_phase|replace("_", " ") }}{% endif %}</div>
+        {% if card.last_error %}
+        <div class="fail-detail" title="{{ card.last_error }}">{{ card.last_error }}</div>
         {% endif %}
-      {% elif bay.last_grade %}
-        <div class="phase last-test">Grade {{ bay.last_grade|upper }} &middot; tested {{ bay.last_tested.strftime('%Y-%m-%d') }}</div>
+      {% elif card.last_grade %}
+        <div class="phase last-test">Grade {{ card.last_grade|upper }} &middot; tested {{ card.last_tested.strftime('%Y-%m-%d') }}</div>
       {% else %}
         <div class="phase idle">idle &middot; never tested</div>
       {% endif %}
     </div>
   </a>
-  {% if bay.last_grade %}
+  {% if card.last_grade %}
   <div class="bay-badges">
-    <a class="report-link" href="/reports/{{ bay.serial }}" title="View cert report">📄</a>
-    {% if bay.last_grade == "fail" %}
+    <a class="report-link" href="/reports/{{ card.serial }}" title="View cert report">📄</a>
+    {% if card.last_grade == "fail" %}
       <span class="grade grade-fail grade-corner">✗ FAIL</span>
     {% else %}
-      <span class="grade grade-{{ bay.last_grade }} grade-corner"{% if bay.last_quick %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ bay.last_grade|upper }}{% if bay.last_quick %}<sup class="provisional">*</sup>{% endif %}</span>
+      <span class="grade grade-{{ card.last_grade }} grade-corner"{% if card.last_quick %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ card.last_grade|upper }}{% if card.last_quick %}<sup class="provisional">*</sup>{% endif %}</span>
     {% endif %}
   </div>
   {% endif %}
 </div>
 {% else %}
-<a class="bay-card active phase-{{ bay.phase_class }}" href="/drives/{{ bay.serial }}">
-  <div class="bay-num">Bay {{ bay.bay }}</div>
+<a class="bay-card active phase-{{ card.phase_class }}" href="/drives/{{ card.serial }}">
   <div class="bay-body">
-    <div class="drive-model">{% if bay.manufacturer %}<span class="mfr">{{ bay.manufacturer }}</span> {% endif %}{{ bay.model }}</div>
-    <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
-    <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
-    {% if bay.sublabel %}<div class="phase-sub">{{ bay.sublabel }}</div>{% endif %}
-    {% if bay.io_rate %}
+    <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+    <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
+    <div class="phase">{{ card.phase|replace("_", " ") }}</div>
+    {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
+    {% if card.io_rate %}
     <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
-      {%- if bay.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(bay.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
-      {%- if bay.io_rate.write_mbps >= 0.1 and bay.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
-      {%- if bay.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(bay.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
-      {%- if bay.io_rate.write_mbps < 0.1 and bay.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
+      {%- if card.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(card.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
+      {%- if card.io_rate.write_mbps >= 0.1 and card.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
+      {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
+      {%- if card.io_rate.write_mbps < 0.1 and card.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
     </div>
     {% endif %}
     <div class="progress">
-      <div class="bar" style="width: {{ bay.percent }}%"></div>
+      <div class="bar" style="width: {{ card.percent }}%"></div>
     </div>
     <div class="bay-stats">
-      <span class="percent">{{ "%.0f"|format(bay.percent) }}%</span>
+      <span class="percent">{{ "%.0f"|format(card.percent) }}%</span>
       <span class="timing">
-        {{ bay.elapsed_label }}
-        {% if bay.eta_label %}&middot; ETA {{ bay.eta_label }}{% endif %}
+        {{ card.elapsed_label }}
+        {% if card.eta_label %}&middot; ETA {{ card.eta_label }}{% endif %}
       </span>
     </div>
   </div>
@@ -68,38 +70,38 @@
 {% endif %}
 {%- endmacro %}
 
-{% if view.has_real_enclosures %}
-  {% for enc in view.enclosures %}
-  <section class="enclosure">
-    <header class="enclosure-head">
-      <h3>{{ enc.label }}</h3>
-      <span class="muted">{{ enc.populated_count }}/{{ enc.slot_count }} slots populated{% if enc.sg_device %} &middot; {{ enc.sg_device }}{% endif %}</span>
-    </header>
-    <div class="bay-grid">
-      {% for bay in enc.bays %}{{ bay_card(bay) }}{% endfor %}
-    </div>
-  </section>
-  {% endfor %}
-{% else %}
-  <section class="enclosure">
-    <header class="enclosure-head">
-      <h3>Bays</h3>
-      <span class="muted">{{ view.virtual_bays|length }} slots &middot; direct-attach (no SES)</span>
-    </header>
-    <div class="bay-grid">
-      {% for bay in view.virtual_bays %}{{ bay_card(bay) }}{% endfor %}
-    </div>
-  </section>
-{% endif %}
-
-{% if view.unbayed %}
+{% if view.active %}
 <section class="enclosure">
   <header class="enclosure-head">
-    <h3>Other drives</h3>
-    <span class="muted">{{ view.unbayed|length }} drive{{ 's' if view.unbayed|length != 1 else '' }} outside the bay grid (NVMe / USB / overflow)</span>
+    <h3>Active</h3>
+    <span class="muted">{{ view.active|length }} drive{{ 's' if view.active|length != 1 else '' }} under test</span>
   </header>
   <div class="bay-grid">
-    {% for bay in view.unbayed %}{{ bay_card(bay) }}{% endfor %}
+    {% for card in view.active %}{{ drive_card(card) }}{% endfor %}
   </div>
+</section>
+{% endif %}
+
+{% if view.installed %}
+<section class="enclosure">
+  <header class="enclosure-head">
+    <h3>Installed</h3>
+    <span class="muted">{{ view.installed|length }} drive{{ 's' if view.installed|length != 1 else '' }} present</span>
+  </header>
+  <div class="bay-grid">
+    {% for card in view.installed %}{{ drive_card(card) }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if not view.active and not view.installed %}
+<section class="enclosure empty-dashboard">
+  <header class="enclosure-head">
+    <h3>No drives present</h3>
+  </header>
+  <p class="muted" style="padding: 12px 16px;">
+    Plug a drive into any bay and it will appear here automatically. DriveForge watches for
+    hotplug events and enrolls new drives on insertion.
+  </p>
 </section>
 {% endif %}

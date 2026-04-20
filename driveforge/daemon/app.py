@@ -152,14 +152,15 @@ async def _poll_io_rates(state: DaemonState) -> None:
     while True:
         try:
             rates = tracker.poll()
-            if rates and state.bay_assignments:
+            active = state.active_serials()
+            if rates and active:
                 # Map device basenames back to serials via the cache the
-                # orchestrator populates when a drive enters bay_assignments.
+                # orchestrator populates when a drive enters active_phase.
                 # We *can't* read device_path from the DB — `m.Drive` doesn't
                 # persist it, since kernel letters drift across reboots and
                 # hotplug shuffles.
                 fresh: dict[str, dict[str, float]] = {}
-                for serial in list(state.bay_assignments.values()):
+                for serial in active:
                     dev_name = state.device_basenames.get(serial)
                     if not dev_name:
                         continue
@@ -170,10 +171,10 @@ async def _poll_io_rates(state: DaemonState) -> None:
                         "read_mbps": round(rate.read_mbps, 1),
                         "write_mbps": round(rate.write_mbps, 1),
                     }
-                # Replace wholesale so serials that just left bay_assignments
+                # Replace wholesale so serials that just left active_phase
                 # drop out of the display instead of showing stale rates.
                 state.active_io_rate = fresh
-            elif not state.bay_assignments:
+            elif not active:
                 state.active_io_rate.clear()
         except Exception:  # noqa: BLE001
             # Never let a transient error kill the poller — the dashboard

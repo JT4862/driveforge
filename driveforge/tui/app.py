@@ -66,22 +66,23 @@ class Dashboard(Screen):
     def action_refresh(self) -> None:
         health = self._fetch("/api/health") or {}
         drives = self._fetch("/api/drives") or []
-        by_serial = {d["serial"]: d for d in drives}
-        assigns = health.get("bay_assignments", {})
+        active = set(health.get("active_serials", []))
         table = self.query_one("#bay-table", DataTable)
         table.clear()
-        for bay in range(1, 9):
-            serial = assigns.get(str(bay)) or assigns.get(bay)
-            if not serial:
-                table.add_row(str(bay), "—", "(empty)", "—", "—", "—")
-                continue
-            d = by_serial.get(serial, {})
+        if not drives:
+            table.add_row("—", "—", "(no drives)", "—", "—", "—")
+            return
+        # Flat drive-centric list: drives currently present, ordered by serial.
+        # Active drives (in the test pipeline) render with a distinct state label.
+        for i, d in enumerate(sorted(drives, key=lambda r: r.get("serial", "")), start=1):
+            serial = d.get("serial", "?")
+            state_label = "active" if serial in active else "idle"
             table.add_row(
-                str(bay),
+                str(i),
                 serial,
                 d.get("model", "?"),
                 f"{d.get('capacity_tb', 0):.1f} TB",
-                "active",
+                state_label,
                 "—",
             )
 
