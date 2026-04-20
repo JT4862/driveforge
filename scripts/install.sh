@@ -22,6 +22,11 @@ die() { echo "${RED}✗${RESET} $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "must run as root (try: curl ... | sudo bash)"
 
+# Defense against being invoked with a minimal PATH (Debian installer's
+# in-target chroot on the ISO path gives us just /sbin:/bin, which misses
+# /usr/bin where python3 lives). Harmless no-op for interactive sudo runs.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 log "Checking Debian version..."
 if ! grep -q '^VERSION_ID="12"' /etc/os-release 2>/dev/null; then
   warn "Not Debian 12. DriveForge targets Debian 12; other distros are unsupported."
@@ -36,6 +41,13 @@ apt-get install -y --no-install-recommends \
   tmux lshw lsscsi ipmitool avahi-daemon avahi-utils \
   fonts-dejavu-core \
   curl ca-certificates >/dev/null
+# Post-install sanity check — if any critical binary is missing, fail now
+# with a useful message instead of crashing two sections later at e.g.
+# `python3 -m venv`. Hit a silent version of this on 2026-04-20 in the ISO
+# path where errors were being swallowed.
+for bin in python3 apt-get useradd systemctl; do
+  command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
+done
 ok "system packages installed"
 
 log "Creating driveforge user and directories..."
