@@ -583,6 +583,18 @@ class Orchestrator:
             # boot drive or adapter, not a test target.
             raise PipelineFailure("secure_erase", "refusing to erase USB-transport drive")
         serial = drive.serial
+        # Surface the specific erase mechanism on the dashboard card so the
+        # operator can see at a glance why some drives' activity LEDs blink
+        # (SAS `sg_format` issues per-sector SCSI commands → HBA sees traffic
+        # → backplane LED activity) while others stay solid (SATA drives
+        # take a single ATA command and let the drive firmware handle the
+        # overwrite internally → no link-level traffic → LED idle).
+        mechanism = {
+            Transport.SATA: "hdparm --security-erase",
+            Transport.SAS: "sg_format --format",
+            Transport.NVME: "nvme format -s 1",
+        }.get(drive.transport, "secure erase")
+        self.state.active_sublabel[serial] = mechanism
         # hdparm / sg_format / nvme format emit no progress — we synthesize a
         # time-based bar from the drive's own estimate (hdparm -I) or a
         # capacity heuristic. Caps at 99% so the bar never claims done until
