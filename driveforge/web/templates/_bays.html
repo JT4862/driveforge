@@ -12,7 +12,7 @@
 #}
 {% macro drive_card(card) -%}
 {% if card.state == "installed" %}
-<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}">
+<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
@@ -45,7 +45,7 @@
   {% endif %}
 </div>
 {% else %}
-<div class="bay-card active phase-{{ card.phase_class }}">
+<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>

@@ -319,6 +319,7 @@ class Orchestrator:
         self.state.active_percent.clear()
         self.state.active_sublabel.clear()
         self.state.active_drive_temp.clear()
+        self.state.phase_change_ts.clear()
         # Stop all post-pipeline blinkers too — abort implies "don't touch
         # anything on these devices anymore."
         for serial in list(self.state.done_blinkers):
@@ -383,11 +384,19 @@ class Orchestrator:
                     if latest and latest.grade == "fail":
                         outcome = "fail"
             finally:
+                import time as _time
+                # Flag "just completed" so the dashboard can flash the
+                # Installed card for a few seconds. Only stamp when the
+                # drive actually finished (pass/fail) — user aborts don't
+                # warrant the celebratory flash.
+                if outcome in ("pass", "fail"):
+                    self.state.just_completed_ts[drive.serial] = _time.monotonic()
                 self.state.device_basenames.pop(drive.serial, None)
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
                 self.state.active_sublabel.pop(drive.serial, None)
                 self.state.active_drive_temp.pop(drive.serial, None)
+                self.state.phase_change_ts.pop(drive.serial, None)
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.
@@ -494,6 +503,12 @@ class Orchestrator:
     # ------------------------------------------------------------------ phases
 
     async def _advance(self, run_id: int, phase: str, drive: Drive) -> None:
+        # Record the transition so the dashboard can pulse the card briefly.
+        # Only stamp if the phase actually changed — re-entering the same
+        # phase (shouldn't happen, but defensive) doesn't need a pulse.
+        if self.state.active_phase.get(drive.serial) != phase:
+            import time as _time
+            self.state.phase_change_ts[drive.serial] = _time.monotonic()
         self.state.active_phase[drive.serial] = phase
         self.state.active_percent[drive.serial] = 0.0
         self.state.active_sublabel.pop(drive.serial, None)

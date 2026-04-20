@@ -62,6 +62,15 @@ class DaemonState:
     active_drive_temp: dict[str, int] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
+    # Wall-clock (monotonic seconds) when each drive's phase last transitioned.
+    # Used by the dashboard to briefly pulse the card border when the phase
+    # changes — a visual cue that progress is happening, without having to
+    # watch the phase label closely.
+    phase_change_ts: dict[str, float] = field(default_factory=dict)
+    # Wall-clock (monotonic) when each drive's pipeline last completed.
+    # Used to flash a card's "just completed" state for a short window
+    # after it transitions from Active → Installed.
+    just_completed_ts: dict[str, float] = field(default_factory=dict)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)

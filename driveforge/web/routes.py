@@ -127,6 +127,15 @@ def _active_card(state, session, serial: str) -> dict | None:
         )
         elapsed_sec = int(delta.total_seconds())
     eta = _eta_seconds(phase, drive)
+    import time as _time
+    # Short window during which the card's border pulses to signal a phase
+    # change. 2.5 s is long enough to survive one HTMX refresh cycle
+    # (3 s polling) but short enough that the animation feels snappy.
+    phase_changed_at = state.phase_change_ts.get(serial)
+    phase_just_changed = (
+        phase_changed_at is not None
+        and (_time.monotonic() - phase_changed_at) < 2.5
+    )
     drive_temp = state.active_drive_temp.get(serial)
     # Render a sparkline of recent total throughput during high-I/O phases.
     # Only show when there's meaningful flow (peak >= 1 MB/s in the window)
@@ -155,6 +164,7 @@ def _active_card(state, session, serial: str) -> dict | None:
         "drive_temp_band": _temp_band(drive_temp),
         "spark_points": spark_points,
         "spark_peak": spark_peak,
+        "phase_just_changed": phase_just_changed,
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),
@@ -204,6 +214,16 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     # protocol to the Drive row. Drives never enrolled fall through to
     # the live lsblk value.
     transport = (db_drive.transport if db_drive and db_drive.transport else None) or drive.transport.value
+    import time as _time
+    # Briefly flash this card when the drive has just completed a pipeline
+    # (pass/fail). Window is 3.5 s — long enough that one HTMX refresh cycle
+    # lands inside it, short enough to feel transient. Aborted runs don't
+    # flash (stamped only on clean completions in _run_drive's finally).
+    completed_at = state.just_completed_ts.get(drive.serial)
+    just_completed = (
+        completed_at is not None
+        and (_time.monotonic() - completed_at) < 3.5
+    )
     return {
         "state": "installed",
         "key": drive.serial,
@@ -218,6 +238,7 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "last_quick": last_quick,
         "last_error": last_error,
         "drive_age_label": drive_age_label,
+        "just_completed": just_completed,
     }
 
 
