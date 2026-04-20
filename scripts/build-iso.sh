@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Build the DriveForge installer ISO.
 #
-# Takes a vanilla Debian 12 amd64 netinst ISO, injects:
+# Takes a vanilla Debian 12 amd64 netinst ISO and injects:
 #   - iso/preseed.cfg  (unattended install configuration)
-#   - the offline bundle (debs + wheels + source) at /driveforge-bundle/
 #   - a custom isolinux/grub menu that auto-selects the preseeded install
-# and repacks into a bootable hybrid ISO suitable for:
+# then repacks into a bootable hybrid ISO suitable for:
 #   - dd onto a USB stick
 #   - mounting via iDRAC / IPMI virtual media
 #   - booting in a VM
 #
-# Run on a Debian 12 host (or any Linux with xorriso + isolinux + apt-utils).
+# Network-install architecture: the target machine reaches Debian's mirror
+# and GitHub during install. The ISO itself is just Debian netinst + our
+# preseed; the heavy lifting (package install, DriveForge clone + install)
+# happens on the target with a working network. Air-gapped installs use a
+# separate DIY path documented in INSTALL.md.
+#
+# Run on a Debian 12 host (or any Linux with xorriso + isolinux).
 # Output: dist/driveforge-installer-<version>-amd64.iso
 #
 # Usage:
@@ -25,9 +30,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # Inside a Docker container we're already root and don't need sudo.
-# On a bare host the user invokes via `sudo`. Detect the context so we know
-# how to run the offline-bundle step (apt-get download wants a non-root user
-# on real systems but is fine inside a container sandbox).
+# On a bare host the user invokes via `sudo`.
 IN_CONTAINER=0
 [[ -f /.dockerenv ]] && IN_CONTAINER=1
 
@@ -81,37 +84,26 @@ if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
 fi
 echo "==> Base ISO verified: $DEBIAN_ISO ($(du -sh "$DEBIAN_ISO" | cut -f1))"
 
-# --- 2. Build offline bundle (if not already built) ---------------------------
-BUNDLE_TGZ="$DIST/driveforge-offline-${VERSION}.tar.gz"
-if [[ ! -f "$BUNDLE_TGZ" ]]; then
-  if [[ $IN_CONTAINER -eq 1 ]]; then
-    echo "==> Building offline bundle (in container, running as root)"
-    "$ROOT/scripts/build-offline-bundle.sh"
-  else
-    echo "==> Building offline bundle (drop to ${SUDO_USER:-nobody} for apt-get download)"
-    sudo -u "${SUDO_USER:-nobody}" "$ROOT/scripts/build-offline-bundle.sh"
-  fi
-fi
-echo "==> Offline bundle: $BUNDLE_TGZ ($(du -sh "$BUNDLE_TGZ" | cut -f1))"
-
-# --- 3. Extract ISO -----------------------------------------------------------
+# --- 2. Extract ISO -----------------------------------------------------------
+# Network-install architecture: we don't bundle Debian .debs or the DriveForge
+# source into the ISO. The installer uses Debian's mirror for packages, and
+# late_command git-clones DriveForge from the public GitHub repo. That keeps
+# the ISO tiny (~670 MB → 940 MB only from preseed + boot menu changes) and
+# avoids the offline-bundle dependency-conflict rabbit hole entirely.
+#
+# Air-gapped users who need an offline install path should follow the DIY
+# recipe in INSTALL.md (clone repo + apt download deps to USB separately).
 echo "==> Extracting base ISO into $WORK"
 rm -rf "$WORK"
 mkdir -p "$WORK/cd"
 xorriso -osirrox on -indev "$DEBIAN_ISO" -extract / "$WORK/cd" >/dev/null 2>&1
 chmod -R u+w "$WORK/cd"
 
-# --- 4. Inject preseed --------------------------------------------------------
+# --- 3. Inject preseed --------------------------------------------------------
 echo "==> Injecting preseed.cfg"
 cp "$ROOT/iso/preseed.cfg" "$WORK/cd/preseed.cfg"
 
-# --- 5. Inject offline bundle as /driveforge-bundle/ on the CD ---------------
-echo "==> Injecting offline bundle (extracted) into ISO root"
-mkdir -p "$WORK/cd/driveforge-bundle"
-tar xzf "$BUNDLE_TGZ" -C "$WORK/cd" --strip-components=1 -C "$WORK/cd/driveforge-bundle" 2>/dev/null || \
-  tar xzf "$BUNDLE_TGZ" -C "$WORK/cd/driveforge-bundle" --strip-components=1
-
-# --- 6. Customize boot menu — auto-select preseeded install ------------------
+# --- 4. Customize boot menu — auto-select preseeded install ------------------
 # isolinux/BIOS boot
 #
 # Strategy: REPLACE Debian's whole isolinux.cfg with a single-entry menu

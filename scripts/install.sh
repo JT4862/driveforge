@@ -42,55 +42,31 @@ APT_PACKAGES=(
   fonts-dejavu-core
   curl ca-certificates
 )
+# Normal path uses Debian's mirrors. Air-gapped path (DRIVEFORGE_OFFLINE_BUNDLE
+# set) points apt at the local .debs repo pre-built by build-offline-bundle.sh —
+# see INSTALL.md Path C for the full flow.
 if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/debs" ]]; then
-  # Air-gapped install — debs were pre-downloaded by build-offline-bundle.sh
-  # into $DRIVEFORGE_OFFLINE_BUNDLE/debs with a Packages index alongside.
-  #
-  # Strategy: register the debs dir as a local apt repo and let apt install
-  # handle dep resolution. This is the Debian-approved pattern for offline
-  # bulk installs and handles virtual packages (e.g. `python3:any`, which
-  # `python3-distutils` depends on) that iterative `dpkg -i` can't resolve
-  # across passes. Hit this with ISO #13/#14: dpkg -i couldn't configure
-  # python3, which cascaded into 8+ python3-* packages broken, which led
-  # apt's fix-broken resolver to want to nuke the kernel. Using apt-install
-  # from the start avoids the broken-state trap entirely.
-  log "Setting up local apt repo at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
+  log "Using offline .deb cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
   cat > /etc/apt/sources.list.d/driveforge-offline.list <<EOF
 deb [trusted=yes] file://${DRIVEFORGE_OFFLINE_BUNDLE}/debs ./
 EOF
   # Update apt's index from ONLY our local repo — override the default
-  # sources.list and sourceparts dir so apt doesn't try to reach Debian
-  # mirrors (target is air-gapped).
+  # sourcelist + sourceparts so apt doesn't try Debian mirrors.
   apt-get -o Dir::Etc::sourceparts=- \
           -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/driveforge-offline.list \
           -o APT::Get::List-Cleanup=0 \
           update 2>&1 | tail -3
-  # Now install with full apt dep resolution. --no-download ensures we
-  # never accidentally try to fetch from the real internet if the local
-  # repo is incomplete (we'd rather fail loud with "unable to fetch X"
-  # than silently succeed against a mirror).
-  apt-get install -y --no-install-recommends --no-download \
-    "${APT_PACKAGES[@]}"
-  # Clean up: remove the local repo source + refresh apt's state so
-  # future package operations on this system aren't confused by a
-  # file:// URL that may or may not still be there.
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
   rm -f /etc/apt/sources.list.d/driveforge-offline.list
-  apt-get -o Acquire::Check-Valid-Until=false update >/dev/null 2>&1 || true
 else
   apt-get update -qq
-  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" >/dev/null
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
 fi
-# Post-install sanity check — catches two classes of silent failure:
-# missing binaries (python3 / apt-get / useradd / systemctl) from a busted
-# apt step, and a missing kernel image from the fix-broken-removed-the-kernel
-# scenario. Either way: fail now with a clear pointer to the log, instead
-# of producing a system that only fails on first reboot.
+# Post-install sanity check — fail loud if a critical binary is missing
+# after apt instead of crashing two sections later at e.g. `python3 -m venv`.
 for bin in python3 apt-get useradd systemctl; do
-  command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt/dpkg log above"
+  command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
 done
-if ! ls /boot/vmlinuz-* >/dev/null 2>&1 && ! ls /boot/vmlinuz >/dev/null 2>&1; then
-  die "no kernel image in /boot/ — the apt step must have removed linux-image-amd64. Check the install log for 'Removing linux-image-*' lines and rebuild the offline bundle."
-fi
 ok "system packages installed"
 
 log "Creating driveforge user and directories..."
@@ -128,32 +104,18 @@ python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-# Two install modes:
-#
-#   Offline (ISO bundle path): DRIVEFORGE_OFFLINE_BUNDLE is set and contains
-#     pre-built wheels (including a driveforge-*.whl produced by
-#     build-offline-bundle.sh's `pip wheel` step). Install by PACKAGE NAME
-#     from the wheels cache so pip picks the prebuilt wheel directly —
-#     critically, never tries to rebuild from an sdist. A rebuild would
-#     need hatchling (DriveForge's PEP 517 build backend), which isn't
-#     in the bundle because build backends don't get packaged by
-#     `pip wheel`. Hit this on 2026-04-20 with the "No matching
-#     distribution found for hatchling" error.
-#
-#   Online (direct clone path): no offline bundle, internet available.
-#     Install from the local source directory; pip resolves hatchling
-#     from PyPI at build time.
+# Normal path: install from the local source tree + PyPI for deps
+# (hatchling build backend resolves from PyPI automatically). Air-gap
+# path (DRIVEFORGE_OFFLINE_BUNDLE set): install the pre-built
+# driveforge wheel from the bundle's wheels/ dir by name so pip picks
+# the .whl directly and doesn't try to rebuild (which would need
+# hatchling from PyPI we can't reach). `[linux]` extra pulls pyudev
+# for the hotplug monitor.
 if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" ]]; then
-  log "Using offline wheel cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/wheels"
-  # By-name install from the wheels dir — pip finds driveforge-*.whl
-  # and installs it directly, no build step, no backend needed.
   pip install --quiet --upgrade \
     --no-index --find-links "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" \
     "driveforge[linux]"
 else
-  # Online path. `--upgrade` so re-running install.sh on a drift-free
-  # version string still refreshes deps that may have changed.
   pip install --quiet --upgrade "$SRC_DIR[linux]"
 fi
 deactivate
