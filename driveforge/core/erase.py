@@ -18,6 +18,7 @@ import re
 
 from driveforge.core.drive import Drive, Transport
 from driveforge.core.process import run
+from driveforge.core.timing import capacity_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,13 @@ def estimate_erase_seconds(drive: Drive) -> int | None:
     return None
 
 
-def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str | None = None) -> None:
+def _sata_secure_erase(
+    device: str,
+    password: str = "driveforge",
+    *,
+    owner: str | None = None,
+    capacity_bytes: int | None = None,
+) -> None:
     # Enable security with a throwaway password
     r1 = run(
         ["hdparm", "--user-master", "u", "--security-set-pass", password, device],
@@ -87,14 +94,16 @@ def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str 
     if not r1.ok:
         raise EraseError(f"failed to set ATA security pass on {device}: {r1.stderr}")
 
-    # Drive-reported SECURITY ERASE UNIT time × 1.5 headroom, floored at 6 h
-    # and capped at 16 h. 4 TB drives report ~450 min (7.5 h); giving them
-    # the old flat 6 h timeout killed the erase mid-flight and the drive
-    # showed up as a "unexpected command" failure. Large SMR or 8 TB+
-    # drives can legitimately need 10 h+.
+    # Timeout preference: (1) drive's own hdparm-announced estimate × 1.5 if
+    # present — vendor firmware knows the drive better than our blanket
+    # capacity model; (2) capacity-based fallback otherwise. No arbitrary
+    # upper cap — if an 8 TB drive needs 40 h, give it 40 h. The operator
+    # can abort from the dashboard if something's genuinely hung.
     est = _sata_estimated_seconds(device)
-    timeout_s = max(6 * 3600, int((est or 0) * 1.5))
-    timeout_s = min(timeout_s, 16 * 3600)
+    if est is not None:
+        timeout_s = max(3600, int(est * 1.5))
+    else:
+        timeout_s = capacity_timeout(capacity_bytes, passes=1)
 
     r2 = run(
         ["hdparm", "--user-master", "u", "--security-erase", password, device],
@@ -105,14 +114,22 @@ def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str 
         raise EraseError(f"security-erase failed on {device}: {r2.stderr}")
 
 
-def _sas_secure_erase(device: str, *, owner: str | None = None) -> None:
-    r = run(["sg_format", "--format", device], timeout=12 * 60 * 60, owner=owner)
+def _sas_secure_erase(device: str, *, owner: str | None = None, capacity_bytes: int | None = None) -> None:
+    # sg_format FORMAT UNIT is one full-disk overwrite in firmware — scales
+    # linearly with capacity just like SATA SE. The old flat 12 h cap was
+    # fine for 300 GB-1 TB drives but would silently kill 4 TB+ sg_format
+    # jobs mid-flight, and mid-flight sg_format abort corrupts the drive
+    # (requires manual recovery). Use the same capacity model as SATA.
+    timeout_s = capacity_timeout(capacity_bytes, passes=1)
+    r = run(["sg_format", "--format", device], timeout=timeout_s, owner=owner)
     if not r.ok:
         raise EraseError(f"sg_format failed on {device}: {r.stderr}")
 
 
 def _nvme_format(device: str, *, owner: str | None = None) -> None:
-    # -s 1 = user-data erase; -f = force, suppress prompts
+    # -s 1 = user-data erase; -f = force, suppress prompts. NVMe format is
+    # a crypto-erase — completes in seconds to minutes even on multi-TB
+    # drives, so the flat 1 h cap is fine for any size we'd plausibly see.
     r = run(
         ["nvme", "format", "-s", "1", "-f", device],
         timeout=60 * 60,
@@ -139,9 +156,9 @@ def secure_erase(drive: Drive) -> None:
             effective = refined
 
     if effective == Transport.SATA:
-        _sata_secure_erase(drive.device_path, owner=drive.serial)
+        _sata_secure_erase(drive.device_path, owner=drive.serial, capacity_bytes=drive.capacity_bytes)
     elif effective == Transport.SAS:
-        _sas_secure_erase(drive.device_path, owner=drive.serial)
+        _sas_secure_erase(drive.device_path, owner=drive.serial, capacity_bytes=drive.capacity_bytes)
     elif effective == Transport.NVME:
         _nvme_format(drive.device_path, owner=drive.serial)
     else:

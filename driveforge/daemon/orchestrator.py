@@ -20,7 +20,7 @@ import traceback
 import uuid
 from datetime import UTC, datetime
 
-from driveforge.core import badblocks, blinker, enclosures, erase, grading, process, smart, telemetry, webhook
+from driveforge.core import badblocks, blinker, enclosures, erase, grading, process, smart, telemetry, timing, webhook
 from driveforge.core import drive as drive_mod
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
@@ -34,7 +34,10 @@ MAX_PARALLEL = 8
 SMART_SHORT_POLL_SEC = 15.0
 SMART_LONG_POLL_SEC = 60.0
 SMART_SHORT_TIMEOUT_SEC = 20 * 60  # 20 min — short test usually ~2 min
-SMART_LONG_TIMEOUT_SEC = 24 * 60 * 60  # 24h — long test can take 10+ hours on big HDDs
+# Long self-test scales with capacity — the drive's firmware paces the test
+# itself (smartctl reports the expected polling time), so our timeout is
+# just the outer "if the drive never signals done, give up" bound. Computed
+# per-drive in _run_self_test so 8+ TB doesn't false-fail at a flat 24 h.
 
 PHASES = [
     "queued",
@@ -477,7 +480,13 @@ class Orchestrator:
             )
             return None
         poll_sec = SMART_SHORT_POLL_SEC if kind == "short" else SMART_LONG_POLL_SEC
-        timeout = SMART_SHORT_TIMEOUT_SEC if kind == "short" else SMART_LONG_TIMEOUT_SEC
+        if kind == "short":
+            timeout = SMART_SHORT_TIMEOUT_SEC
+        else:
+            # 1 full-disk read, 2× headroom. 4 TB → ~22 h, 8 TB → ~44 h,
+            # 16 TB → ~89 h. Drive firmware actually paces the test; we only
+            # care that our polling loop doesn't give up before it finishes.
+            timeout = timing.capacity_timeout(drive.capacity_bytes, passes=1)
         deadline = asyncio.get_event_loop().time() + timeout
         loop = asyncio.get_event_loop()
         while asyncio.get_event_loop().time() < deadline:
@@ -597,14 +606,28 @@ class Orchestrator:
                 last_logged_pct[0] = pct
                 self._persist_log(serial, run_id)
 
+        # 8 passes × capacity at pessimistic 100 MB/s with 2× headroom.
+        # Old flat 72 h default choked anything over ~4 TB; 8 TB legit needs
+        # ~15 days at full 8-pass burn-in, and that's fine — the operator
+        # can abort if they change their mind.
+        bb_timeout = timing.capacity_timeout(
+            drive.capacity_bytes, passes=badblocks.TOTAL_PASSES
+        )
         try:
             errs = await badblocks.run_destructive_streaming(
-                drive.device_path, on_progress=on_progress, owner=serial
+                drive.device_path,
+                on_progress=on_progress,
+                owner=serial,
+                timeout=bb_timeout,
             )
         except badblocks.BadblocksError as exc:
             raise PipelineFailure("badblocks", str(exc)) from exc
         except asyncio.TimeoutError:
-            raise PipelineFailure("badblocks", "exceeded maximum runtime") from None
+            hours = bb_timeout / 3600
+            raise PipelineFailure(
+                "badblocks",
+                f"badblocks exceeded capacity-based timeout of {hours:.1f}h",
+            ) from None
         self._log(serial, f"badblocks complete: errors={errs[0]}/{errs[1]}/{errs[2]}")
         return errs
 
