@@ -155,7 +155,7 @@ discovery). The base Debian install succeeds either way; you can rerun
 
 ## Default credentials
 
-The installer creates a login user `dfadmin` with password `driveforge`.
+The installer creates a login user `forge` with password `driveforge`.
 **Change this immediately on first login** — the password is only meant
 to get you in over SSH the first time. The DriveForge daemon runs as a
 separate non-login system account, also named `driveforge`, that's NOT
