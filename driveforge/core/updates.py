@@ -181,3 +181,32 @@ def update_command() -> str:
         if os.path.isdir(os.path.join(candidate, ".git")):
             return f"cd {candidate} && sudo git pull && sudo ./scripts/install.sh"
     return "cd /home/driveforge/driveforge-src && sudo git pull && sudo ./scripts/install.sh"
+
+
+def ssh_update_command() -> str:
+    """One-liner that SSHes into this server and runs the update inline.
+
+    Intended for operators who aren't already shelled in — copy-paste
+    into their local terminal and be prompted for the SSH password
+    (default `driveforge` from the preseed; change via `passwd` after
+    first login). The `-t` flag forces SSH to allocate a TTY so the
+    remote sudo prompts work inline.
+
+    Prefers a direct LAN IP over mDNS since `.local` resolution isn't
+    universally reliable across client OSes (some VPNs / corporate
+    networks block multicast). Falls back to `driveforge.local` when
+    the egress-IP probe can't identify a primary address.
+    """
+    import socket
+
+    ip: str | None = None
+    try:
+        # Same egress-IP trick the setup wizard uses — no packet sent.
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("1.1.1.1", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except OSError:
+        pass
+    target = ip or f"{socket.gethostname()}.local"
+    return f"ssh -t forge@{target} '{update_command()}'"

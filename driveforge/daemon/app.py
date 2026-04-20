@@ -206,17 +206,22 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     from datetime import UTC, datetime, timedelta
     from driveforge.db import models as m
     recent_cutoff = datetime.now(UTC) - timedelta(hours=1)
+    # Aborted runs don't count as "recent completion" — the user cancelled
+    # the pipeline before a verdict was reached, and the drive is
+    # effectively untested. A re-insert should kick off a fresh auto-run.
+    # Only pass/fail runs (grade IS NOT NULL) block auto-enrollment.
     with state.session_factory() as session:
         recent = (
             session.query(m.TestRun)
             .filter_by(drive_serial=match.serial)
             .filter(m.TestRun.completed_at.isnot(None))
             .filter(m.TestRun.completed_at >= recent_cutoff)
+            .filter(m.TestRun.grade.isnot(None))
             .first()
         )
     if recent is not None:
         logger.info(
-            "hotplug add: drive %s has a run completed in the last hour; "
+            "hotplug add: drive %s has a pass/fail run completed in the last hour; "
             "skipping auto-enroll",
             match.serial,
         )
