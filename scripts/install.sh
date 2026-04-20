@@ -34,13 +34,38 @@ fi
 
 log "Installing system dependencies..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y --no-install-recommends \
-  python3 python3-venv python3-pip \
-  smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio \
-  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils \
-  fonts-dejavu-core \
-  curl ca-certificates >/dev/null
+APT_PACKAGES=(
+  python3 python3-venv python3-pip
+  smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
+  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils
+  fonts-dejavu-core
+  curl ca-certificates
+)
+if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/debs" ]]; then
+  # Air-gapped install — debs were pre-downloaded by build-offline-bundle.sh
+  # on an internet-connected machine.
+  log "Using offline .deb cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
+  # Iterate dpkg -i up to 3 passes — a single pass installs in shell-glob
+  # alphabetical order, which can fail when a package's deps haven't been
+  # processed yet (e.g. `python3` needs `python3-minimal` and
+  # `libpython3.11-*` first). Subsequent passes pick up the ones that
+  # failed the previous time now that their deps are satisfied.
+  for pass in 1 2 3; do
+    log "dpkg -i pass $pass..."
+    if dpkg -i "${DRIVEFORGE_OFFLINE_BUNDLE}"/debs/*.deb; then
+      ok "all .debs installed on pass $pass"
+      break
+    fi
+    if [[ $pass -eq 3 ]]; then
+      warn "dpkg -i still reporting errors after 3 passes — check the log above"
+    fi
+  done
+  apt-get install -y --no-download --fix-broken || \
+    warn "apt-get --fix-broken reported errors"
+else
+  apt-get update -qq
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" >/dev/null
+fi
 # Post-install sanity check — if any critical binary is missing, fail now
 # with a useful message instead of crashing two sections later at e.g.
 # `python3 -m venv`. Hit a silent version of this on 2026-04-20 in the ISO
@@ -85,6 +110,14 @@ python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Offline-bundle path: the ISO installer's late_command sets
+# DRIVEFORGE_OFFLINE_BUNDLE so pip resolves from the bundled wheels cache
+# instead of pypi.org.
+PIP_OFFLINE_ARGS=()
+if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" ]]; then
+  log "Using offline wheel cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/wheels"
+  PIP_OFFLINE_ARGS=(--no-index --find-links "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels")
+fi
 # On Linux we need the `linux` extra — it pulls in pyudev for the hotplug
 # event monitor. Without this, the daemon boots fine but never sees drive
 # add/remove events and the LED-blinker-on-reinsert feature silently
@@ -92,9 +125,9 @@ SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # refreshes them instead of pip concluding "driveforge X.Y.Z already
 # present, skip" on an unchanged version string.
 if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
-  pip install --quiet --upgrade "$SRC_DIR[linux]"
+  pip install --quiet --upgrade "${PIP_OFFLINE_ARGS[@]}" "$SRC_DIR[linux]"
 else
-  pip install --quiet --upgrade "driveforge[linux]"
+  pip install --quiet --upgrade "${PIP_OFFLINE_ARGS[@]}" "driveforge[linux]"
 fi
 deactivate
 ln -sf /opt/driveforge/bin/driveforge-daemon /usr/bin/driveforge-daemon
