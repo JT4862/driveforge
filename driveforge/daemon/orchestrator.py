@@ -599,6 +599,14 @@ class Orchestrator:
 
         ticker = asyncio.create_task(tick())
         loop = asyncio.get_event_loop()
+        # Capture actual wall-clock duration. Useful when the drive completes
+        # dramatically faster than the pre-flight estimate — e.g. Intel /
+        # Samsung enterprise SSDs do ATA SECURITY ERASE UNIT via firmware-
+        # level crypto-erase (rotate the media key → all ciphertext is
+        # unrecoverable) and return in seconds, while the hdparm -I estimate
+        # still quotes the legacy full-overwrite duration. Without an
+        # explicit completion log it looks like the phase was skipped.
+        erase_start = loop.time()
         try:
             await loop.run_in_executor(None, erase.secure_erase, drive)
         except erase.EraseError as exc:
@@ -624,6 +632,21 @@ class Orchestrator:
                 await ticker
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        # Log wall-clock duration so operators can tell at a glance whether
+        # the drive did a real full-media overwrite or a near-instant
+        # crypto-erase. Both are valid secure erases; the visible difference
+        # otherwise reads as "did the phase actually run?".
+        erase_elapsed = loop.time() - erase_start
+        if erase_elapsed < 30:
+            self._log(
+                serial,
+                f"secure_erase completed in {erase_elapsed:.1f}s "
+                f"(likely vendor crypto-erase — data is still unrecoverable)",
+            )
+        elif erase_elapsed < 120:
+            self._log(serial, f"secure_erase completed in {erase_elapsed:.0f}s")
+        else:
+            self._log(serial, f"secure_erase completed in {erase_elapsed / 60:.1f} min")
         self.state.active_percent[serial] = 100.0
 
     async def _run_badblocks(self, drive: Drive, *, dev_mode: bool, run_id: int) -> tuple[int, int, int]:
