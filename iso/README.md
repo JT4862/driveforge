@@ -1,0 +1,124 @@
+# DriveForge installer ISO
+
+Self-contained Debian 12 + DriveForge installer ISO. `dd` it to a USB
+stick, boot the target server, pick the OS disk at the partitioning
+prompt — everything else is automated, including the offline DriveForge
+install. Works without internet on the target.
+
+## What's inside
+
+| Path | Purpose |
+|------|---------|
+| `iso/preseed.cfg` | Unattended Debian 12 install configuration |
+| `scripts/build-offline-bundle.sh` | Pre-downloads .deb + .whl files into `dist/driveforge-offline-<ver>.tar.gz` |
+| `scripts/build-iso.sh` | Repacks the Debian netinst ISO with the preseed + offline bundle baked in |
+
+## Why two scripts?
+
+- **`build-offline-bundle.sh`** is useful on its own — you can `scp` the
+  resulting tarball to any air-gapped Debian 12 box and run
+  `sudo DRIVEFORGE_OFFLINE_BUNDLE="$(pwd)" ./scripts/install.sh`. No ISO
+  needed.
+- **`build-iso.sh`** wraps the bundle into a bootable installer for the
+  zero-decision turnkey path.
+
+## Building the ISO
+
+On any Debian 12 host with internet access:
+
+```bash
+sudo apt-get install -y xorriso curl tar isolinux
+sudo ./scripts/build-iso.sh
+```
+
+Outputs `dist/driveforge-installer-<version>-amd64.iso` (~1 GB). Builds
+in ~5 minutes the first time (Debian netinst download + bundle build +
+xorriso repack); subsequent builds are faster since the netinst ISO and
+bundle are cached.
+
+## Flashing to USB
+
+```bash
+sudo dd if=dist/driveforge-installer-<version>-amd64.iso \
+  of=/dev/sdX bs=4M status=progress conv=fsync
+```
+
+Replace `/dev/sdX` with your USB stick's device node. Check with
+`lsblk` first — getting this wrong overwrites the wrong disk.
+
+On macOS:
+```bash
+diskutil list                          # find the USB
+diskutil unmountDisk /dev/diskN
+sudo dd if=...iso of=/dev/rdiskN bs=4m
+```
+
+## Booting
+
+The ISO is hybrid-bootable (BIOS + UEFI). Methods:
+
+- **USB**: plug into target, boot, select USB from boot menu (F11/F12 on
+  most servers; F11 on Dell PowerEdge)
+- **iDRAC virtual media**: in Dell iDRAC, `Configuration → Virtual Media
+  → Map CD/DVD → ISO Image File`, then boot the server with `F2 → Boot
+  Manager → Virtual CD/DVD/ISO`
+- **VM**: attach the ISO as a CD/DVD drive
+
+## What happens during install
+
+1. Debian installer boots, auto-loads `preseed.cfg`
+2. Locale, keyboard, timezone, network, hostname (`driveforge`) all
+   pre-answered — no prompts
+3. **Partitioning pauses for operator input** — you must select the OS
+   disk. *Critical safety: do not pick a front-bay drive.* On the R720
+   the OS SSD is typically the smallest and on the rear/internal slot.
+4. Debian base install runs, `tasksel standard` + `ssh-server`
+5. `late_command` copies `/cdrom/driveforge-bundle/` to
+   `/usr/local/share/driveforge-bundle/` and runs `install.sh` with
+   `DRIVEFORGE_OFFLINE_BUNDLE` set so it uses the cached debs + wheels
+6. Reboot — daemon starts on boot, dashboard reachable at
+   `http://driveforge.local:8080` (or `http://<dhcp-ip>:8080`)
+
+If the DriveForge step fails, the install log is at
+`/var/log/driveforge-install.log` on the new system. Most common cause:
+hardware compatibility issue (e.g. PERC not in IT mode → no drive
+discovery). The base Debian install succeeds either way; you can rerun
+`./install.sh` manually after fixing.
+
+## Default credentials
+
+The installer creates a login user `admin` with password `driveforge`.
+**Change this immediately on first login** — the password is only meant
+to get you in over SSH the first time. The DriveForge daemon runs as a
+separate non-login system account, also named `driveforge`, that's NOT
+the admin user.
+
+## Updating an installed system
+
+The ISO is for first-time install only. To update an existing
+DriveForge installation:
+
+```bash
+ssh admin@driveforge.local
+cd /usr/local/share/driveforge-bundle  # or wherever you cloned/extracted
+git pull   # if you used git clone
+sudo ./scripts/install.sh   # re-runs install on top of existing state
+```
+
+The install.sh is idempotent — it preserves the SQLite DB and your
+`/etc/driveforge/*.yaml` config across re-runs.
+
+## Known limitations
+
+- **Partitioning is interactive** by design (refuses to auto-pick a disk
+  that might be a drive-under-test target). If you want fully unattended
+  installs across many machines with identical hardware, edit
+  `iso/preseed.cfg` to set `partman-auto/disk` explicitly to your boot
+  drive's expected device path.
+- **Network during install is optional**. The bundled offline mode
+  works without internet, but the Debian installer's network step still
+  runs (for hostname/DHCP) — you'll get a "no mirror reachable" warning
+  on a fully-isolated network, which is harmless. Press Continue.
+- **Base Debian patches are frozen at the netinst version**. Run
+  `sudo apt-get update && apt-get upgrade` after install for the latest
+  security patches (this needs network).
