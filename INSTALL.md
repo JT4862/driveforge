@@ -20,9 +20,10 @@ dashboard reachable at `http://driveforge.local:8080`.
   Supermicro/Nutanix chassis (NX-3200 etc.), or any 2U rackmount with
   a SAS backplane
 - **HBA**: LSI 9200-series / 9207-8i in **IT mode**. Dell PERC H710
-  cards need to be crossflashed — see the [fohdeesha crossflash guide](https://fohdeesha.com/)
-  or search "H710 IT mode 9207-8i". Stock RAID firmware **will not work**
-  — DriveForge needs raw pass-through for SMART + sg_format.
+  cards need to be crossflashed — see the
+  [fohdeesha PERC crossflash guide](https://fohdeesha.com/docs/perc.html).
+  Stock RAID firmware **will not work** — DriveForge needs raw
+  pass-through for SMART + sg_format.
 - **Boot drive**: small (≥ 120 GB) SSD on an **internal/rear** slot
   (motherboard SATA, internal USB, rear flex bay). **Never boot from a
   front drive bay** — those are reserved for drives under test.
