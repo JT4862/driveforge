@@ -41,3 +41,10 @@ htmlcov/
 # Build artefacts
 /target/
 /release/
+
+# AI-session working notes. Useful across local Claude / Cursor sessions
+# but internal enough that we don't want them distributed to OSS users.
+# Files continue to exist locally; this just stops them from being tracked.
+CLAUDE.md
+AGENTS.md
+.claude/
