@@ -24,7 +24,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-[[ $EUID -eq 0 ]] || { echo "this script needs root (loopback mount + xorriso)"; exit 1; }
+# Inside a Docker container we're already root and don't need sudo.
+# On a bare host the user invokes via `sudo`. Detect the context so we know
+# how to run the offline-bundle step (apt-get download wants a non-root user
+# on real systems but is fine inside a container sandbox).
+IN_CONTAINER=0
+[[ -f /.dockerenv ]] && IN_CONTAINER=1
+
+if [[ $IN_CONTAINER -eq 0 && $EUID -ne 0 ]]; then
+  echo "this script needs root on a bare host (loopback mount + xorriso) — re-run with sudo"
+  exit 1
+fi
 
 # --- Tools --------------------------------------------------------------------
 for tool in xorriso curl tar; do
@@ -53,8 +63,13 @@ echo "==> Base ISO: $DEBIAN_ISO ($(du -sh "$DEBIAN_ISO" | cut -f1))"
 # --- 2. Build offline bundle (if not already built) ---------------------------
 BUNDLE_TGZ="$DIST/driveforge-offline-${VERSION}.tar.gz"
 if [[ ! -f "$BUNDLE_TGZ" ]]; then
-  echo "==> Building offline bundle (run as your normal user — apt-get download needs cache)"
-  sudo -u "${SUDO_USER:-nobody}" "$ROOT/scripts/build-offline-bundle.sh"
+  if [[ $IN_CONTAINER -eq 1 ]]; then
+    echo "==> Building offline bundle (in container, running as root)"
+    "$ROOT/scripts/build-offline-bundle.sh"
+  else
+    echo "==> Building offline bundle (drop to ${SUDO_USER:-nobody} for apt-get download)"
+    sudo -u "${SUDO_USER:-nobody}" "$ROOT/scripts/build-offline-bundle.sh"
+  fi
 fi
 echo "==> Offline bundle: $BUNDLE_TGZ ($(du -sh "$BUNDLE_TGZ" | cut -f1))"
 

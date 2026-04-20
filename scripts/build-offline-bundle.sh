@@ -56,6 +56,12 @@ DEPS=$(apt-cache depends --recurse --no-recommends --no-suggests \
   | awk '/^\w/ {gsub(/[<>:]/, "", $1); print $1}' | sort -u)
 DEP_COUNT=$(echo "$DEPS" | wc -l)
 echo "==> Downloading $DEP_COUNT .deb packages → $WORK/debs"
+# When running as root (typically inside a Docker container), apt-get download
+# tries to drop privileges to the `_apt` user but fails if that user can't
+# write to the current directory. Chown the dest dir so the drop works.
+if [[ $EUID -eq 0 ]] && id _apt >/dev/null 2>&1; then
+  chown _apt:_apt "$WORK/debs"
+fi
 (cd "$WORK/debs" && apt-get download $DEPS 2>&1 | grep -v "^Get:" || true)
 echo "    $(ls "$WORK/debs" | wc -l) .deb files cached"
 

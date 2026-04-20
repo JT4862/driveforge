@@ -24,7 +24,30 @@ install. Works without internet on the target.
 
 ## Building the ISO
 
-On any Debian 12 host with internet access:
+Two paths — pick whichever matches where you are.
+
+### Option A: Docker (recommended, works on macOS)
+
+Requires Docker Desktop, Colima, or OrbStack — anywhere `docker info`
+returns successfully. No Debian VM needed.
+
+```bash
+./scripts/build-iso-docker.sh
+```
+
+The wrapper builds a `debian:12-slim` container with `xorriso` +
+`apt-utils` + `python3-pip` + `isolinux`, mounts the repo, and runs
+`build-iso.sh` inside. Output lands in `dist/`.
+
+On Apple Silicon the build runs under `linux/amd64` emulation (Rosetta)
+so the resulting ISO targets x86 servers correctly. First build pulls
+~150 MB of Docker layers + ~700 MB Debian netinst + ~300 MB of cached
+debs/wheels — count on **10-15 min**. Subsequent builds reuse all the
+caches and finish in **2-3 min**.
+
+### Option B: Native Debian 12 host
+
+If you already have a Debian 12 box (or your R720 itself when not busy):
 
 ```bash
 sudo apt-get install -y xorriso curl tar isolinux
@@ -32,9 +55,7 @@ sudo ./scripts/build-iso.sh
 ```
 
 Outputs `dist/driveforge-installer-<version>-amd64.iso` (~1 GB). Builds
-in ~5 minutes the first time (Debian netinst download + bundle build +
-xorriso repack); subsequent builds are faster since the netinst ISO and
-bundle are cached.
+in ~5 minutes the first time, faster afterwards.
 
 ## Flashing to USB
 
