@@ -40,28 +40,21 @@ IO_RATE_POLL_INTERVAL_SEC = 3.0
 
 
 def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
-    """Flag TestRuns that look pull-interrupted so the re-insert handler
-    picks up recovery automatically.
+    """Flag TestRuns left open (completed_at IS NULL) as interrupted so
+    the re-insert handler picks up recovery automatically.
 
-    Two classes get caught:
-
-    1. **Open runs** — `completed_at IS NULL` — means the previous daemon
-       died mid-batch (crash / systemd restart / package upgrade).
-    2. **Recently-closed failed secure_erase runs** — `completed_at`
-       within the last 2 hours, `phase=secure_erase`, `grade IS NULL`.
-       This covers the pre-v0.2.2 case: old daemon marked the run failed
-       (it had no interrupt concept) when hdparm / sg_format errored out
-       after the drive was yanked. Narrow window + narrow criteria so
-       we don't second-guess legitimate erase failures from weeks ago.
+    Catches daemon-crash / systemd-restart / package-upgrade scenarios
+    where the pipeline task was killed mid-run without going through its
+    except clause. The in-flight failure path in `_run_drive` itself uses
+    a device-existence check to flag pulls — so we don't need a
+    heuristic sweep of closed-as-failed runs at startup; the live check
+    handles that class of pull deterministically.
 
     Never overwrites an already-set `interrupted_at_phase`.
     """
-    from datetime import UTC, datetime, timedelta
     from driveforge.db import models as m
 
-    stamped = 0
     with state.session_factory() as session:
-        # Case 1: runs never closed.
         open_dangling = (
             session.query(m.TestRun)
             .filter(m.TestRun.completed_at.is_(None))
@@ -74,41 +67,12 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
                 "daemon startup: flagging open dangling run %d (drive=%s, phase=%s) as interrupted",
                 run.id, run.drive_serial, run.phase,
             )
-            stamped += 1
-
-        # Case 2: recently-closed secure_erase failures — probable pulls.
-        #
-        # When _record_failure closes a run, it rewrites `phase = "failed"`
-        # and `grade = "fail"`, and encodes the ORIGINAL phase in
-        # `error_message` as `[secure_erase] ...`. So we need to query on
-        # the error_message prefix, not the phase column. Narrow window
-        # (2 h) + strict criteria so we don't re-litigate ancient failures.
-        recent_cutoff = datetime.now(UTC) - timedelta(hours=2)
-        closed_erases = (
-            session.query(m.TestRun)
-            .filter(m.TestRun.phase == "failed")
-            .filter(m.TestRun.grade == "fail")
-            .filter(m.TestRun.error_message.like("[secure_erase]%"))
-            .filter(m.TestRun.completed_at.isnot(None))
-            .filter(m.TestRun.completed_at >= recent_cutoff)
-            .filter(m.TestRun.interrupted_at_phase.is_(None))
-            .all()
-        )
-        for run in closed_erases:
-            run.completed_at = None
-            run.phase = "secure_erase"  # restore original phase for UI
-            run.grade = None
-            run.interrupted_at_phase = "secure_erase"
-            logger.warning(
-                "daemon startup: re-opening closed-as-failed secure_erase run %d "
-                "(drive=%s) as interrupted for recovery",
-                run.id, run.drive_serial,
-            )
-            stamped += 1
-
-        if stamped:
+        if open_dangling:
             session.commit()
-            logger.warning("daemon startup: %d run(s) flagged for pull-recovery", stamped)
+            logger.warning(
+                "daemon startup: %d dangling run(s) flagged for pull-recovery",
+                len(open_dangling),
+            )
 
 
 async def _trigger_recovery_for_present_drives(state: DaemonState, orch: Orchestrator) -> None:

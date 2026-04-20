@@ -554,30 +554,37 @@ class Orchestrator:
                 self._record_failure(drive, phase="aborted", detail="aborted by user")
                 outcome = None
             except PipelineFailure as exc:
-                # Pull-interrupt: the hotplug remove handler fires first and
-                # flags the serial. The subprocess then errors out (device
-                # gone) and raises PipelineFailure, landing us here. Don't
-                # close the TestRun — leave `completed_at` NULL so the
-                # re-insert handler can find it and recover.
-                if drive.serial in self.state.interrupted_serials:
+                # Two distinct ways a pipeline fails:
+                #   (a) the drive was pulled mid-phase (either flagged
+                #       in-memory by the hotplug remove handler, or
+                #       detected here by checking whether /dev/sdX is
+                #       still present — udev's remove event sometimes
+                #       arrives too late or without a serial, so the
+                #       device-existence check is the authoritative
+                #       signal). Leave the TestRun open + flag for
+                #       recovery, no blinker.
+                #   (b) legitimate hardware/pipeline failure. Close the
+                #       run as fail + spawn the fail blinker.
+                if self._looks_like_pull(drive):
+                    self._flag_interrupted(drive, phase=exc.phase)
                     logger.warning(
                         "drive %s pipeline aborted by pull during phase=%s "
                         "(leaving TestRun open for recovery)",
-                        drive.serial,
-                        exc.phase,
+                        drive.serial, exc.phase,
                     )
-                    outcome = None  # no blinker — drive is physically gone
+                    outcome = None
                 else:
                     logger.error("drive %s failed in %s: %s", drive.serial, exc.phase, exc.detail)
                     self._record_failure(drive, phase=exc.phase, detail=exc.detail)
                     outcome = "fail"
             except Exception:
                 tb = traceback.format_exc()
-                # Same interrupt check — crashes caused by a pulled drive
-                # should land in recovery, not the permanent-fail bucket.
-                if drive.serial in self.state.interrupted_serials:
+                # Same distinction for unexpected crashes.
+                if self._looks_like_pull(drive):
+                    self._flag_interrupted(drive, phase="error")
                     logger.warning(
-                        "drive %s pipeline crashed after pull (recovery-eligible)",
+                        "drive %s pipeline crashed after apparent pull "
+                        "(leaving TestRun open for recovery)",
                         drive.serial,
                     )
                     outcome = None
@@ -616,6 +623,45 @@ class Orchestrator:
                 # run clear it.
                 if outcome is not None:
                     self._spawn_done_blinker(drive, outcome)
+
+    def _looks_like_pull(self, drive: Drive) -> bool:
+        """Did this drive leave the bus while the pipeline was running?
+
+        Two signals, either one authoritative:
+          - `state.interrupted_serials` was set by the hotplug remove
+            handler (normal case: udev fired the event + carried a serial).
+          - The device file is gone on disk — covers the cases where the
+            udev remove event hasn't arrived yet or carried no serial.
+            This runs on the failure path after the subprocess already
+            returned, so the kernel has had time to remove /dev/sdX.
+
+        Returning True means "don't close the run as failed; mark for
+        recovery on re-insert." Returning False means "legitimate
+        hardware / pipeline failure; close the run as Fail."
+        """
+        import os
+        if drive.serial in self.state.interrupted_serials:
+            return True
+        try:
+            return not os.path.exists(drive.device_path)
+        except OSError:
+            return True  # can't stat → safer to assume gone
+
+    def _flag_interrupted(self, drive: Drive, *, phase: str) -> None:
+        """Mark this drive's open TestRun as pull-interrupted and stash the
+        serial in state.interrupted_serials so the re-insert handler can
+        find and recover it. Idempotent — safe to call repeatedly."""
+        self.state.interrupted_serials.add(drive.serial)
+        with self.state.session_factory() as session:
+            run = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=drive.serial, completed_at=None)
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            if run is not None and run.interrupted_at_phase is None:
+                run.interrupted_at_phase = phase
+                session.commit()
 
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
         self._log(drive.serial, f"✗ {phase}: {detail}")
