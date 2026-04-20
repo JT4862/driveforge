@@ -60,6 +60,10 @@ APT_PACKAGES=(
   python3 python3-venv python3-pip
   smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
   tmux lshw lsscsi ipmitool avahi-daemon avahi-utils
+  # ledmon provides `ledctl` for SGPIO/IBPI LED control on SES-capable
+  # backplanes. Expander-only backplanes (e.g. some NX-3200 SKUs) fall
+  # back silently — see driveforge/core/blinker.py _try_ledctl().
+  ledmon
   fonts-dejavu-core
   curl ca-certificates
 )
@@ -89,6 +93,27 @@ for bin in python3 apt-get useradd systemctl; do
   command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
 done
 ok "system packages installed"
+
+# Auto-load `ses` kernel module at boot so SES-capable SAS backplanes
+# (MD1200, most server chassis) show up in /sys/class/enclosure/ on
+# first boot. Without this, some kernels don't trigger the udev event
+# to bind ses.ko and DriveForge's enclosure detector falls back to the
+# SAS-layer path (or virtual bays on non-SAS). Harmless no-op on
+# hardware that doesn't have SES.
+install -d /etc/modules-load.d
+if [[ ! -f /etc/modules-load.d/driveforge.conf ]] || ! grep -qx ses /etc/modules-load.d/driveforge.conf; then
+  echo ses > /etc/modules-load.d/driveforge.conf
+fi
+# Load it now too so we don't need a reboot before the first discover.
+modprobe ses 2>/dev/null || true
+
+# `ledmon` ships with a systemd daemon that auto-starts and polls for
+# RAID rebuild events to drive LEDs. DriveForge calls `ledctl` directly
+# on state transitions (pass/fail/blinker), so the daemon is redundant
+# and just adds background CPU. Disable if installed.
+if systemctl list-unit-files ledmon.service >/dev/null 2>&1; then
+  systemctl disable --now ledmon.service >/dev/null 2>&1 || true
+fi
 
 log "Creating driveforge user and directories..."
 if id -u driveforge >/dev/null 2>&1; then
