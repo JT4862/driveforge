@@ -261,10 +261,10 @@ guaranteed-clean.
 ### DB compatibility
 
 The DB uses SQLAlchemy auto-migration on daemon start. Generally:
-- **Minor versions (v0.0.1 → v0.0.2)**: DB is forward-compatible and
+- **Patch versions (v0.1.0 → v0.1.1)**: DB is forward-compatible and
   backward-compatible
-- **Major versions**: check release notes — occasionally a migration is
-  one-way
+- **Minor / major versions**: check release notes — occasionally a
+  migration is one-way
 
 If in doubt, keep a DB backup from before the update (see
 [Backup before updating](#backup-before-updating)) and restore it if

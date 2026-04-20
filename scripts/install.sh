@@ -35,6 +35,27 @@ fi
 
 log "Installing system dependencies..."
 export DEBIAN_FRONTEND=noninteractive
+
+# Defensive: strip any `cdrom:` / `deb cdrom:` entries from apt sources
+# before updating. Debian's netinst installer adds the install disc as
+# an apt source by default, and in our ISO flow that disc is gone by
+# the time install.sh runs — so `apt-get update` errors with "does not
+# have a Release file" and `set -euo pipefail` aborts the whole install
+# before a single runtime dep lands. The preseed has
+# `apt-setup/disable-cdrom-entries boolean true` which prevents this at
+# install-time; this is a belt-and-suspenders for re-runs or older ISOs.
+if grep -qE '^\s*deb\s+cdrom:' /etc/apt/sources.list 2>/dev/null; then
+  warn "Removing stale 'cdrom:' entries from /etc/apt/sources.list"
+  sed -i -E '/^\s*deb\s+cdrom:/d' /etc/apt/sources.list
+fi
+for f in /etc/apt/sources.list.d/*.list; do
+  [[ -f "$f" ]] || continue
+  if grep -qE '^\s*deb\s+cdrom:' "$f"; then
+    warn "Removing stale 'cdrom:' entries from ${f}"
+    sed -i -E '/^\s*deb\s+cdrom:/d' "$f"
+  fi
+done
+
 APT_PACKAGES=(
   python3 python3-venv python3-pip
   smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
