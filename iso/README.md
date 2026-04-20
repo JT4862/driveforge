@@ -57,6 +57,53 @@ sudo ./scripts/build-iso.sh
 Outputs `dist/driveforge-installer-<version>-amd64.iso` (~1 GB). Builds
 in ~5 minutes the first time, faster afterwards.
 
+## Smoke-testing in QEMU before flashing
+
+You can boot the ISO in QEMU on macOS to verify the preseed flow without
+burning a USB stick. One-time setup: `brew install qemu`.
+
+```bash
+qemu-img create -f qcow2 /tmp/test-disk.qcow2 20G
+
+qemu-system-x86_64 \
+  -m 4G -smp 2 -accel tcg \
+  -drive file=dist/driveforge-installer-0.1.0-amd64.iso,format=raw,readonly=on,if=none,id=cdrom \
+  -device ide-cd,drive=cdrom,bootindex=1 \
+  -drive file=/tmp/test-disk.qcow2,if=virtio \
+  -netdev user,id=n0,hostfwd=tcp::8081-:8080 \
+  -device virtio-net,netdev=n0 \
+  -audiodev none,id=ad \
+  -device intel-hda -device hda-duplex,audiodev=ad \
+  -display vnc=:5,password=on \
+  -monitor unix:/tmp/qemu-mon.sock,server,nowait \
+  -daemonize -pidfile /tmp/qemu.pid
+```
+
+Set the VNC password (macOS Screen Sharing requires one):
+
+```bash
+python3 -c "
+import socket, time
+s = socket.socket(socket.AF_UNIX); s.connect('/tmp/qemu-mon.sock')
+time.sleep(0.4); s.recv(2048)
+s.send(b'set_password vnc forge\n'); time.sleep(0.4)
+"
+```
+
+Connect from Mac: Finder → `Cmd+K` → `vnc://localhost:5905` → password `forge`.
+
+The `-audiodev none -device intel-hda` bits are non-obvious but
+required: Debian's installer auto-starts speech-synthesis after a
+5-second timeout if no key is pressed, and without an audio device it
+loops `No sound card detected after N seconds...` forever. The
+null-backend HDA satisfies the probe so the installer proceeds.
+
+After install, port-forwarding `8081 → 8080` lets you reach the
+installed daemon at `http://localhost:8081`.
+
+Under TCG emulation (any non-Intel Mac), expect 30-60 minutes for the
+full unattended install to finish. Hardware boot is much faster.
+
 ## Flashing to USB
 
 ```bash
