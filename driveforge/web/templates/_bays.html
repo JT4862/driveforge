@@ -41,32 +41,53 @@
   {% endif %}
 </div>
 {% else %}
-<a class="bay-card active phase-{{ card.phase_class }}" href="/drives/{{ card.serial }}">
-  <div class="bay-body">
-    <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
-    <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
-    <div class="phase">{{ card.phase|replace("_", " ") }}</div>
-    {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
-    {% if card.io_rate %}
-    <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
-      {%- if card.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(card.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
-      {%- if card.io_rate.write_mbps >= 0.1 and card.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
-      {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
-      {%- if card.io_rate.write_mbps < 0.1 and card.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
+<div class="bay-card active phase-{{ card.phase_class }}">
+  <a class="bay-card-main" href="/drives/{{ card.serial }}">
+    <div class="bay-body">
+      <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+      <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
+      <div class="phase">{{ card.phase|replace("_", " ") }}</div>
+      {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
+      {% if card.io_rate %}
+      <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
+        {%- if card.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(card.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
+        {%- if card.io_rate.write_mbps >= 0.1 and card.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
+        {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
+        {%- if card.io_rate.write_mbps < 0.1 and card.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
+      </div>
+      {% endif %}
+      <div class="progress">
+        <div class="bar" style="width: {{ card.percent }}%"></div>
+      </div>
+      <div class="bay-stats">
+        <span class="percent">{{ "%.0f"|format(card.percent) }}%</span>
+        <span class="timing">
+          {{ card.elapsed_label }}
+          {% if card.eta_label %}&middot; ETA {{ card.eta_label }}{% endif %}
+        </span>
+      </div>
     </div>
+  </a>
+  {# Per-card abort — sibling of the main <a> so we don't nest interactive
+     elements. Disabled during secure_erase because killing the host
+     process there doesn't stop the drive's internal format, and on SAS
+     drives `sg_format` mid-flight corrupts the drive. Operator can still
+     abort via `curl POST /drives/<serial>/abort` if they really need to. #}
+  <form method="post" action="/drives/{{ card.serial }}/abort" class="abort-form">
+    {% if card.phase == "secure_erase" %}
+      <button class="btn danger btn-small" type="button" disabled
+              title="Abort disabled during secure erase — the drive firmware handles this phase internally. Aborting SAS sg_format mid-flight leaves the drive with 'Medium format corrupted' and requires manual recovery.">
+        Abort
+      </button>
+    {% else %}
+      <button class="btn danger btn-small" type="submit"
+              onclick="return confirm('Abort this drive? Its current phase will be cancelled and the test run marked failed.')"
+              title="Cancel this drive's pipeline.">
+        Abort
+      </button>
     {% endif %}
-    <div class="progress">
-      <div class="bar" style="width: {{ card.percent }}%"></div>
-    </div>
-    <div class="bay-stats">
-      <span class="percent">{{ "%.0f"|format(card.percent) }}%</span>
-      <span class="timing">
-        {{ card.elapsed_label }}
-        {% if card.eta_label %}&middot; ETA {{ card.eta_label }}{% endif %}
-      </span>
-    </div>
-  </div>
-</a>
+  </form>
+</div>
 {% endif %}
 {%- endmacro %}
 

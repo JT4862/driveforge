@@ -1,19 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Dashboard — DriveForge{% endblock %}
 {% block content %}
-<section class="page-head dashboard-head">
+<section class="page-head">
   <h1>Dashboard</h1>
-  {# Layout below is intentional: New Batch far-left, stats center, Abort
-     All far-right. Keeps the destructive button physically separated
-     from the primary action so a missed click doesn't abort a batch. #}
-  <a class="btn primary action-new-batch" href="/batches/new">+ New Batch</a>
   <div class="stats">
     <span class="pill">{{ drive_count }} drives in history</span>
     <span class="pill">{{ batch_count }} batches run</span>
   </div>
-  <form method="post" action="/abort-all" class="inline action-abort-all">
-    <button class="btn danger" type="submit" onclick="return confirm('Abort every active drive? Their current phase will be cancelled and the test runs marked failed.')">Abort All</button>
-  </form>
+  <div class="actions">
+    <a class="btn primary" href="/batches/new">+ New Batch</a>
+  </div>
 </section>
 
 <section id="bay-grid" hx-get="/_partials/bays" hx-trigger="every 3s" hx-swap="innerHTML">

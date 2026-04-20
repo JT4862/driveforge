@@ -378,8 +378,40 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
 
 @router.post("/abort-all")
 async def abort_all_web(request: Request) -> RedirectResponse:
+    """Global abort — kept for emergency-via-curl, not wired to the UI anymore.
+
+    The dashboard uses per-drive abort buttons on each active card now
+    (see POST /drives/{serial}/abort). This endpoint still works if you
+    POST to it from the terminal, but it's no longer one click away.
+    """
     orch = request.app.state.orchestrator
     await orch.abort_all()
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/drives/{serial}/abort")
+async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
+    """Abort a single drive's in-flight pipeline.
+
+    UI safety layer (in `_bays.html`) disables the Abort button while a
+    drive is in `secure_erase`, because killing the host process there
+    doesn't stop the drive's internal format. For SAS `sg_format` that
+    leaves the drive in "Medium format corrupted" state. Treating all
+    erase phases as abort-disabled is simpler than per-transport logic
+    and costs the operator at most a few minutes of waiting.
+
+    Server-side we still honor the abort — the button disable is a UX
+    guardrail, not a hard enforcement. If you really want to terminate
+    a stuck erase process (e.g. hdparm hung past its timeout) you can
+    still POST to this endpoint via curl.
+    """
+    orch = request.app.state.orchestrator
+    aborted = await orch.abort_drive(serial)
+    if not aborted:
+        # Serial isn't in _tasks — either already completed or never active.
+        # Redirect to dashboard regardless; the stale state resolves on next
+        # refresh. No error needed.
+        pass
     return RedirectResponse(url="/", status_code=303)
 
 # --- Manual cert label printing ---------------------------------------------
