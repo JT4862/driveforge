@@ -193,8 +193,13 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .log-tail { background: #0b0f15; color: #c9d1d9; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--panel-border); font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; margin: 0; }
 .bay-num { font-family: var(--mono); color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .bay-body { display: flex; flex-direction: column; gap: 4px; }
-.drive-model { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.drive-model .mfr { color: var(--teal); font-weight: 500; font-size: 11px; letter-spacing: 0.3px; text-transform: uppercase; margin-right: 4px; vertical-align: 1px; }
+/* Drive model block — manufacturer on one line, model name on the next.
+   Stacking prevents the model string from running into the absolute-
+   positioned Abort button (or grade badge on installed cards) in the
+   top-right corner of wider cards. */
+.drive-model { font-weight: 600; font-size: 14px; padding-right: 70px; }
+.drive-model .mfr { display: block; color: var(--teal); font-weight: 500; font-size: 11px; letter-spacing: 0.3px; text-transform: uppercase; margin-bottom: 1px; }
+.drive-model .model-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drive-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .phase { font-family: var(--mono); font-size: 12px; color: var(--accent); }
 .progress { height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
@@ -255,6 +260,42 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .bay-card.active.phase-long .io-spark { color: #39c5cf; }
 .bay-card.active.phase-info .io-spark { color: var(--accent); }
 .bay-card.active.phase-erase .io-spark { color: var(--warn); }
+
+/* Recovery-mode glow — persistent amber pulse around any card that's
+   in a recovery-triggered pipeline (from the moment `_run_recovery`
+   kicks off through the fresh pipeline's pass/fail completion).
+   Visually distinctive so an operator can tell at a glance "that drive
+   is being retried after a pull" vs. "that drive is running a normal
+   batch." Overrides the phase-color border with amber so the card's
+   identity as a recovery drive is consistent across phases.
+
+   Slow 2.8 s cycle — fast enough to feel alive, slow enough not to
+   distract during multi-hour secure_erase. Pure box-shadow animation,
+   GPU-compositable, zero layout thrash.
+*/
+@keyframes recovery-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35),
+                0 0 10px 0 rgba(210, 153, 34, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.75),
+                0 0 22px 5px rgba(210, 153, 34, 0.45);
+  }
+}
+.bay-card.active.recovery-mode {
+  animation: recovery-glow 2.8s ease-in-out infinite;
+  border-left-color: #d29922 !important;
+}
+.bay-card.active.recovery-mode .bar {
+  background: #d29922 !important;
+}
+/* Recovery-mode trumps phase-pulse (which only lasts 1.4 s and uses
+   box-shadow too). If both classes are present, let the recovery
+   animation run — phase pulses are ambient, recovery is the headline. */
+.bay-card.active.recovery-mode.phase-pulse {
+  animation: recovery-glow 2.8s ease-in-out infinite;
+}
 
 /* Phase transition pulse — briefly brightens the card's left-border
    when a drive advances to a new phase. Fires on any active card whose

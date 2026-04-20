@@ -15,7 +15,10 @@
 <div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
-      <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+      <div class="drive-model">
+        {%- if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span>{% endif -%}
+        <span class="model-name">{{ card.model }}</span>
+      </div>
       <div class="drive-meta">
         SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
         {%- if card.transport %} &middot; {{ card.transport|upper }}{% endif -%}
@@ -45,10 +48,13 @@
   {% endif %}
 </div>
 {% else %}
-<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}">
+<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}{% if card.recovery_mode %} recovery-mode{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
-      <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+      <div class="drive-model">
+        {%- if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span>{% endif -%}
+        <span class="model-name">{{ card.model }}</span>
+      </div>
       <div class="drive-meta">
         SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
         {%- if card.drive_temp_c is not none -%}
