@@ -48,9 +48,19 @@ docker run --rm --platform "$PLATFORM" \
   -w /src \
   "$IMAGE" -c './scripts/build-iso.sh'
 
+# If `docker run` failed above, set -e already killed us. If we're here the
+# inner script reported success — confirm an ISO actually landed before we
+# claim victory. (Defensive: catches a future bug where the inner script
+# silently exits 0 without producing an artifact.)
+ISO_FILES=("$ROOT/dist"/*.iso)
+if [[ ! -e "${ISO_FILES[0]}" ]]; then
+  echo "✗ build reported success but no .iso landed in dist/ — see /tmp/iso-build.log" >&2
+  exit 1
+fi
+
 echo
 echo "✓ ISO build complete:"
-ls -lh "$ROOT/dist"/*.iso 2>/dev/null || echo "  (no .iso found in dist/ — check the build log above)"
+ls -lh "$ROOT/dist"/*.iso
 echo
 echo "  Flash to a USB stick (replace /dev/diskN with your USB device):"
 echo "    diskutil list"

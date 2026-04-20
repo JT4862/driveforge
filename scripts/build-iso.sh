@@ -46,9 +46,14 @@ DIST="$ROOT/dist"
 WORK="$DIST/iso-build"
 OUT="$DIST/driveforge-installer-${VERSION}-amd64.iso"
 
-# Pinned Debian netinst version. Bump on Debian point releases; see
-# https://www.debian.org/CD/netinst/ for current.
-DEBIAN_ISO_URL="${DEBIAN_ISO_URL:-https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.7.0-amd64-netinst.iso}"
+# Pinned Debian 12 netinst — DriveForge targets Bookworm specifically.
+# Debian's "current" symlink moves to new majors (now points to 13/Trixie),
+# so we pin against the dated archive path to stay on Bookworm. Bump
+# DEBIAN_VERSION when a new 12.x point release ships:
+#   https://cdimage.debian.org/cdimage/archive/?C=M;O=D
+DEBIAN_VERSION="${DEBIAN_VERSION:-12.11.0}"
+DEBIAN_ISO_URL="${DEBIAN_ISO_URL:-https://cdimage.debian.org/cdimage/archive/${DEBIAN_VERSION}/amd64/iso-cd/debian-${DEBIAN_VERSION}-amd64-netinst.iso}"
+DEBIAN_SHA_URL="https://cdimage.debian.org/cdimage/archive/${DEBIAN_VERSION}/amd64/iso-cd/SHA256SUMS"
 DEBIAN_ISO="${DEBIAN_ISO:-$DIST/$(basename "$DEBIAN_ISO_URL")}"
 
 mkdir -p "$DIST"
@@ -58,7 +63,23 @@ if [[ ! -f "$DEBIAN_ISO" ]]; then
   echo "==> Downloading $DEBIAN_ISO_URL"
   curl -fL --output "$DEBIAN_ISO" "$DEBIAN_ISO_URL"
 fi
-echo "==> Base ISO: $DEBIAN_ISO ($(du -sh "$DEBIAN_ISO" | cut -f1))"
+# Verify the SHA256 against Debian's published checksums — protects against
+# a corrupted download or a man-in-the-middle on this build host.
+echo "==> Verifying SHA256"
+EXPECTED_SHA=$(curl -fsSL "$DEBIAN_SHA_URL" | awk -v f="$(basename "$DEBIAN_ISO")" '$2==f {print $1}')
+if [[ -z "$EXPECTED_SHA" ]]; then
+  echo "✗ couldn't fetch expected SHA from $DEBIAN_SHA_URL — refusing to use unverified ISO"
+  exit 1
+fi
+ACTUAL_SHA=$(sha256sum "$DEBIAN_ISO" | cut -d' ' -f1)
+if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+  echo "✗ SHA256 mismatch on $DEBIAN_ISO"
+  echo "    expected: $EXPECTED_SHA"
+  echo "    actual:   $ACTUAL_SHA"
+  echo "    Re-download (rm $DEBIAN_ISO) or check the network path."
+  exit 1
+fi
+echo "==> Base ISO verified: $DEBIAN_ISO ($(du -sh "$DEBIAN_ISO" | cut -f1))"
 
 # --- 2. Build offline bundle (if not already built) ---------------------------
 BUNDLE_TGZ="$DIST/driveforge-offline-${VERSION}.tar.gz"
@@ -130,24 +151,34 @@ EOF
 fi
 
 # --- 7. Recompute md5sum.txt (Debian installer verifies it) ------------------
+# Don't `-follow` symlinks — Debian's ISO has a `./debian` symlink that points
+# to `.` for mirror-layout backwards compat, and following it sends find into
+# an infinite loop. find without -follow processes symlinks as-is, which is
+# what we want anyway (md5sum.txt should record the symlink targets, not
+# duplicate every file twice through the symlink path).
 echo "==> Refreshing md5sum.txt"
-( cd "$WORK/cd" && find . -follow -type f ! -name md5sum.txt -print0 \
+( cd "$WORK/cd" && find . -type f ! -name md5sum.txt -print0 \
   | xargs -0 md5sum > md5sum.txt )
 
 # --- 8. Repack into a bootable hybrid ISO ------------------------------------
+# Hybrid-MBR boot stub. Comes from the local isolinux package (not from the
+# extracted ISO — Debian's netinst doesn't ship this file in iso/isolinux/).
+ISOHDPFX="/usr/lib/ISOLINUX/isohdpfx.bin"
+[[ -f "$ISOHDPFX" ]] || { echo "✗ missing $ISOHDPFX — install the isolinux package"; exit 1; }
+
 echo "==> Repacking ISO → $OUT"
 xorriso -as mkisofs \
   -o "$OUT" \
   -r -V "DriveForge ${VERSION}" \
   -J -joliet-long \
-  -isohybrid-mbr "$WORK/cd/isolinux/isohdpfx.bin" \
+  -isohybrid-mbr "$ISOHDPFX" \
   -c isolinux/boot.cat \
   -b isolinux/isolinux.bin \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
   -eltorito-alt-boot \
   -e boot/grub/efi.img \
     -no-emul-boot -isohybrid-gpt-basdat \
-  "$WORK/cd" 2>&1 | tail -5
+  "$WORK/cd" 2>&1 | tail -10
 
 SIZE=$(du -sh "$OUT" | cut -f1)
 echo

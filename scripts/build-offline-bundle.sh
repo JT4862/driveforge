@@ -48,22 +48,33 @@ APT_PACKAGES=(
   curl ca-certificates
 )
 echo "==> Resolving apt deps (recursive)..."
-# apt-cache depends gives us the recursive set; awk strips the "Depends:" prefix
-# and any version markers. Then we feed that into apt-get download.
+# apt-cache depends gives us the recursive set. The lines we want are the
+# package names — they sit at column 0 (no leading whitespace). Lines like
+# "  Depends: foo" sit at column 2 and we skip them. Use a POSIX bracket
+# class instead of `\w` so this works in both gawk (host) and mawk (the
+# debian:12-slim Docker image).
 DEPS=$(apt-cache depends --recurse --no-recommends --no-suggests \
   --no-conflicts --no-breaks --no-replaces --no-enhances \
   --no-pre-depends "${APT_PACKAGES[@]}" \
-  | awk '/^\w/ {gsub(/[<>:]/, "", $1); print $1}' | sort -u)
+  | awk '/^[a-zA-Z0-9]/ {gsub(/[<>:]/, "", $1); print $1}' | sort -u)
 DEP_COUNT=$(echo "$DEPS" | wc -l)
 echo "==> Downloading $DEP_COUNT .deb packages → $WORK/debs"
 # When running as root (typically inside a Docker container), apt-get download
 # tries to drop privileges to the `_apt` user but fails if that user can't
-# write to the current directory. Chown the dest dir so the drop works.
-if [[ $EUID -eq 0 ]] && id _apt >/dev/null 2>&1; then
-  chown _apt:_apt "$WORK/debs"
+# write to the current directory. Make the dir world-writable as a portable
+# fallback — debian:12-slim has the `_apt` user but no `_apt` group, so a
+# chown _apt:_apt fails. chmod 777 works regardless of group setup.
+if [[ $EUID -eq 0 ]]; then
+  chmod 777 "$WORK/debs"
 fi
 (cd "$WORK/debs" && apt-get download $DEPS 2>&1 | grep -v "^Get:" || true)
-echo "    $(ls "$WORK/debs" | wc -l) .deb files cached"
+DEB_COUNT=$(ls "$WORK/debs" | wc -l)
+echo "    $DEB_COUNT .deb files cached"
+if [[ $DEB_COUNT -lt 10 ]]; then
+  echo "✗ apt-get download produced only $DEB_COUNT debs — apt cache likely empty"
+  echo "  (the Dockerfile must keep /var/lib/apt/lists/ — don't strip it)"
+  exit 1
+fi
 
 # 3. Python wheels. pip download grabs sdist/wheel for every dep declared in
 # pyproject.toml. Use the same Python version the target will have so wheels

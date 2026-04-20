@@ -26,8 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv \
       git \
       tar gzip \
-      curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+      curl ca-certificates
+# Note: we deliberately do NOT `rm -rf /var/lib/apt/lists/*` here. The
+# bundle-build step needs `apt-cache depends --recurse` to walk the package
+# graph for the offline bundle, which requires the apt list cache. Removing
+# it would shave ~50 MB off the image but break the build.
 
 WORKDIR /src
 # Default to invoking the build script; override with `docker run ... bash`
