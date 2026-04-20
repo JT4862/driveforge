@@ -6,9 +6,12 @@ direct-attach backplane exposes no SES enclosure, so per-slot IDENT/FAULT
 LEDs aren't reachable — but every drive's own activity LED is wired to
 the bay, so we piggyback on that.
 
-Two patterns:
-- PASS: three short pulses, 1.5 s pause — steady "ready to ship" heartbeat
-- FAIL: one longer read, 0.6 s pause — slower, weightier cadence
+Two patterns, deliberately chosen to look different to a human eye one
+rack away — the previous FAIL pattern (one read every 0.6 s) read as
+"solid on" next to a running drive, which defeats the point:
+- PASS: three short 4 KB pulses, 1.5 s dark — fast chirping heartbeat.
+- FAIL: two 256 KB pulses close together, 3 s dark — slow double-tap
+  with a distinctly long dark gap between bursts.
 
 The blinker stops as soon as the drive is pulled (open() raises OSError)
 or when the task is cancelled (new batch, daemon shutdown, abort).
@@ -52,10 +55,19 @@ async def blink_done(device_path: str, *, pattern: Pattern = "pass") -> None:
     permission lost, device renamed by hotplug).
     """
     idx = 0
-    pulses = 3 if pattern == "pass" else 1
-    pulse_delay = 0.12 if pattern == "pass" else 0.0
-    tail_pause = 1.5 if pattern == "pass" else 0.6
-    read_size = _PROBE_SIZE if pattern == "pass" else _PROBE_SIZE * 64  # 256 KB long read on fail
+    if pattern == "pass":
+        pulses = 3
+        pulse_delay = 0.12
+        tail_pause = 1.5
+        read_size = _PROBE_SIZE
+    else:
+        # Double-tap + long silence. The 3 s dark pause is the key part:
+        # it lets the LED fully decay so the pattern reads visibly
+        # different from a running drive or a PASS heartbeat.
+        pulses = 2
+        pulse_delay = 0.25
+        tail_pause = 3.0
+        read_size = _PROBE_SIZE * 64  # 256 KB, longer visible pulse
     while True:
         try:
             for _ in range(pulses):

@@ -86,10 +86,19 @@ def _sata_secure_erase(device: str, password: str = "driveforge", *, owner: str 
     )
     if not r1.ok:
         raise EraseError(f"failed to set ATA security pass on {device}: {r1.stderr}")
-    # Issue the secure erase
+
+    # Drive-reported SECURITY ERASE UNIT time × 1.5 headroom, floored at 6 h
+    # and capped at 16 h. 4 TB drives report ~450 min (7.5 h); giving them
+    # the old flat 6 h timeout killed the erase mid-flight and the drive
+    # showed up as a "unexpected command" failure. Large SMR or 8 TB+
+    # drives can legitimately need 10 h+.
+    est = _sata_estimated_seconds(device)
+    timeout_s = max(6 * 3600, int((est or 0) * 1.5))
+    timeout_s = min(timeout_s, 16 * 3600)
+
     r2 = run(
         ["hdparm", "--user-master", "u", "--security-erase", password, device],
-        timeout=6 * 60 * 60,  # generous — can run for hours
+        timeout=timeout_s,
         owner=owner,
     )
     if not r2.ok:

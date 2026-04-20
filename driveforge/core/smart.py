@@ -78,13 +78,31 @@ def parse(payload: str, *, device: str = "") -> SmartSnapshot:
             )
         )
 
-    # Temperature: prefer the drive-temp attribute, fall back to airflow, fall
-    # back to the `temperature` top-level block (NVMe path).
-    temp = (
-        _raw_of(attrs, ATTR_TEMP_DRIVE)
-        or _raw_of(attrs, ATTR_TEMP_AIRFLOW)
-        or (data.get("temperature") or {}).get("current")
-    )
+    # Temperature: prefer smartctl's pre-decoded `temperature.current` (it
+    # knows the per-vendor raw packing — Seagate, for instance, crams
+    # current/min/max into a 48-bit int, so reading `raw_value` directly
+    # yielded values like 77_309_411_358 for a drive actually running at
+    # 30 °C, which then tripped the thermal-excursion grade-C demotion on
+    # healthy drives). Only fall back to attribute raw values when the
+    # top-level field is absent AND the raw passes a 0-150 °C sanity check;
+    # if the raw looks packed (>= 150), pick its low-16-bit lane, which is
+    # where every Seagate/HGST/WD drive we've seen puts the current temp.
+    temp: int | None = None
+    top_level = (data.get("temperature") or {}).get("current")
+    if isinstance(top_level, int) and 0 < top_level < 150:
+        temp = top_level
+    else:
+        for attr_id in (ATTR_TEMP_DRIVE, ATTR_TEMP_AIRFLOW):
+            raw = _raw_of(attrs, attr_id)
+            if raw is None:
+                continue
+            if 0 < raw < 150:
+                temp = raw
+                break
+            low16 = raw & 0xFFFF
+            if 0 < low16 < 150:
+                temp = low16
+                break
 
     # NVMe health log sits at `nvme_smart_health_information_log`
     nvme_log = data.get("nvme_smart_health_information_log") or {}

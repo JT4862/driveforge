@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import traceback
 import uuid
 from datetime import UTC, datetime
@@ -538,6 +539,19 @@ class Orchestrator:
             await loop.run_in_executor(None, erase.secure_erase, drive)
         except erase.EraseError as exc:
             raise PipelineFailure("secure_erase", str(exc)) from exc
+        except subprocess.TimeoutExpired as exc:
+            # Surface the timeout plainly instead of the old wrapped
+            # "unexpected: Command '[...]' timed out after N seconds" string,
+            # which read like a command-dispatch bug rather than what it
+            # actually is: the drive's erase didn't finish inside the
+            # dynamic timeout. 4 TB+ drives hit this most often — if it
+            # repeats, either raise the cap in erase.py or move the drive
+            # to full mode (badblocks is interruptible).
+            hours = exc.timeout / 3600 if exc.timeout else 0
+            raise PipelineFailure(
+                "secure_erase",
+                f"erase timed out after {hours:.1f}h — drive may need a larger timeout or a different erase path",
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise PipelineFailure("secure_erase", f"unexpected: {exc}") from exc
         finally:
