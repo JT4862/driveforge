@@ -245,6 +245,18 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 /* Drive age label on installed cards (e.g. "5.2y" from last recorded POH). */
 .drive-age { color: var(--muted); font-variant-numeric: tabular-nums; }
 
+/* Update-banner copy-paste command blocks — each labeled, stacked. */
+.update-cmd-block { margin-top: 10px; }
+.update-cmd-block .update-cmd-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin: 10px 0 4px 0;
+}
+.update-cmd-block .update-cmd-label:first-child { margin-top: 0; }
+.update-cmd-block pre.log-tail { margin: 0; }
+
 /* Throughput sparkline — 30-second rolling window, normalized to peak.
    Uses currentColor so each phase-tinted card pulls the line into its
    own palette (burn=purple, long=cyan, info=blue). Height matches

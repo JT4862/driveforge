@@ -684,9 +684,15 @@ class Orchestrator:
             )
             if run is None:
                 return
-            run.phase = "failed" if phase != "aborted" else "aborted"
+            is_abort = phase == "aborted"
+            run.phase = "aborted" if is_abort else "failed"
             run.completed_at = datetime.now(UTC)
-            run.grade = "fail"
+            # User-initiated aborts aren't failures — the drive never got a
+            # real verdict. Treat it as "never tested" so the dashboard
+            # shows it as idle, the LED stays dark, and (with auto-enroll
+            # on) re-inserting it kicks off a fresh run. Only genuine
+            # pipeline failures get grade="fail".
+            run.grade = None if is_abort else "fail"
             run.error_message = f"[{phase}] {detail}"[:4000]
             run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
             session.commit()

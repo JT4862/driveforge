@@ -829,6 +829,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "restart_required": restart == "1",
             "update_info": updates_mod.cached(),
             "update_command": updates_mod.update_command(),
+            "ssh_update_command": updates_mod.ssh_update_command(),
             "current_version": updates_mod.CURRENT_VERSION,
             "capabilities": state.capabilities,
             "chassis_power": chassis_power,

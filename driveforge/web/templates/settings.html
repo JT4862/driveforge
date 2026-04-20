@@ -196,9 +196,18 @@
   {% if update_info and update_info.update_available %}
   <div class="banner ok-banner" style="margin-top: 14px;">
     <strong>Update {{ update_info.latest_version }} is available.</strong>
-    Run this on the DriveForge host via SSH to install it
-    (we don't auto-install from the web UI for security reasons):
-    <pre class="log-tail" style="margin-top: 8px;">{{ update_command }}</pre>
+    We don't auto-install from the web UI for security reasons. Two
+    copy-paste options depending on whether you're already shelled in:
+    <div class="update-cmd-block">
+      <div class="update-cmd-label">Not shelled in &mdash; run from your local terminal:</div>
+      <pre class="log-tail">{{ ssh_update_command }}</pre>
+      <div class="update-cmd-label">Already shelled in to the DriveForge host:</div>
+      <pre class="log-tail">{{ update_command }}</pre>
+    </div>
+    <p class="muted small" style="margin-top: 6px;">
+      Default SSH password for the preseeded <code>forge</code> account is
+      <code>driveforge</code>. Change it after first login via <code>passwd</code>.
+    </p>
   </div>
   {% endif %}
 
