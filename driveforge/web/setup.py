@@ -25,6 +25,7 @@ from fastapi.templating import Jinja2Templates
 from driveforge import config as cfg
 from driveforge.core import drive as drive_mod
 from driveforge.core import telemetry
+from driveforge.core.process import run
 from driveforge.daemon.state import get_state  # noqa: F401 (used via ctx)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
