@@ -42,14 +42,42 @@ class DaemonState:
     # renderer. Unit: MB/s (decimal megabytes). Cleared when a drive leaves
     # active_phase.
     active_io_rate: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Rolling history of recent I/O rates per drive — last 10 samples at
+    # 3-second intervals = 30 s window. Used by the dashboard to render an
+    # SVG sparkline during high-throughput phases (badblocks) so operators
+    # can spot a stalling drive at a glance. Each entry: {"read": MB/s,
+    # "write": MB/s}. Capped to len=10; older samples drop off the end.
+    active_io_history: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     # Serial → kernel device basename ("sda", "nvme0n1") for drives currently
     # in active_phase. The DB doesn't persist device_path (kernel letters
     # drift), so the I/O rate poller needs this to map its diskstats basename
     # rows back to the active drives. Populated by the orchestrator when a
     # drive starts running, cleared when it leaves active_phase.
     device_basenames: dict[str, str] = field(default_factory=dict)
+    # Latest drive temperature (°C) for drives currently in the pipeline.
+    # Populated by `_record_telemetry()` in the orchestrator on each SMART
+    # snapshot (pre/post + periodic polls). Drives that never report a
+    # readable temperature are simply absent from this dict; callers
+    # should handle `.get(serial)` → None cleanly. Cleared on pipeline exit.
+    active_drive_temp: dict[str, int] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
+    # Wall-clock (monotonic seconds) when each drive's phase last transitioned.
+    # Used by the dashboard to briefly pulse the card border when the phase
+    # changes — a visual cue that progress is happening, without having to
+    # watch the phase label closely.
+    phase_change_ts: dict[str, float] = field(default_factory=dict)
+    # Wall-clock (monotonic) when each drive's pipeline last completed.
+    # Used to flash a card's "just completed" state for a short window
+    # after it transitions from Active → Installed.
+    just_completed_ts: dict[str, float] = field(default_factory=dict)
+    # Serials known to have been pulled mid-pipeline. Set by the hotplug
+    # remove handler right before the pipeline's failure path fires, so
+    # _run_drive's except block can leave the TestRun row "open"
+    # (interrupted_at_phase set, completed_at NULL) for recovery instead
+    # of closing it as a permanent failure. Cleared when recovery completes
+    # or the user dismisses the interrupted state.
+    interrupted_serials: set[str] = field(default_factory=set)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)

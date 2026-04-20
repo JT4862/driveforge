@@ -3,14 +3,48 @@
 {% block content %}
 <section class="page-head">
   <h1>Dashboard</h1>
-  <div class="stats">
-    <span class="pill">{{ drive_count }} drives in history</span>
-    <span class="pill">{{ batch_count }} batches run</span>
+  {% if chassis %}
+  <div class="chassis-strip">
+    {% if chassis.power_w is not none %}
+      <span class="chassis-metric" title="Chassis power draw via BMC (IPMI DCMI)">
+        <span class="chassis-label">power</span>
+        <span class="chassis-value">{{ chassis.power_w|int }} W</span>
+      </span>
+    {% endif %}
+    {% if chassis.inlet_c is not none %}
+      <span class="chassis-metric chassis-temp temp-band-{{ chassis.inlet_band }}"
+            title="Chassis inlet temperature">
+        <span class="chassis-label">inlet</span>
+        <span class="chassis-value">{{ chassis.inlet_c }}&deg;C</span>
+      </span>
+    {% endif %}
+    {% if chassis.exhaust_c is not none %}
+      <span class="chassis-metric chassis-temp temp-band-{{ chassis.exhaust_band }}"
+            title="Chassis exhaust temperature">
+        <span class="chassis-label">exhaust</span>
+        <span class="chassis-value">{{ chassis.exhaust_c }}&deg;C</span>
+      </span>
+    {% endif %}
   </div>
+  {% endif %}
   <div class="actions">
     <a class="btn primary" href="/batches/new">+ New Batch</a>
-    <form method="post" action="/abort-all" class="inline">
-      <button class="btn danger" type="submit" onclick="return confirm('Abort every active drive? Their current phase will be cancelled and the test runs marked failed.')">Abort All</button>
+    {#- Auto-enroll segmented toggle. Three mutually-exclusive modes; clicking
+        one POSTs immediately and redirects back. Meant for the unattended
+        rack workflow: operator watches LEDs, swaps drives as they pass/fail,
+        DriveForge handles everything between inserts. -#}
+    <form method="post" action="/settings/auto-enroll" class="auto-enroll-toggle"
+          title="Auto-start a pipeline on every new drive insertion">
+      <span class="auto-label">Auto:</span>
+      {% for mode, label, hint in [
+          ("off", "Off", "Drives only run when you click New Batch."),
+          ("quick", "Quick", "Auto quick-mode on insert. Skips badblocks + long self-test."),
+          ("full", "Full", "Auto full pipeline on insert, including burn-in + cert label print."),
+      ] %}
+      <button type="submit" name="mode" value="{{ mode }}"
+              class="auto-pill{% if settings.daemon.auto_enroll_mode == mode %} active{% endif %}"
+              title="{{ hint }}">{{ label }}</button>
+      {% endfor %}
     </form>
   </div>
 </section>

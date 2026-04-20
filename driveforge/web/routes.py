@@ -34,9 +34,32 @@ _PHASE_CLASS = {
     "secure_erase": "erase",
     "badblocks": "burn",
     "long_test": "long",
+    "recovering": "recover",
     "done": "done",
     "failed": "fail",
     "aborted": "fail",
+    "interrupted": "fail",
+}
+
+# Single-glyph cues per phase so the card reads at a glance. Unicode
+# symbols + a couple of emoji; kept monochrome-ish so they don't
+# compete with the phase-colored progress bar. Intentionally minimal —
+# not meant to replace the text label, just reinforce it.
+_PHASE_ICONS = {
+    "queued": "\u22EF",           # ⋯ horizontal ellipsis
+    "pre_smart": "\u2695",        # ⚕ medical staff
+    "short_test": "\u25D0",       # ◐ half-filled circle
+    "firmware_check": "\u2699",   # ⚙ gear
+    "secure_erase": "\u26A1",     # ⚡ high voltage
+    "badblocks": "\U0001F525",    # 🔥 fire
+    "long_test": "\u29D6",        # ⧖ hourglass
+    "post_smart": "\u2695",       # ⚕ medical staff
+    "grading": "\u2605",          # ★ black star
+    "recovering": "\u21BB",       # ↻ clockwise open circle arrow
+    "done": "\u2713",             # ✓ check
+    "failed": "\u2717",           # ✗ ballot x
+    "aborted": "\u2298",          # ⊘ circled division slash
+    "interrupted": "\u2298",      # ⊘ same
 }
 
 
@@ -108,6 +131,29 @@ def _active_card(state, session, serial: str) -> dict | None:
         )
         elapsed_sec = int(delta.total_seconds())
     eta = _eta_seconds(phase, drive)
+    import time as _time
+    # Short window during which the card's border pulses to signal a phase
+    # change. 2.5 s is long enough to survive one HTMX refresh cycle
+    # (3 s polling) but short enough that the animation feels snappy.
+    phase_changed_at = state.phase_change_ts.get(serial)
+    phase_just_changed = (
+        phase_changed_at is not None
+        and (_time.monotonic() - phase_changed_at) < 2.5
+    )
+    drive_temp = state.active_drive_temp.get(serial)
+    # Render a sparkline of recent total throughput during high-I/O phases.
+    # Only show when there's meaningful flow (peak >= 1 MB/s in the window)
+    # — idle phases (secure_erase, smart tests) would just draw a flat line
+    # and add noise.
+    history = state.active_io_history.get(serial, [])
+    spark_points: list[float] | None = None
+    spark_peak: float | None = None
+    if history:
+        totals = [(h["read"] + h["write"]) for h in history]
+        peak = max(totals)
+        if peak >= 1.0:
+            spark_points = totals
+            spark_peak = peak
     return {
         "state": "active",
         "key": serial,
@@ -117,6 +163,12 @@ def _active_card(state, session, serial: str) -> dict | None:
         "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
         "phase": phase,
         "phase_class": _PHASE_CLASS.get(phase, "info"),
+        "phase_icon": _PHASE_ICONS.get(phase, ""),
+        "drive_temp_c": drive_temp,
+        "drive_temp_band": _temp_band(drive_temp),
+        "spark_points": spark_points,
+        "spark_peak": spark_peak,
+        "phase_just_changed": phase_just_changed,
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),
@@ -141,6 +193,17 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     last_tested = last_run.completed_at if last_run else None
     last_phase = last_run.phase if last_run else None
     last_quick = bool(last_run.quick_mode) if last_run else False
+    last_poh = last_run.power_on_hours_at_test if last_run else None
+    # Compact age label: "45k POH" or "5.2y" when POH is meaningful.
+    # Hours → years at 24*365.25 = 8766 h/y. Skipped for drives we've
+    # never tested (no POH captured) or drives still showing near-zero.
+    drive_age_label: str | None = None
+    if last_poh and last_poh >= 100:
+        years = last_poh / 8766.0
+        if years >= 0.9:
+            drive_age_label = f"{years:.1f}y"
+        else:
+            drive_age_label = f"{int(last_poh / 1000)}k POH" if last_poh >= 1000 else f"{last_poh} POH"
     last_error = None
     if last_run and last_run.error_message:
         msg = last_run.error_message.strip().split("\n", 1)[0]
@@ -149,6 +212,22 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     # OEM rules); fall back to the DB row written at last enrollment.
     db_drive = session.get(m.Drive, drive.serial)
     mfr = drive.manufacturer or (db_drive.manufacturer if db_drive else None)
+    # Prefer the DB's transport over the lsblk-based live value: lsblk
+    # reports `tran=sas` for SATA drives on a SAS HBA, but the orchestrator
+    # refines this at enrollment via smartctl and writes the true wire
+    # protocol to the Drive row. Drives never enrolled fall through to
+    # the live lsblk value.
+    transport = (db_drive.transport if db_drive and db_drive.transport else None) or drive.transport.value
+    import time as _time
+    # Briefly flash this card when the drive has just completed a pipeline
+    # (pass/fail). Window is 3.5 s — long enough that one HTMX refresh cycle
+    # lands inside it, short enough to feel transient. Aborted runs don't
+    # flash (stamped only on clean completions in _run_drive's finally).
+    completed_at = state.just_completed_ts.get(drive.serial)
+    just_completed = (
+        completed_at is not None
+        and (_time.monotonic() - completed_at) < 3.5
+    )
     return {
         "state": "installed",
         "key": drive.serial,
@@ -156,12 +235,14 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "model": drive.model,
         "manufacturer": mfr,
         "capacity_tb": drive.capacity_tb,
-        "transport": drive.transport.value,
+        "transport": transport,
         "last_grade": last_grade,
         "last_tested": last_tested,
         "last_phase": last_phase,
         "last_quick": last_quick,
         "last_error": last_error,
+        "drive_age_label": drive_age_label,
+        "just_completed": just_completed,
     }
 
 
@@ -202,18 +283,68 @@ def _drive_view(state, session) -> dict:
     }
 
 
+def _temp_band(temp_c: int | None) -> str:
+    """Bucket a temperature reading into a CSS-friendly band label so the
+    dashboard can color-code hot vs. cool. Bands are tuned for chassis
+    ambient (inlet ~15-35 °C, exhaust ~20-45 °C normal, higher = hot)."""
+    if temp_c is None:
+        return "unknown"
+    if temp_c < 30:
+        return "cool"
+    if temp_c < 45:
+        return "normal"
+    if temp_c < 55:
+        return "warm"
+    return "hot"
+
+
+def _chassis_snapshot(state) -> dict | None:
+    """Live chassis readings for the dashboard header strip. Returns None
+    when nothing is available (keeps the header clean on consumer PCs)."""
+    from driveforge.core import telemetry
+
+    caps = state.capabilities
+    if not (caps.chassis_power or caps.chassis_temperature):
+        return None
+    power = telemetry.read_chassis_power() if caps.chassis_power else None
+    temps = telemetry.read_chassis_temperatures() if caps.chassis_temperature else {}
+    inlet = temps.get("Inlet Temp")
+    exhaust = temps.get("Exhaust Temp")
+    if power is None and inlet is None and exhaust is None:
+        return None
+    return {
+        "power_w": power,
+        "inlet_c": inlet,
+        "exhaust_c": exhaust,
+        "inlet_band": _temp_band(inlet),
+        "exhaust_band": _temp_band(exhaust),
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
     with state.session_factory() as session:
         view = _drive_view(state, session)
-        batch_count = session.query(m.Batch).count()
-        drive_count = session.query(m.Drive).count()
+    chassis = _chassis_snapshot(state)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"view": view, "batch_count": batch_count, "drive_count": drive_count},
+        {"view": view, "chassis": chassis, "settings": state.settings},
     )
+
+
+@router.post("/settings/auto-enroll")
+async def set_auto_enroll(request: Request) -> RedirectResponse:
+    """Toggle auto-enrollment mode from the dashboard segmented control."""
+    state = get_state()
+    form = await request.form()
+    mode = (form.get("mode") or "off").strip().lower()
+    if mode not in ("off", "quick", "full"):
+        mode = "off"
+    state.settings.daemon.auto_enroll_mode = mode
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @router.get("/_partials/bays", response_class=HTMLResponse)
@@ -372,8 +503,40 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
 
 @router.post("/abort-all")
 async def abort_all_web(request: Request) -> RedirectResponse:
+    """Global abort — kept for emergency-via-curl, not wired to the UI anymore.
+
+    The dashboard uses per-drive abort buttons on each active card now
+    (see POST /drives/{serial}/abort). This endpoint still works if you
+    POST to it from the terminal, but it's no longer one click away.
+    """
     orch = request.app.state.orchestrator
     await orch.abort_all()
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/drives/{serial}/abort")
+async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
+    """Abort a single drive's in-flight pipeline.
+
+    UI safety layer (in `_bays.html`) disables the Abort button while a
+    drive is in `secure_erase`, because killing the host process there
+    doesn't stop the drive's internal format. For SAS `sg_format` that
+    leaves the drive in "Medium format corrupted" state. Treating all
+    erase phases as abort-disabled is simpler than per-transport logic
+    and costs the operator at most a few minutes of waiting.
+
+    Server-side we still honor the abort — the button disable is a UX
+    guardrail, not a hard enforcement. If you really want to terminate
+    a stuck erase process (e.g. hdparm hung past its timeout) you can
+    still POST to this endpoint via curl.
+    """
+    orch = request.app.state.orchestrator
+    aborted = await orch.abort_drive(serial)
+    if not aborted:
+        # Serial isn't in _tasks — either already completed or never active.
+        # Redirect to dashboard regardless; the stale state resolves on next
+        # refresh. No error needed.
+        pass
     return RedirectResponse(url="/", status_code=303)
 
 # --- Manual cert label printing ---------------------------------------------

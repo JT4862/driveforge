@@ -39,6 +39,37 @@ STATIC_DIR = PACKAGE_ROOT / "web" / "static"
 IO_RATE_POLL_INTERVAL_SEC = 3.0
 
 
+def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
+    """Any TestRun with completed_at NULL at daemon startup was dangling
+    from a previous run — daemon crash, systemd restart, package upgrade
+    mid-batch, or (the pre-v0.2.2 case) a drive pulled while the old
+    daemon couldn't stamp the interrupt. Mark them so the re-insert
+    handler can pick up recovery.
+
+    Only sets `interrupted_at_phase` if it isn't already set — we never
+    overwrite a more-specific phase the remove-handler already stamped.
+    """
+    from driveforge.db import models as m
+
+    with state.session_factory() as session:
+        dangling = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.completed_at.is_(None))
+            .filter(m.TestRun.interrupted_at_phase.is_(None))
+            .all()
+        )
+        for run in dangling:
+            run.interrupted_at_phase = run.phase
+            logger.warning(
+                "daemon startup: flagging dangling run %d (drive=%s, phase=%s) as interrupted",
+                run.id,
+                run.drive_serial,
+                run.phase,
+            )
+        if dangling:
+            session.commit()
+
+
 def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None:
     """Re-spawn done-blinkers for drives that are physically present and
     have a clear last-run verdict. Called once at daemon boot.
@@ -114,15 +145,60 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     if match is None:
         logger.debug("hotplug add: no matching drive for event %s", event)
         return
-    # `match` is a freshly-discovered Pydantic Drive with current device_path;
-    # the restore helper reads that directly instead of round-tripping through
-    # the DB (which doesn't store device_path — kernel letters drift across
-    # reboots).
+    # Priority order on drive-insert:
+    #   1. Recovery — drive was pulled mid-pipeline and has an open
+    #      interrupted run. Takes precedence over everything: the drive is
+    #      in an ambiguous state (SAS: "Medium format corrupted"; SATA:
+    #      security-locked) and needs repair before we do anything with it.
+    #   2. Blinker restore — drive with a completed test history gets its
+    #      pass/fail activity-LED cadence restarted.
+    #   3. Auto-enroll (future) — start a fresh pipeline if the user has
+    #      opted in to "auto-test on insert".
+    if await orch.recover_drive(match):
+        logger.info("hotplug add: drive %s entered recovery flow", match.serial)
+        return
     orch.restore_blinker_for_drive(match)
+
+    # Auto-enroll — optional, operator opts in via the dashboard toggle.
+    # Priority-lower than recovery + blinker restore. Skipped silently when:
+    #   - auto_enroll_mode is "off" (default)
+    #   - drive is already running in this daemon
+    #   - drive has a completed TestRun within the last hour (don't restart
+    #     a drive that just passed on a momentary pull + re-insert)
+    mode = (state.settings.daemon.auto_enroll_mode or "off").lower()
+    if mode not in ("quick", "full"):
+        return
+    if match.serial in state.active_phase:
+        return
+    from datetime import UTC, datetime, timedelta
+    from driveforge.db import models as m
+    recent_cutoff = datetime.now(UTC) - timedelta(hours=1)
+    with state.session_factory() as session:
+        recent = (
+            session.query(m.TestRun)
+            .filter_by(drive_serial=match.serial)
+            .filter(m.TestRun.completed_at.isnot(None))
+            .filter(m.TestRun.completed_at >= recent_cutoff)
+            .first()
+        )
+    if recent is not None:
+        logger.info(
+            "hotplug add: drive %s has a run completed in the last hour; "
+            "skipping auto-enroll",
+            match.serial,
+        )
+        return
+    logger.info("hotplug add: auto-enrolling drive %s (%s mode)", match.serial, mode)
+    await orch.start_batch(
+        [match],
+        source=f"auto-enroll ({mode})",
+        quick=(mode == "quick"),
+    )
 
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
-    """Cancel any active blinker for the removed drive.
+    """Cancel any active blinker for the removed drive + flag pull-interrupted
+    pipelines for recovery on re-insert.
 
     If the REMOVE event carries a serial, we use that directly. If it
     doesn't (rare — udev usually has cached info even at unplug), we
@@ -131,13 +207,38 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
     back to `filter_by(device_path=...)` would AttributeError on the
     SQLAlchemy row.
 
-    Missing the explicit cancel is safe — the blinker's own read loop
-    exits on the next OSError (EIO, ENOENT) when it tries to touch the
-    gone device. We just lose the ~0-2 second window between unplug
-    and that read catching up.
+    Interrupt detection: if the removed drive is currently in
+    `state.active_phase`, mark its open TestRun with `interrupted_at_phase`
+    so the re-insert handler can find it and kick off a recovery flow.
+    This runs BEFORE the subprocess-failure path fires (the hdparm /
+    sg_format call inside the pipeline task will error out a moment
+    later when its I/O starts failing against the gone device).
     """
-    if event.serial:
-        orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
+    if not event.serial:
+        return
+    orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
+    interrupted_phase = state.active_phase.get(event.serial)
+    if interrupted_phase is not None:
+        state.interrupted_serials.add(event.serial)
+        # Stamp the open TestRun so recovery can find it after daemon restart
+        # or page refresh. We look for the most recent non-completed run for
+        # this serial — the pipeline creates exactly one such row per batch.
+        from driveforge.db import models as m
+        with state.session_factory() as session:
+            run = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=event.serial, completed_at=None)
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            if run is not None:
+                run.interrupted_at_phase = interrupted_phase
+                session.commit()
+        logger.warning(
+            "drive %s pulled during phase=%s — flagged for recovery on re-insert",
+            event.serial,
+            interrupted_phase,
+        )
 
 
 async def _poll_io_rates(state: DaemonState) -> None:
@@ -149,6 +250,8 @@ async def _poll_io_rates(state: DaemonState) -> None:
     still runs, it's just a no-op.
     """
     tracker = diskstats.IoRateTracker()
+    # 10 samples at 3-second polling = a 30-second sparkline window.
+    HISTORY_MAX = 10
     while True:
         try:
             rates = tracker.poll()
@@ -171,11 +274,25 @@ async def _poll_io_rates(state: DaemonState) -> None:
                         "read_mbps": round(rate.read_mbps, 1),
                         "write_mbps": round(rate.write_mbps, 1),
                     }
+                    # Append to rolling history for the sparkline. Store
+                    # total throughput (read + write) as a single series so
+                    # the sparkline is one polyline rather than two.
+                    history = state.active_io_history.setdefault(serial, [])
+                    history.append({
+                        "read": round(rate.read_mbps, 1),
+                        "write": round(rate.write_mbps, 1),
+                    })
+                    if len(history) > HISTORY_MAX:
+                        del history[: len(history) - HISTORY_MAX]
                 # Replace wholesale so serials that just left active_phase
                 # drop out of the display instead of showing stale rates.
                 state.active_io_rate = fresh
+                # Trim history for serials no longer active.
+                for stale in list(state.active_io_history.keys() - active):
+                    state.active_io_history.pop(stale, None)
             elif not active:
                 state.active_io_rate.clear()
+                state.active_io_history.clear()
         except Exception:  # noqa: BLE001
             # Never let a transient error kill the poller — the dashboard
             # losing a rate display is fine; a crashed background task is not.
@@ -201,6 +318,14 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             _restore_blinkers_on_startup(state, orch)
         except Exception:  # noqa: BLE001
             logger.exception("startup blinker restore failed (non-fatal)")
+        # Pick up any TestRuns left dangling by a crash, restart, or the
+        # pre-v0.2.2 case where a drive was pulled while the old daemon
+        # couldn't stamp the interrupt. Flagged ones will auto-recover
+        # on re-insert via the hotplug add handler.
+        try:
+            _flag_dangling_runs_as_interrupted(state)
+        except Exception:  # noqa: BLE001
+            logger.exception("startup dangling-run flag failed (non-fatal)")
         hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s)",

@@ -70,6 +70,20 @@ class DaemonConfig(BaseModel):
     pending_labels_dir: Path = STATE_DIR_DEFAULT / "pending-labels"
     reports_dir: Path = STATE_DIR_DEFAULT / "reports"
 
+    # Auto-enrollment on drive insert. When set to "quick" or "full", the
+    # hotplug add handler automatically starts a single-drive batch for
+    # any freshly-inserted drive that doesn't have a recent completed
+    # run. Intended for unattended rack workflows — operator watches LED
+    # patterns, pulls pass/fail drives, drops in new ones, and DriveForge
+    # runs the whole pipeline (including auto-printing a cert label if a
+    # printer is configured) with no dashboard interaction.
+    #   "off"   — default; drives only run when New Batch is clicked
+    #   "quick" — auto quick-mode (skips badblocks + long self-test)
+    #   "full"  — auto full pipeline
+    # Drives already passed within the last hour are NOT re-enrolled on
+    # re-insert (so you can freely yank a Grade-A drive and plug it back
+    # without restarting its test).
+    auto_enroll_mode: str = "off"
     # Root path for sysfs — overridable in tests + dev to point at a
     # synthetic tree. Production leaves this at "/".
     sysfs_root: Path = Path("/")

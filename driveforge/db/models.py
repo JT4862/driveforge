@@ -89,6 +89,12 @@ class TestRun(Base):
     quick_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)  # last N lines of phase output
+    # Phase name at which this run was interrupted by a drive-pull (udev
+    # remove while the drive was in active_phase). NULL during normal runs.
+    # Set by the hotplug remove handler; cleared or rolled forward by the
+    # recover_drive() path when the drive is re-inserted. Presence of a
+    # non-NULL value with completed_at NULL marks a run awaiting recovery.
+    interrupted_at_phase: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")

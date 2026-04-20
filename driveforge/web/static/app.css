@@ -30,7 +30,6 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .io-rate { font-size: 10px; color: var(--muted); font-family: var(--mono); letter-spacing: 0.2px; margin-top: 2px; opacity: 0.9; }
 .io-rate .io-write { color: var(--accent); }
 .io-rate .io-read { color: var(--muted); }
-.io-rate .io-idle { color: var(--muted); font-style: italic; }
 .topbar { display: flex; align-items: center; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--panel-border); }
 .brand a { display: inline-flex; align-items: center; gap: 10px; color: var(--text); font-weight: 700; letter-spacing: 0.5px; font-size: 16px; text-decoration: none; }
 .brand a:hover { text-decoration: none; }
@@ -52,6 +51,59 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .page-head .subtitle { grid-column: 1 / -1; color: var(--muted); }
 .page-head .actions { display: flex; gap: 10px; justify-self: end; }
 .page-head .stats { display: flex; gap: 10px; }
+
+/* Auto-enroll segmented toggle in the dashboard actions bar. Three
+   buttons, one active at a time. Active pill highlights in the accent
+   color; inactive pills are muted so the group reads as a minor
+   control rather than competing with the primary New Batch button. */
+.auto-enroll-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 3px 10px 3px 12px;
+  margin-left: 10px;
+}
+.auto-enroll-toggle .auto-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.auto-enroll-toggle .auto-pill {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.1s, color 0.1s;
+}
+.auto-enroll-toggle .auto-pill:hover { color: var(--text); }
+.auto-enroll-toggle .auto-pill.active {
+  background: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+}
+.auto-enroll-toggle .auto-pill.active:hover { color: #0d1117; }
+
+/* Chassis telemetry strip in the dashboard header. Mutes by default
+   (not meant to dominate the eye), but temperature values shift toward
+   warm colors as things heat up so thermal trouble catches the eye. */
+.chassis-strip { display: flex; gap: 18px; align-items: center; color: var(--muted); font-size: 13px; }
+.chassis-metric { display: inline-flex; gap: 6px; align-items: baseline; }
+.chassis-metric .chassis-label { text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; opacity: 0.7; }
+.chassis-metric .chassis-value { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+.chassis-temp.temp-band-cool    .chassis-value { color: #58a6ff; }
+.chassis-temp.temp-band-normal  .chassis-value { color: var(--ok); }
+.chassis-temp.temp-band-warm    .chassis-value { color: var(--warn); }
+.chassis-temp.temp-band-hot     .chassis-value { color: var(--fail); }
+
 .back { color: var(--muted); font-size: 13px; }
 
 .pill { background: rgba(255,255,255,0.06); color: var(--muted); padding: 4px 10px; border-radius: 999px; font-size: 12px; }
@@ -103,6 +155,17 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .provisional-tag { font-size: 11px; background: rgba(210,153,34,0.18); color: var(--warn); padding: 2px 8px; border-radius: 4px; vertical-align: middle; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
 .bay-card.empty { border-style: dashed; opacity: 0.55; }
 
+/* Per-card Abort button — corner of active cards. Matches bay-badges
+   placement so the layout is symmetric with the graded-card badges
+   that sit in the same spot on installed cards. */
+.abort-form { position: absolute; top: 10px; right: 10px; z-index: 2; margin: 0; }
+.abort-form .btn-small { font-size: 11px; padding: 3px 10px; line-height: 1.3; }
+.abort-form .btn-small[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: auto;  /* keep hover-tooltip but not the click */
+}
+
 /* Phase-colored active bay cards — left border + progress bar color */
 .bay-card.active { border-left: 3px solid var(--accent); }
 .bay-card.active.phase-info { border-left-color: var(--accent); }
@@ -118,6 +181,9 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .bay-card.active.phase-fail { border-left-color: var(--fail); }
 .bay-card.active.phase-fail .bar { background: var(--fail); }
 .bay-card.active.phase-fail .phase { color: var(--fail); }
+.bay-card.active.phase-recover { border-left-color: #d29922; }
+.bay-card.active.phase-recover .bar { background: #d29922; }
+.bay-card.active.phase-recover .phase { color: #d29922; }
 
 .bay-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .bay-stats .percent { font-weight: 600; }
@@ -132,7 +198,96 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .drive-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .phase { font-family: var(--mono); font-size: 12px; color: var(--accent); }
 .progress { height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
-.progress .bar { height: 100%; background: var(--accent); transition: width 0.4s; }
+.progress .bar { height: 100%; background: var(--accent); transition: width 0.4s; position: relative; }
+
+/* Shimmer overlay for actively-progressing bars. Gives a subtle "the
+   drive is alive" signal on phases where the percent bar barely moves
+   (e.g. multi-hour badblocks passes where the bar creeps by 1% a minute).
+   Pure CSS, no JS, one GPU-compositable animation. Static percent-stall
+   looks less frozen as a result. */
+.bay-card.active .progress .bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.25) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: bay-shimmer 2.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes bay-shimmer {
+  0%   { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
+}
+
+/* Phase icon inline with the phase label. Nudge the glyph up a hair so
+   it sits on the same baseline as the phase text. */
+.phase-icon { display: inline-block; margin-right: 6px; font-size: 13px; line-height: 1; vertical-align: -1px; }
+
+/* Live drive temperature pip on active cards. Shares the chassis
+   temperature band colors so a hot drive visually matches a hot inlet. */
+.drive-temp { font-variant-numeric: tabular-nums; font-weight: 500; }
+.drive-temp.temp-band-cool   { color: #58a6ff; }
+.drive-temp.temp-band-normal { color: var(--ok); }
+.drive-temp.temp-band-warm   { color: var(--warn); }
+.drive-temp.temp-band-hot    { color: var(--fail); }
+.drive-temp.temp-band-unknown { color: var(--muted); }
+
+/* Drive age label on installed cards (e.g. "5.2y" from last recorded POH). */
+.drive-age { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Throughput sparkline — 30-second rolling window, normalized to peak.
+   Uses currentColor so each phase-tinted card pulls the line into its
+   own palette (burn=purple, long=cyan, info=blue). Height matches
+   progress bar for visual symmetry. */
+.bay-card .io-spark {
+  width: 100%;
+  height: 18px;
+  display: block;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+.bay-card.active.phase-burn .io-spark { color: #a371f7; }
+.bay-card.active.phase-long .io-spark { color: #39c5cf; }
+.bay-card.active.phase-info .io-spark { color: var(--accent); }
+.bay-card.active.phase-erase .io-spark { color: var(--warn); }
+
+/* Phase transition pulse — briefly brightens the card's left-border
+   when a drive advances to a new phase. Fires on any active card whose
+   phase changed in the last 2.5 s (server-side gate in _active_card).
+   CSS keyframe runs once regardless of how many times HTMX re-renders
+   the card within the window, because `animation` resets on each new
+   DOM node (HTMX swap-innerHTML creates fresh nodes). */
+@keyframes phase-pulse {
+  0%   { border-left-width: 3px;  box-shadow: none; }
+  30%  { border-left-width: 6px;  box-shadow: -4px 0 18px -4px currentColor; }
+  100% { border-left-width: 3px;  box-shadow: none; }
+}
+.bay-card.active.phase-pulse { animation: phase-pulse 1.4s ease-out 1; }
+
+/* Just-completed flash — a warm sweep across the card when a drive
+   finishes its pipeline (pass/fail, not user aborts). 3.5 s window in
+   the server-side gate so one HTMX refresh cycle lands inside it.
+   Animation runs once per fresh DOM node, same as phase-pulse. */
+@keyframes just-completed-glow {
+  0%   { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.55); }
+  40%  { box-shadow: 0 0 18px 6px rgba(63, 185, 80, 0.35); }
+  100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0);    }
+}
+.bay-card.installed.just-completed { animation: just-completed-glow 1.8s ease-out 1; }
+/* Fail-tier runs flash in red instead of green. */
+.bay-card.installed.just-completed.graded-fail {
+  animation-name: just-completed-glow-fail;
+}
+@keyframes just-completed-glow-fail {
+  0%   { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.55); }
+  40%  { box-shadow: 0 0 18px 6px rgba(248, 81, 73, 0.35); }
+  100% { box-shadow: 0 0 0 0 rgba(248, 81, 73, 0);    }
+}
 .percent { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
 .empty-msg { font-size: 14px; color: var(--muted); }
 .empty-hint { font-size: 11px; color: var(--muted); opacity: 0.7; }

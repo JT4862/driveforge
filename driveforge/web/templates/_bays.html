@@ -12,11 +12,15 @@
 #}
 {% macro drive_card(card) -%}
 {% if card.state == "installed" %}
-<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}">
+<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
-      <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB{% if card.transport %} &middot; {{ card.transport|upper }}{% endif %}</div>
+      <div class="drive-meta">
+        SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
+        {%- if card.transport %} &middot; {{ card.transport|upper }}{% endif -%}
+        {%- if card.drive_age_label %} &middot; <span class="drive-age" title="Power-on hours at last test">{{ card.drive_age_label }}</span>{% endif -%}
+      </div>
       {% if card.last_grade == "fail" %}
         <div class="phase last-test fail-text">✗ Failed {{ card.last_tested.strftime('%Y-%m-%d') }}{% if card.last_phase %} &middot; {{ card.last_phase|replace("_", " ") }}{% endif %}</div>
         {% if card.last_error %}
@@ -41,32 +45,85 @@
   {% endif %}
 </div>
 {% else %}
-<a class="bay-card active phase-{{ card.phase_class }}" href="/drives/{{ card.serial }}">
-  <div class="bay-body">
-    <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
-    <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
-    <div class="phase">{{ card.phase|replace("_", " ") }}</div>
-    {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
-    {% if card.io_rate %}
-    <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
-      {%- if card.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(card.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
-      {%- if card.io_rate.write_mbps >= 0.1 and card.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
-      {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
-      {%- if card.io_rate.write_mbps < 0.1 and card.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
+<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}">
+  <a class="bay-card-main" href="/drives/{{ card.serial }}">
+    <div class="bay-body">
+      <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
+      <div class="drive-meta">
+        SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
+        {%- if card.drive_temp_c is not none -%}
+          &middot; <span class="drive-temp temp-band-{{ card.drive_temp_band }}"
+                         title="Drive temperature from SMART">{{ card.drive_temp_c }}&deg;C</span>
+        {%- endif -%}
+      </div>
+      <div class="phase">
+        {%- if card.phase_icon %}<span class="phase-icon" aria-hidden="true">{{ card.phase_icon }}</span>{% endif -%}
+        {{ card.phase|replace("_", " ") }}
+      </div>
+      {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
+      {# Only render the I/O-rate row when there's actual host-visible
+         throughput. Phases like secure_erase (hdparm), short_test, and
+         long_test do their work in the drive firmware with no block-level
+         I/O the kernel sees — showing "idle" there was technically correct
+         for the diskstats view but misleading for the operator, who reads
+         it as "nothing is happening to this drive." #}
+      {% if card.io_rate and (card.io_rate.write_mbps >= 0.1 or card.io_rate.read_mbps >= 0.1) %}
+      <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
+        {%- if card.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(card.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
+        {%- if card.io_rate.write_mbps >= 0.1 and card.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
+        {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
+      </div>
+      {% endif %}
+      {#- 30-second throughput sparkline: one polyline per card,
+         normalized to the window's peak so the shape stays visible
+         regardless of absolute throughput. Only rendered when the
+         peak in the last 30 s is >= 1 MB/s (idle phases just draw a
+         flat line, not useful). -#}
+      {% if card.spark_points %}
+      <svg class="io-spark" viewBox="0 0 100 20" preserveAspectRatio="none"
+           title="30-second throughput trend (peak {{ '%.0f'|format(card.spark_peak) }} MB/s)">
+        {%- set n = card.spark_points|length -%}
+        {%- set peak = card.spark_peak if card.spark_peak > 0 else 1.0 -%}
+        <polyline fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"
+                  points="
+          {%- for v in card.spark_points -%}
+            {{ (loop.index0 / (n - 1) * 100) if n > 1 else 50 }},{{ 20 - (v / peak * 18) }}
+            {%- if not loop.last %} {% endif -%}
+          {%- endfor -%}" />
+      </svg>
+      {% endif %}
+      <div class="progress">
+        <div class="bar" style="width: {{ card.percent }}%"></div>
+      </div>
+      <div class="bay-stats">
+        <span class="percent">{{ "%.0f"|format(card.percent) }}%</span>
+        <span class="timing">
+          {{ card.elapsed_label }}
+          {% if card.eta_label %}&middot; ETA {{ card.eta_label }}{% endif %}
+        </span>
+      </div>
     </div>
+  </a>
+  {# Per-card abort — sibling of the main <a> so we don't nest interactive
+     elements. Disabled during secure_erase because killing the host
+     process there doesn't stop the drive's internal format, and on SAS
+     drives `sg_format` mid-flight corrupts the drive. Operator can still
+     abort via `curl POST /drives/<serial>/abort` if they really need to. #}
+  <form method="post" action="/drives/{{ card.serial }}/abort" class="abort-form">
+    {% if card.phase == "secure_erase" %}
+      <button class="btn danger btn-small" type="button" disabled
+              title="Abort disabled during secure erase — the drive firmware handles this phase internally. Aborting SAS sg_format mid-flight leaves the drive with 'Medium format corrupted' and requires manual recovery.">
+        Abort
+      </button>
+    {% else %}
+      <button class="btn danger btn-small" type="submit"
+              onclick="return confirm('Abort this drive? Its current phase will be cancelled and the test run marked failed.')"
+              title="Cancel this drive's pipeline.">
+        Abort
+      </button>
     {% endif %}
-    <div class="progress">
-      <div class="bar" style="width: {{ card.percent }}%"></div>
-    </div>
-    <div class="bay-stats">
-      <span class="percent">{{ "%.0f"|format(card.percent) }}%</span>
-      <span class="timing">
-        {{ card.elapsed_label }}
-        {% if card.eta_label %}&middot; ETA {{ card.eta_label }}{% endif %}
-      </span>
-    </div>
-  </div>
-</a>
+  </form>
+</div>
 {% endif %}
 {%- endmacro %}
 
