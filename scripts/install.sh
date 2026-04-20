@@ -64,19 +64,30 @@ if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/de
     fi
   done
   # Fix-broken pass to resolve anything still hanging. Use cached debs only.
-  apt-get install -y --no-download --fix-broken || \
-    warn "apt-get --fix-broken reported errors"
+  # --no-remove is critical: without it, apt's broken-state resolver will
+  # silently REMOVE packages (including the kernel!) if it can't otherwise
+  # satisfy dependencies from the cached .debs. ISO #12 and #13 both hit
+  # exactly this: udev version skew in the bundle caused apt to "fix" the
+  # broken state by removing linux-image-amd64, initramfs-tools, and udev,
+  # leaving /boot/vmlinuz missing and the VM booting to a grub> prompt.
+  # Better to fail loud here than produce an unbootable install.
+  apt-get install -y --no-download --fix-broken --no-remove || \
+    die "apt-get --fix-broken failed — the offline bundle has a dependency conflict that apt refuses to resolve without removing packages. Rebuild the bundle with matching versions."
 else
   apt-get update -qq
   apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" >/dev/null
 fi
-# Post-install sanity check — the specific failure we hit was `python3`
-# missing even though setup claimed success, because errors were being
-# silently swallowed. A loud check here fails the install at a useful spot
-# instead of crashing later at `python3 -m venv`.
+# Post-install sanity check — catches two classes of silent failure:
+# missing binaries (python3 / apt-get / useradd / systemctl) from a busted
+# apt step, and a missing kernel image from the fix-broken-removed-the-kernel
+# scenario. Either way: fail now with a clear pointer to the log, instead
+# of producing a system that only fails on first reboot.
 for bin in python3 apt-get useradd systemctl; do
   command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt/dpkg log above"
 done
+if ! ls /boot/vmlinuz-* >/dev/null 2>&1 && ! ls /boot/vmlinuz >/dev/null 2>&1; then
+  die "no kernel image in /boot/ — the apt step must have removed linux-image-amd64. Check the install log for 'Removing linux-image-*' lines and rebuild the offline bundle."
+fi
 ok "system packages installed"
 
 log "Creating driveforge user and directories..."

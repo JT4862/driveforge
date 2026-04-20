@@ -6,20 +6,25 @@ direct-attach backplane exposes no SES enclosure, so per-slot IDENT/FAULT
 LEDs aren't reachable — but every drive's own green activity LED is
 wired to the bay, so we piggyback on that.
 
-Two patterns, maximally distinct at a glance across the room:
+Two patterns, designed for glance-identifiability at rack distance:
 
-- PASS: continuous back-to-back reads, no dark gap in our control loop.
-  On HDDs each I/O takes ~25 ms so the LED sustains as true solid green.
-  On SSDs each I/O completes in microseconds and the LED driver's
-  minimum off-time between pulses dominates — the observable result is
-  a rapid blink rather than solid. Both HDD-solid and SSD-rapid-blink
-  communicate the same "done, ready to pull" signal and are visually
-  distinct from the fail pattern below. Fires for any successful run
-  regardless of grade (A / B / C — operator pulls them the same way).
-- FAIL (lighthouse): 1.5 s of continuous reads, then 1.5 s of FULL dark.
-  The 1.5 s dark gap is the key visual — no drive's natural activity or
-  any pass pattern ever sits dark that long, so the ON-OFF-ON-OFF
-  rhythm is unambiguously "this drive failed."
+- PASS (heartbeat): three 300 ms bursts with 150 ms between, then a
+  2 s dark gap. Reads as "flash-flash-flash ... (pause) ... flash-
+  flash-flash ... (pause)". Count the flashes: 3 = pass.
+- FAIL (lighthouse): a single 1.5 s burst, then a 1.5 s dark gap.
+  Reads as "solid-ON ... solid-OFF ... solid-ON ... solid-OFF".
+  One slow heavy pulse per cycle: 1 = fail.
+
+Both patterns have a clearly-dark rest period (2 s for pass, 1.5 s for
+fail) — that's what separates a "done" signal from "drive is still
+testing." Natural in-flight test I/O never sits 1.5+ s dark, so any
+drive with observable dark periods has finished its run.
+
+The count-based distinction (three quick flashes vs one slow pulse)
+survives SSDs: even though the drive's fast I/O renders each burst
+as rapid-flicker rather than sustained-solid, the human eye still
+reads it as "a flash event" — three of them per cycle for pass, one
+per cycle for fail.
 
 No blinker for aborted runs (operator knew they cancelled; no LED
 noise needed) or for drives that have never completed a run.
@@ -60,7 +65,16 @@ _PROBE_OFFSETS = [i * (50 * 1024 * 1024) for i in range(500)]
 # merge into a visibly "solid" activity LED.
 _PROBE_SIZE = 64 * 1024
 
-# FAIL lighthouse cadence
+# PASS heartbeat cadence — three quick flashes + long dark.
+# Each flash is a sustained 64 KB read burst long enough to be visible
+# on both HDDs (where a single read takes ~25 ms) and SSDs (where the
+# burst needs to accumulate enough events for the LED to fire visibly).
+_PASS_FLASH_DURATION_SEC = 0.3
+_PASS_INTER_FLASH_DARK_SEC = 0.15
+_PASS_FLASH_COUNT = 3
+_PASS_CYCLE_DARK_SEC = 2.0
+
+# FAIL lighthouse cadence — single slow pulse + long dark.
 _FAIL_ON_DURATION_SEC = 1.5
 _FAIL_OFF_DURATION_SEC = 1.5
 
@@ -153,29 +167,36 @@ def _sustained_read_burst(
 _BURST_DURATION_SEC = 0.5
 
 
-async def _pass_solid_cycle(device_path: str, idx_ref: list[int]) -> bool:
-    """Drive the activity LED to a visually-solid ON state forever.
+async def _pass_heartbeat_cycle(device_path: str, idx_ref: list[int]) -> bool:
+    """Pass heartbeat: three 300 ms bursts + 2 s dark.
 
-    One sustained-read burst per cycle. The burst runs in a worker
-    thread (bypassing per-read asyncio overhead), keeping the drive's
-    I/O queue continuously filled so the activity LED stays lit.
-
-    Returns False if the drive is gone (OSError).
+    Reads as "flash-flash-flash ... (pause) ... flash-flash-flash".
+    Count-based signal: three flashes per cycle = pass. Distinct from
+    the single-pulse lighthouse (fail) and distinct from natural test
+    I/O (which never sits 2 s dark).
     """
-    try:
-        count = await asyncio.to_thread(
-            _sustained_read_burst, device_path, _PROBE_OFFSETS, _PROBE_SIZE, _BURST_DURATION_SEC
-        )
-        idx_ref[0] += count
-    except OSError as exc:
-        logger.info(
-            "blinker exiting for %s: %s (drive likely pulled)",
-            device_path, exc,
-        )
-        return False
-    # Micro-yield so other asyncio tasks (dashboard polls, other blinkers)
-    # don't get starved between bursts.
-    await asyncio.sleep(0)
+    for i in range(_PASS_FLASH_COUNT):
+        try:
+            count = await asyncio.to_thread(
+                _sustained_read_burst,
+                device_path,
+                _PROBE_OFFSETS,
+                _PROBE_SIZE,
+                _PASS_FLASH_DURATION_SEC,
+            )
+            idx_ref[0] += count
+        except OSError as exc:
+            logger.info(
+                "blinker exiting for %s: %s (drive likely pulled)",
+                device_path, exc,
+            )
+            return False
+        # Inter-flash dark gap — short enough that the three flashes read
+        # as a grouped triplet, long enough to be individually perceived.
+        # Skip after the last flash; the long cycle-dark handles the pause.
+        if i < _PASS_FLASH_COUNT - 1:
+            await asyncio.sleep(_PASS_INTER_FLASH_DARK_SEC)
+    await asyncio.sleep(_PASS_CYCLE_DARK_SEC)
     return True
 
 
@@ -214,7 +235,7 @@ async def blink_done(device_path: str, *, pattern: Pattern = "pass") -> None:
     hardware-gated.
     """
     idx_ref = [0]
-    cycle = _pass_solid_cycle if pattern == "pass" else _lighthouse_cycle
+    cycle = _pass_heartbeat_cycle if pattern == "pass" else _lighthouse_cycle
     ses_lit = False
     if pattern == "fail":
         ses_lit = await asyncio.to_thread(_try_ledctl, "fault", device_path)
