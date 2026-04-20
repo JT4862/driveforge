@@ -39,6 +39,37 @@ STATIC_DIR = PACKAGE_ROOT / "web" / "static"
 IO_RATE_POLL_INTERVAL_SEC = 3.0
 
 
+def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
+    """Any TestRun with completed_at NULL at daemon startup was dangling
+    from a previous run — daemon crash, systemd restart, package upgrade
+    mid-batch, or (the pre-v0.2.2 case) a drive pulled while the old
+    daemon couldn't stamp the interrupt. Mark them so the re-insert
+    handler can pick up recovery.
+
+    Only sets `interrupted_at_phase` if it isn't already set — we never
+    overwrite a more-specific phase the remove-handler already stamped.
+    """
+    from driveforge.db import models as m
+
+    with state.session_factory() as session:
+        dangling = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.completed_at.is_(None))
+            .filter(m.TestRun.interrupted_at_phase.is_(None))
+            .all()
+        )
+        for run in dangling:
+            run.interrupted_at_phase = run.phase
+            logger.warning(
+                "daemon startup: flagging dangling run %d (drive=%s, phase=%s) as interrupted",
+                run.id,
+                run.drive_serial,
+                run.phase,
+            )
+        if dangling:
+            session.commit()
+
+
 def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None:
     """Re-spawn done-blinkers for drives that are physically present and
     have a clear last-run verdict. Called once at daemon boot.
@@ -287,6 +318,14 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             _restore_blinkers_on_startup(state, orch)
         except Exception:  # noqa: BLE001
             logger.exception("startup blinker restore failed (non-fatal)")
+        # Pick up any TestRuns left dangling by a crash, restart, or the
+        # pre-v0.2.2 case where a drive was pulled while the old daemon
+        # couldn't stamp the interrupt. Flagged ones will auto-recover
+        # on re-insert via the hotplug add handler.
+        try:
+            _flag_dangling_runs_as_interrupted(state)
+        except Exception:  # noqa: BLE001
+            logger.exception("startup dangling-run flag failed (non-fatal)")
         hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s)",
