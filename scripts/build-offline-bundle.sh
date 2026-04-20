@@ -84,15 +84,24 @@ if [[ $DEB_COUNT -lt 10 ]]; then
   exit 1
 fi
 
-# 3. Python wheels. pip download grabs sdist/wheel for every dep declared in
-# pyproject.toml. Use the same Python version the target will have so wheels
-# are ABI-compatible. Include the `[linux]` extra explicitly — that pulls in
-# pyudev, which install.sh needs on the target for the hotplug monitor.
-# Without this, a --no-index bundle install fails to resolve pyudev and the
-# guest daemon silently loses its hotplug / LED-restore functionality.
-echo "==> Downloading Python wheels..."
-pip download --quiet --dest "$WORK/wheels" "$ROOT[linux]" 2>&1 | tail -5 || true
-echo "    $(ls "$WORK/wheels" | wc -l) wheel/sdist files cached"
+# 3. Python wheels. `pip wheel` is the right tool for an offline bundle:
+#    a) Builds the DriveForge package itself into a .whl using its
+#       build backend (hatchling). hatchling is only needed AT build
+#       time — not on the target — which is critical because `pip
+#       download` would bring an sdist with NO hatchling, and the
+#       target's --no-index pip install would then fail trying to
+#       resolve hatchling from PyPI it can't reach. Hit this on
+#       2026-04-20 when the ISO install died at
+#       "No matching distribution found for hatchling".
+#    b) Downloads all RUNTIME deps (plus the `[linux]` extra → pyudev)
+#       as wheels next to the DriveForge wheel, so the target can just
+#       `pip install --no-index --find-links wheels/ driveforge[linux]`
+#       with no build backend required.
+# Use the same Python version the target will have so wheels are ABI-
+# compatible (/opt/driveforge is a Python 3.11 venv on Debian 12).
+echo "==> Building wheels..."
+pip wheel --quiet --wheel-dir "$WORK/wheels" "$ROOT[linux]" 2>&1 | tail -5 || true
+echo "    $(ls "$WORK/wheels" | wc -l) wheel files cached"
 
 # 4. Inline install hint so a user who unpacks the tarball without reading
 # README knows what to do.
