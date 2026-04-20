@@ -208,17 +208,54 @@ def _drive_view(state, session) -> dict:
     }
 
 
+def _temp_band(temp_c: int | None) -> str:
+    """Bucket a temperature reading into a CSS-friendly band label so the
+    dashboard can color-code hot vs. cool. Bands are tuned for chassis
+    ambient (inlet ~15-35 °C, exhaust ~20-45 °C normal, higher = hot)."""
+    if temp_c is None:
+        return "unknown"
+    if temp_c < 30:
+        return "cool"
+    if temp_c < 45:
+        return "normal"
+    if temp_c < 55:
+        return "warm"
+    return "hot"
+
+
+def _chassis_snapshot(state) -> dict | None:
+    """Live chassis readings for the dashboard header strip. Returns None
+    when nothing is available (keeps the header clean on consumer PCs)."""
+    from driveforge.core import telemetry
+
+    caps = state.capabilities
+    if not (caps.chassis_power or caps.chassis_temperature):
+        return None
+    power = telemetry.read_chassis_power() if caps.chassis_power else None
+    temps = telemetry.read_chassis_temperatures() if caps.chassis_temperature else {}
+    inlet = temps.get("Inlet Temp")
+    exhaust = temps.get("Exhaust Temp")
+    if power is None and inlet is None and exhaust is None:
+        return None
+    return {
+        "power_w": power,
+        "inlet_c": inlet,
+        "exhaust_c": exhaust,
+        "inlet_band": _temp_band(inlet),
+        "exhaust_band": _temp_band(exhaust),
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
     with state.session_factory() as session:
         view = _drive_view(state, session)
-        batch_count = session.query(m.Batch).count()
-        drive_count = session.query(m.Drive).count()
+    chassis = _chassis_snapshot(state)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"view": view, "batch_count": batch_count, "drive_count": drive_count},
+        {"view": view, "chassis": chassis},
     )
 
 

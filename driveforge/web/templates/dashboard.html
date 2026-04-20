@@ -3,10 +3,30 @@
 {% block content %}
 <section class="page-head">
   <h1>Dashboard</h1>
-  <div class="stats">
-    <span class="pill">{{ drive_count }} drives in history</span>
-    <span class="pill">{{ batch_count }} batches run</span>
+  {% if chassis %}
+  <div class="chassis-strip">
+    {% if chassis.power_w is not none %}
+      <span class="chassis-metric" title="Chassis power draw via BMC (IPMI DCMI)">
+        <span class="chassis-label">power</span>
+        <span class="chassis-value">{{ chassis.power_w|int }} W</span>
+      </span>
+    {% endif %}
+    {% if chassis.inlet_c is not none %}
+      <span class="chassis-metric chassis-temp temp-band-{{ chassis.inlet_band }}"
+            title="Chassis inlet temperature">
+        <span class="chassis-label">inlet</span>
+        <span class="chassis-value">{{ chassis.inlet_c }}&deg;C</span>
+      </span>
+    {% endif %}
+    {% if chassis.exhaust_c is not none %}
+      <span class="chassis-metric chassis-temp temp-band-{{ chassis.exhaust_band }}"
+            title="Chassis exhaust temperature">
+        <span class="chassis-label">exhaust</span>
+        <span class="chassis-value">{{ chassis.exhaust_c }}&deg;C</span>
+      </span>
+    {% endif %}
   </div>
+  {% endif %}
   <div class="actions">
     <a class="btn primary" href="/batches/new">+ New Batch</a>
   </div>

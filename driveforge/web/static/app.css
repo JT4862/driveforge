@@ -52,6 +52,18 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .page-head .actions { display: flex; gap: 10px; justify-self: end; }
 .page-head .stats { display: flex; gap: 10px; }
 
+/* Chassis telemetry strip in the dashboard header. Mutes by default
+   (not meant to dominate the eye), but temperature values shift toward
+   warm colors as things heat up so thermal trouble catches the eye. */
+.chassis-strip { display: flex; gap: 18px; align-items: center; color: var(--muted); font-size: 13px; }
+.chassis-metric { display: inline-flex; gap: 6px; align-items: baseline; }
+.chassis-metric .chassis-label { text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; opacity: 0.7; }
+.chassis-metric .chassis-value { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+.chassis-temp.temp-band-cool    .chassis-value { color: #58a6ff; }
+.chassis-temp.temp-band-normal  .chassis-value { color: var(--ok); }
+.chassis-temp.temp-band-warm    .chassis-value { color: var(--warn); }
+.chassis-temp.temp-band-hot     .chassis-value { color: var(--fail); }
+
 .back { color: var(--muted); font-size: 13px; }
 
 .pill { background: rgba(255,255,255,0.06); color: var(--muted); padding: 4px 10px; border-radius: 999px; font-size: 12px; }
