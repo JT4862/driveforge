@@ -73,10 +73,16 @@ python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# On Linux we need the `linux` extra — it pulls in pyudev for the hotplug
+# event monitor. Without this, the daemon boots fine but never sees drive
+# add/remove events and the LED-blinker-on-reinsert feature silently
+# no-ops. `--upgrade` so re-running install.sh after deps change actually
+# refreshes them instead of pip concluding "driveforge X.Y.Z already
+# present, skip" on an unchanged version string.
 if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
-  pip install --quiet "$SRC_DIR"
+  pip install --quiet --upgrade "$SRC_DIR[linux]"
 else
-  pip install --quiet driveforge
+  pip install --quiet --upgrade "driveforge[linux]"
 fi
 deactivate
 ln -sf /opt/driveforge/bin/driveforge-daemon /usr/bin/driveforge-daemon

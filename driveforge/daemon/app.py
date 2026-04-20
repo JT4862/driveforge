@@ -51,17 +51,10 @@ def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None
     except Exception:  # noqa: BLE001
         logger.info("startup blinker restore: drive discovery unavailable, skipping")
         return
-    # Upsert device_path so restore_blinker_for_serial reads the right path.
-    with state.session_factory() as session:
-        for d in present:
-            existing = session.get(m.Drive, d.serial)
-            if existing is not None and existing.device_path != d.device_path:
-                existing.device_path = d.device_path
-        session.commit()
     restored = 0
     for d in present:
         before = len(state.done_blinkers)
-        orch.restore_blinker_for_serial(d.serial)
+        orch.restore_blinker_for_drive(d)
         if len(state.done_blinkers) > before:
             restored += 1
     if restored:
@@ -121,14 +114,11 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     if match is None:
         logger.debug("hotplug add: no matching drive for event %s", event)
         return
-    # Upsert device_path in the DB so restore_blinker_for_serial picks
-    # up the right path if the kernel reassigned the letter.
-    with state.session_factory() as session:
-        existing = session.get(m.Drive, match.serial)
-        if existing is not None and existing.device_path != match.device_path:
-            existing.device_path = match.device_path
-            session.commit()
-    orch.restore_blinker_for_serial(match.serial)
+    # `match` is a freshly-discovered Pydantic Drive with current device_path;
+    # the restore helper reads that directly instead of round-tripping through
+    # the DB (which doesn't store device_path — kernel letters drift across
+    # reboots).
+    orch.restore_blinker_for_drive(match)
 
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:

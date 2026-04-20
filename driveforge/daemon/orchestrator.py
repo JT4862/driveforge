@@ -140,34 +140,41 @@ class Orchestrator:
         if task is not None and not task.done():
             task.cancel()
 
-    def restore_blinker_for_serial(self, serial: str) -> None:
-        """If this drive has a completed run with a clear verdict, spawn
-        the matching post-run blinker.
+    def restore_blinker_for_drive(self, drive: Drive) -> None:
+        """If this freshly-discovered drive has a completed run with a
+        clear verdict, spawn the matching post-run blinker.
 
         Called on daemon boot (for drives present at startup) and on every
         hotplug DRIVE_ADDED event so a previously-tested drive that gets
         re-inserted resumes its pass/fail LED pattern without requiring
         the operator to start a new batch.
 
+        Takes a Pydantic `core.drive.Drive` (not the SQLAlchemy model) —
+        the DB schema doesn't store `device_path` since kernel letters
+        drift across reboots. The caller is expected to have just obtained
+        `drive` from `drive_mod.discover()` so its device_path is current.
+
         No-op in three cases:
           - Drive is currently under test (serial is in bay_assignments).
-          - Drive has no completed test runs.
+          - Drive has no completed test runs in the DB.
           - The latest run was user-aborted (phase=="aborted"). Aborts are
             operator-initiated; re-showing a fail LED on re-insert would
             misrepresent what happened.
         """
-        if serial in self.state.bay_assignments.values():
+        if drive.serial in self.state.bay_assignments.values():
             return
-        if serial in self.state.done_blinkers:
+        if drive.serial in self.state.done_blinkers:
             # Already blinking — no need to restart.
             return
         with self.state.session_factory() as session:
-            drive = session.get(m.Drive, serial)
-            if drive is None or not drive.device_path:
+            # Just a sanity check that the drive is enrolled; we don't read
+            # any paths off the DB row. Enrollment happens when the drive is
+            # first included in a batch, so a never-tested drive returns None.
+            if session.get(m.Drive, drive.serial) is None:
                 return
             last_run = (
                 session.query(m.TestRun)
-                .filter_by(drive_serial=serial)
+                .filter_by(drive_serial=drive.serial)
                 .filter(m.TestRun.completed_at.isnot(None))
                 .order_by(m.TestRun.completed_at.desc())
                 .first()
@@ -184,11 +191,7 @@ class Orchestrator:
                 outcome = "fail"
             else:
                 return
-            # Re-bind device_path in case the drive came back on a
-            # different kernel letter after re-insert (sdb → sdd, etc.)
-            # — caller is expected to have refreshed drive.device_path
-            # before this point. Use whatever is in the DB now.
-            self._spawn_done_blinker(drive, outcome)
+        self._spawn_done_blinker(drive, outcome)
 
     async def start_batch(
         self,
