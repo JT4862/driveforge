@@ -7,6 +7,7 @@ web UI, and serves on the configured host/port.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,9 +18,11 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from driveforge import config as cfg
+from driveforge.core import diskstats
 from driveforge.daemon.api import router as api_router
 from driveforge.daemon.orchestrator import Orchestrator
 from driveforge.daemon.state import DaemonState, get_state, set_state
+from driveforge.db import models as m
 from driveforge.web.routes import router as web_router
 from driveforge.web.routes import templates as web_templates
 from driveforge.web.setup import router as setup_router
@@ -28,6 +31,52 @@ logger = logging.getLogger(__name__)
 
 PACKAGE_ROOT = Path(__file__).parent.parent
 STATIC_DIR = PACKAGE_ROOT / "web" / "static"
+
+# Cadence for the /proc/diskstats live-rate poller. 3 s is short enough that
+# a stalled drive is obvious on the dashboard within one refresh cycle, and
+# long enough that rounding/quantization doesn't dominate the rate display.
+IO_RATE_POLL_INTERVAL_SEC = 3.0
+
+
+async def _poll_io_rates(state: DaemonState) -> None:
+    """Background task: sample /proc/diskstats every few seconds and update
+    state.active_io_rate for every drive currently assigned to a bay.
+
+    Runs for the daemon's entire lifetime. On non-Linux dev laptops the
+    diskstats file doesn't exist and the tracker returns empty — the task
+    still runs, it's just a no-op.
+    """
+    tracker = diskstats.IoRateTracker()
+    while True:
+        try:
+            rates = tracker.poll()
+            if rates and state.bay_assignments:
+                # Map device basenames (sda, sdb, ...) back to serials by
+                # looking up each active drive's current device_path.
+                with state.session_factory() as session:
+                    fresh: dict[str, dict[str, float]] = {}
+                    for serial in list(state.bay_assignments.values()):
+                        drive = session.get(m.Drive, serial)
+                        if drive is None or not drive.device_path:
+                            continue
+                        dev_name = drive.device_path.rsplit("/", 1)[-1]
+                        rate = rates.get(dev_name)
+                        if rate is None:
+                            continue
+                        fresh[serial] = {
+                            "read_mbps": round(rate.read_mbps, 1),
+                            "write_mbps": round(rate.write_mbps, 1),
+                        }
+                # Replace wholesale so serials that just left bay_assignments
+                # drop out of the display instead of showing stale rates.
+                state.active_io_rate = fresh
+            elif not state.bay_assignments:
+                state.active_io_rate.clear()
+        except Exception:  # noqa: BLE001
+            # Never let a transient error kill the poller — the dashboard
+            # losing a rate display is fine; a crashed background task is not.
+            logger.exception("io-rate poll iteration failed")
+        await asyncio.sleep(IO_RATE_POLL_INTERVAL_SEC)
 
 
 def make_app(settings: cfg.Settings) -> FastAPI:
@@ -38,6 +87,7 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         state.orchestrator = orch  # type: ignore[attr-defined]
+        io_task = asyncio.create_task(_poll_io_rates(state))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s)",
             settings.daemon.host,
@@ -45,6 +95,11 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             settings.dev_mode,
         )
         yield
+        io_task.cancel()
+        try:
+            await io_task
+        except asyncio.CancelledError:
+            pass
         logger.info("driveforge-daemon shutting down")
 
     from driveforge.version import __version__ as DRIVEFORGE_VERSION

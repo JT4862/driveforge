@@ -35,6 +35,11 @@ class DaemonState:
     # the 8 badblocks passes is running ("pass 3/8 · write 0xFF"). Cleared on
     # phase transition.
     active_sublabel: dict[str, str] = field(default_factory=dict)
+    # Live per-drive I/O rate during active phases. Written by a periodic
+    # /proc/diskstats poller in the daemon lifespan; read by the bay-card
+    # renderer. Unit: MB/s (decimal megabytes). Cleared when a drive leaves
+    # bay_assignments.
+    active_io_rate: dict[str, dict[str, float]] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.

@@ -45,6 +45,14 @@
     <div class="drive-meta">SN: {{ bay.serial }} &middot; {{ "%.1f"|format(bay.capacity_tb) }} TB</div>
     <div class="phase">{{ bay.phase|replace("_", " ") }}</div>
     {% if bay.sublabel %}<div class="phase-sub">{{ bay.sublabel }}</div>{% endif %}
+    {% if bay.io_rate %}
+    <div class="io-rate" title="Live throughput from /proc/diskstats, sampled every 3 s">
+      {%- if bay.io_rate.write_mbps >= 0.1 %}<span class="io-write">{{ "%.0f"|format(bay.io_rate.write_mbps) }} MB/s write</span>{% endif -%}
+      {%- if bay.io_rate.write_mbps >= 0.1 and bay.io_rate.read_mbps >= 0.1 %} &middot; {% endif -%}
+      {%- if bay.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(bay.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
+      {%- if bay.io_rate.write_mbps < 0.1 and bay.io_rate.read_mbps < 0.1 %}<span class="io-idle">idle</span>{% endif -%}
+    </div>
+    {% endif %}
     <div class="progress">
       <div class="bar" style="width: {{ bay.percent }}%"></div>
     </div>
