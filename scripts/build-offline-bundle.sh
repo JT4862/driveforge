@@ -78,9 +78,12 @@ fi
 
 # 3. Python wheels. pip download grabs sdist/wheel for every dep declared in
 # pyproject.toml. Use the same Python version the target will have so wheels
-# are ABI-compatible.
+# are ABI-compatible. Include the `[linux]` extra explicitly — that pulls in
+# pyudev, which install.sh needs on the target for the hotplug monitor.
+# Without this, a --no-index bundle install fails to resolve pyudev and the
+# guest daemon silently loses its hotplug / LED-restore functionality.
 echo "==> Downloading Python wheels..."
-pip download --quiet --dest "$WORK/wheels" "$ROOT" 2>&1 | tail -5 || true
+pip download --quiet --dest "$WORK/wheels" "$ROOT[linux]" 2>&1 | tail -5 || true
 echo "    $(ls "$WORK/wheels" | wc -l) wheel/sdist files cached"
 
 # 4. Inline install hint so a user who unpacks the tarball without reading
