@@ -18,7 +18,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from driveforge import config as cfg
-from driveforge.core import diskstats
+from driveforge.core import diskstats, drive as drive_mod
+from driveforge.core.hotplug import EventKind, Monitor as HotplugMonitor
 from driveforge.daemon.api import router as api_router
 from driveforge.daemon.orchestrator import Orchestrator
 from driveforge.daemon.state import DaemonState, get_state, set_state
@@ -36,6 +37,119 @@ STATIC_DIR = PACKAGE_ROOT / "web" / "static"
 # a stalled drive is obvious on the dashboard within one refresh cycle, and
 # long enough that rounding/quantization doesn't dominate the rate display.
 IO_RATE_POLL_INTERVAL_SEC = 3.0
+
+
+def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None:
+    """Re-spawn done-blinkers for drives that are physically present and
+    have a clear last-run verdict. Called once at daemon boot.
+
+    Silent no-op if drive discovery fails (non-Linux dev environment,
+    missing lsblk, etc.) — the feature is best-effort, not load-bearing.
+    """
+    try:
+        present = drive_mod.discover()
+    except Exception:  # noqa: BLE001
+        logger.info("startup blinker restore: drive discovery unavailable, skipping")
+        return
+    # Upsert device_path so restore_blinker_for_serial reads the right path.
+    with state.session_factory() as session:
+        for d in present:
+            existing = session.get(m.Drive, d.serial)
+            if existing is not None and existing.device_path != d.device_path:
+                existing.device_path = d.device_path
+        session.commit()
+    restored = 0
+    for d in present:
+        before = len(state.done_blinkers)
+        orch.restore_blinker_for_serial(d.serial)
+        if len(state.done_blinkers) > before:
+            restored += 1
+    if restored:
+        logger.info("startup blinker restore: spawned %d blinker(s)", restored)
+
+
+async def _hotplug_loop(state: DaemonState, orch: Orchestrator) -> None:
+    """Consume hotplug events. On DRIVE_ADDED, re-enroll the drive in the
+    DB (fresh device_path / serial mapping) and restore its post-run
+    blinker if it has a completed test history. On DRIVE_REMOVED, cancel
+    any active blinker for that drive (the blinker self-exits on OSError
+    already, but cancelling is cleaner).
+
+    Linux-only in practice. On macOS / BSD the Monitor is a no-op that
+    idles forever.
+    """
+    monitor = HotplugMonitor()
+    if not monitor.enabled:
+        logger.info("hotplug loop: monitor disabled on this platform, idling")
+        # Still need to sleep-forever so the lifespan cancellation works;
+        # the monitor's own events() does the same, so just call it.
+    try:
+        async for event in monitor.events():
+            if event.kind == EventKind.DRIVE_ADDED:
+                await _handle_drive_added(state, orch, event)
+            elif event.kind == EventKind.DRIVE_REMOVED:
+                _handle_drive_removed(state, orch, event)
+    except asyncio.CancelledError:
+        monitor.stop()
+        raise
+
+
+async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> None:
+    """Re-discover the inserted drive so we have a fresh device_path,
+    update the DB, then restore the blinker."""
+    # Re-walk lsblk — hotplug events can arrive before the block device
+    # is fully settled; a short retry burst handles races cleanly.
+    present = []
+    for _attempt in range(5):
+        try:
+            present = drive_mod.discover()
+        except Exception:  # noqa: BLE001
+            present = []
+        if any(d.serial == event.serial for d in present) or any(
+            d.device_path == event.device_node for d in present
+        ):
+            break
+        await asyncio.sleep(0.4)
+    match = None
+    for d in present:
+        if event.serial and d.serial == event.serial:
+            match = d
+            break
+        if event.device_node and d.device_path == event.device_node:
+            match = d
+            break
+    if match is None:
+        logger.debug("hotplug add: no matching drive for event %s", event)
+        return
+    # Upsert device_path in the DB so restore_blinker_for_serial picks
+    # up the right path if the kernel reassigned the letter.
+    with state.session_factory() as session:
+        existing = session.get(m.Drive, match.serial)
+        if existing is not None and existing.device_path != match.device_path:
+            existing.device_path = match.device_path
+            session.commit()
+    orch.restore_blinker_for_serial(match.serial)
+
+
+def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
+    """Cancel any active blinker for the removed drive. The blinker's
+    own read loop also exits on OSError, but explicit cancel prevents a
+    brief window where it's still holding device_path references."""
+    # The udev REMOVE event doesn't always carry the serial (device is
+    # already gone). Fall back to cancelling by device_node match — walk
+    # state and kill blinkers whose serial's drive.device_path matched.
+    target_serial = event.serial
+    if not target_serial and event.device_node:
+        with state.session_factory() as session:
+            drive = (
+                session.query(m.Drive)
+                .filter_by(device_path=event.device_node)
+                .first()
+            )
+            if drive is not None:
+                target_serial = drive.serial
+    if target_serial:
+        orch._cancel_blinker(target_serial)  # type: ignore[attr-defined]
 
 
 async def _poll_io_rates(state: DaemonState) -> None:
@@ -88,6 +202,16 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     async def lifespan(_: FastAPI):
         state.orchestrator = orch  # type: ignore[attr-defined]
         io_task = asyncio.create_task(_poll_io_rates(state))
+        # One-shot: for drives already present at startup, upsert them into
+        # the DB and restore their post-run blinker based on last grade.
+        # Covers the "daemon restarted while a previously-tested drive was
+        # sitting in a bay" case — without this, restart would silence the
+        # LED pattern until the next batch.
+        try:
+            _restore_blinkers_on_startup(state, orch)
+        except Exception:  # noqa: BLE001
+            logger.exception("startup blinker restore failed (non-fatal)")
+        hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s)",
             settings.daemon.host,
@@ -95,11 +219,12 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             settings.dev_mode,
         )
         yield
-        io_task.cancel()
-        try:
-            await io_task
-        except asyncio.CancelledError:
-            pass
+        for task in (io_task, hotplug_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         logger.info("driveforge-daemon shutting down")
 
     from driveforge.version import __version__ as DRIVEFORGE_VERSION
