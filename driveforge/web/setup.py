@@ -24,8 +24,7 @@ from fastapi.templating import Jinja2Templates
 
 from driveforge import config as cfg
 from driveforge.core import drive as drive_mod
-from driveforge.core import enclosures
-from driveforge.core.process import run
+from driveforge.core import telemetry
 from driveforge.daemon.state import get_state  # noqa: F401 (used via ctx)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -61,11 +60,6 @@ def _network_snapshot() -> dict:
     return {"hostname": hostname, "ip": ip, "dhcp": dhcp}
 
 
-def _ipmi_available() -> bool:
-    result = run(["ipmitool", "mc", "info"])
-    return result.ok
-
-
 @router.get("", response_class=HTMLResponse)
 def setup_root(request: Request) -> RedirectResponse:
     return RedirectResponse(url="/setup/1", status_code=303)
@@ -83,9 +77,19 @@ def setup_step(request: Request, step: int) -> HTMLResponse:
     if step == 2:
         ctx["drives"] = drive_mod.discover()
         ctx["network"] = _network_snapshot()
-        ctx["ipmi_ok"] = _ipmi_available()
-        plan = state.refresh_bay_plan()
-        ctx["plan"] = plan
+        # Fresh capability probe on each wizard view so the operator sees
+        # what the daemon can actually do right now (e.g. just fixed
+        # /dev/ipmi0 perms, or just plugged in a drive to populate LED slot
+        # mapping). Also refreshes bay_plan as a side effect.
+        state.refresh_bay_plan()
+        ctx["capabilities"] = state.capabilities
+        # Surface a sample chassis temperature reading when available, so
+        # the wizard confirms not just "BMC reachable" but "real data
+        # coming back." Skipped silently when the capability is False.
+        if state.capabilities.chassis_temperature:
+            ctx["chassis_temps"] = telemetry.read_chassis_temperatures()
+        else:
+            ctx["chassis_temps"] = {}
     elif step == 3:
         ctx["printer_models"] = [
             "QL-800",

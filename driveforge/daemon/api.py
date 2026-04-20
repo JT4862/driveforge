@@ -56,7 +56,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "dev_mode": state.settings.dev_mode,
-        "bay_assignments": state.bay_assignments,
+        "active_serials": sorted(state.active_phase.keys()),
     }
 
 

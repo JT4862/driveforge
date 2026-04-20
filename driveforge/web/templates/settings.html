@@ -13,6 +13,52 @@
 </div>
 {% endif %}
 
+<section class="panel">
+  <div class="panel-head">
+    <h2>Hardware</h2>
+  </div>
+  <dl class="kv">
+    <dt>Amber fault LED</dt>
+    <dd>
+      {% if capabilities.led_control %}
+        <span class="pill" style="background: rgba(63,185,80,0.2); color: var(--ok);">available</span>
+        <span class="muted small">SES backplane detected &mdash; grade=fail will light an amber LED.</span>
+      {% else %}
+        <span class="pill">not available</span>
+        <span class="muted small">No SES target detected. Dashboard grading still works; physical LED is a no-op.</span>
+      {% endif %}
+    </dd>
+    <dt>Chassis power (BMC)</dt>
+    <dd>
+      {% if capabilities.chassis_power %}
+        <span class="pill" style="background: rgba(63,185,80,0.2); color: var(--ok);">available</span>
+        {% if chassis_power %}
+          <span class="muted small">&mdash; currently <strong>{{ "%.0f"|format(chassis_power) }} W</strong></span>
+        {% endif %}
+      {% else %}
+        <span class="pill">not available</span>
+        <span class="muted small">No BMC reachable, or daemon lacks <code>/dev/ipmi0</code> access.</span>
+      {% endif %}
+    </dd>
+    <dt>Chassis temperature (BMC)</dt>
+    <dd>
+      {% if capabilities.chassis_temperature %}
+        <span class="pill" style="background: rgba(63,185,80,0.2); color: var(--ok);">available</span>
+        {% if chassis_temps %}
+          <span class="muted small">&mdash;
+            {% if "Inlet Temp" in chassis_temps %}inlet {{ chassis_temps["Inlet Temp"] }}&deg;C{% endif %}
+            {% if "Inlet Temp" in chassis_temps and "Exhaust Temp" in chassis_temps %}, {% endif %}
+            {% if "Exhaust Temp" in chassis_temps %}exhaust {{ chassis_temps["Exhaust Temp"] }}&deg;C{% endif %}
+          </span>
+        {% endif %}
+      {% else %}
+        <span class="pill">not available</span>
+        <span class="muted small">BMC SDR returned no temperature sensors.</span>
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
 <form class="panel" method="post" action="/settings/grading">
   <div class="panel-head">
     <h2>Grading thresholds</h2>
@@ -180,12 +226,8 @@
     <span>Bind port</span>
     <input type="number" name="port" value="{{ settings.daemon.port }}" min="1" max="65535">
   </label>
-  <label class="field">
-    <span>Virtual bay count (only used when no SES enclosure is detected)</span>
-    <input type="number" name="virtual_bays" value="{{ settings.daemon.virtual_bays }}" min="0" max="64">
-  </label>
   <p class="muted small">
-    Host or port changes require a daemon restart. Virtual bays apply immediately but only affect hosts without a real SAS enclosure (consumer PCs, NVMe-only).
+    Host or port changes require a daemon restart.
   </p>
   <div class="form-actions">
     <button type="submit" class="btn primary">Save daemon</button>

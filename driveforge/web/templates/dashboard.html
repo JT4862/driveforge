@@ -18,11 +18,4 @@
 <section id="bay-grid" hx-get="/_partials/bays" hx-trigger="every 3s" hx-swap="innerHTML">
   {% include "_bays.html" %}
 </section>
-
-{% if view.total_bays == 0 %}
-<p class="muted">
-  No drive bays detected. Configure a virtual-bay fallback in
-  <a href="/settings">Settings &rarr; Daemon</a>.
-</p>
-{% endif %}
 {% endblock %}

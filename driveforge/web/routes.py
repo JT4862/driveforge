@@ -14,7 +14,6 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import joinedload
 
 from driveforge.core import drive as drive_mod
-from driveforge.core import enclosures
 from driveforge.daemon.state import get_state
 from driveforge.db import models as m
 
@@ -90,183 +89,116 @@ def _eta_seconds(phase: str, drive_row) -> int | None:
     return None
 
 
-def _bay_card(
-    state,
-    session,
-    bay_key: str,
-    display_bay: int,
-    *,
-    installed_drive: "drive_mod.Drive | None" = None,
-) -> dict:
-    """Render a single bay card.
-
-    Three visual states:
-      - empty: slot has no drive installed
-      - installed (idle): drive is physically in the slot but no test running
-      - active: drive is under test (assigned in bay_assignments)
-    """
-    serial = state.bay_assignments.get(bay_key)
-    if serial:
-        drive = session.get(m.Drive, serial)
-        if drive is not None:
-            phase = state.active_phase.get(serial, "queued")
-            # In-flight run: grab started_at for elapsed/eta
-            run = (
-                session.query(m.TestRun)
-                .filter_by(drive_serial=serial, completed_at=None)
-                .order_by(m.TestRun.started_at.desc())
-                .first()
-            )
-            elapsed_sec = 0
-            if run and run.started_at:
-                delta = datetime.now(UTC) - (
-                    run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=UTC)
-                )
-                elapsed_sec = int(delta.total_seconds())
-            eta = _eta_seconds(phase, drive)
-            return {
-                "bay": display_bay,
-                "state": "active",
-                "key": bay_key,
-                "serial": serial,
-                "model": drive.model,
-                "manufacturer": drive.manufacturer,
-                "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
-                "phase": phase,
-                "phase_class": _PHASE_CLASS.get(phase, "info"),
-                "percent": state.active_percent.get(serial, 0.0),
-                "sublabel": state.active_sublabel.get(serial),
-                "io_rate": state.active_io_rate.get(serial),
-                "elapsed_label": _format_duration(elapsed_sec),
-                "eta_label": f"~{_format_duration(eta)}" if eta else None,
-            }
-    if installed_drive is not None:
-        # Look up the most recent completed test for this drive so the card
-        # shows "Grade B · tested 2026-04-19" or "✗ Failed" at a glance.
-        last_run = (
-            session.query(m.TestRun)
-            .filter_by(drive_serial=installed_drive.serial)
-            .filter(m.TestRun.completed_at.isnot(None))
-            .order_by(m.TestRun.completed_at.desc())
-            .first()
+def _active_card(state, session, serial: str) -> dict | None:
+    """Render an Active-section card for a drive currently in the pipeline."""
+    drive = session.get(m.Drive, serial)
+    if drive is None:
+        return None
+    phase = state.active_phase.get(serial, "queued")
+    run = (
+        session.query(m.TestRun)
+        .filter_by(drive_serial=serial, completed_at=None)
+        .order_by(m.TestRun.started_at.desc())
+        .first()
+    )
+    elapsed_sec = 0
+    if run and run.started_at:
+        delta = datetime.now(UTC) - (
+            run.started_at if run.started_at.tzinfo else run.started_at.replace(tzinfo=UTC)
         )
-        last_grade = last_run.grade if last_run else None
-        last_tested = last_run.completed_at if last_run else None
-        last_phase = last_run.phase if last_run else None
-        last_quick = bool(last_run.quick_mode) if last_run else False
-        last_error = None
-        if last_run and last_run.error_message:
-            msg = last_run.error_message.strip().split("\n", 1)[0]
-            last_error = msg[:80] + ("…" if len(msg) > 80 else "")
-        # Prefer the live discover-time detection — it always reflects the
-        # newest detection rules (e.g. OEM firmware patterns added after the
-        # last enrollment). Falls back to the DB row when discover couldn't
-        # detect anything. The DB version still gets refreshed every time the
-        # drive is enrolled in a new batch.
-        db_drive = session.get(m.Drive, installed_drive.serial)
-        mfr = installed_drive.manufacturer or (db_drive.manufacturer if db_drive else None)
-        return {
-            "bay": display_bay,
-            "state": "installed",
-            "key": bay_key,
-            "serial": installed_drive.serial,
-            "model": installed_drive.model,
-            "manufacturer": mfr,
-            "capacity_tb": installed_drive.capacity_tb,
-            "last_grade": last_grade,
-            "last_tested": last_tested,
-            "last_phase": last_phase,
-            "last_quick": last_quick,
-            "last_error": last_error,
-        }
-    return {"bay": display_bay, "state": "empty", "key": bay_key}
-
-
-def _bay_view(state, session) -> dict:
-    """Compose the grouped bay view from enclosure plan + orchestrator state."""
-    plan = state.bay_plan
-    # One-shot lsblk to get serials for every device currently present.
-    # Used to show "installed but idle" bays.
-    discovered = {d.device_path: d for d in drive_mod.discover()}
-
-    enclosure_groups = []
-    for enc_idx, enc in enumerate(plan.enclosures):
-        bays = []
-        for slot in enc.slots:
-            key = f"e{enc_idx}:s{slot.slot_number}"
-            installed = discovered.get(slot.device) if slot.device else None
-            card = _bay_card(state, session, key, slot.slot_number + 1, installed_drive=installed)
-            card["slot_number"] = slot.slot_number
-            card["device"] = slot.device
-            bays.append(card)
-        enclosure_groups.append(
-            {
-                "label": enc.label,
-                "vendor": enc.vendor,
-                "sg_device": enc.sg_device,
-                "slot_count": enc.slot_count,
-                "populated_count": enc.populated_count,
-                "bays": bays,
-            }
-        )
-    # Partition discovered drives: bay-eligible (SATA / SAS) go into virtual
-    # bays; NVMe / USB go to the unbayed section (they're never in a front
-    # bay on this hardware class).
-    in_slot_devices = {slot.device for enc in plan.enclosures for slot in enc.slots if slot.device}
-    bay_eligible: list = []
-    unbayed_eligible: list = []
-    for d in discovered.values():
-        if d.device_path in in_slot_devices:
-            continue
-        if d.transport in (drive_mod.Transport.NVME, drive_mod.Transport.USB):
-            unbayed_eligible.append(d)
-        else:
-            bay_eligible.append(d)
-    # Stable ordering so drives don't jump bays across refreshes
-    bay_eligible.sort(key=lambda d: d.serial)
-
-    virtual_bays = []
-    if not plan.has_real_enclosures:
-        # Build a stable serial → virtual-bay mapping for idle drives so the
-        # dashboard shows them parked in bays instead of bucketed as unbayed.
-        idle_serials_in_order = [
-            d.serial for d in bay_eligible
-            if d.serial not in state.bay_assignments.values()
-        ]
-        virtual_map: dict[int, "drive_mod.Drive"] = {}
-        slot_idx = 0
-        for d in bay_eligible:
-            if d.serial in state.bay_assignments.values():
-                continue  # active drive — bay_assignments already tracks it
-            while slot_idx < plan.virtual_bay_count and f"v{slot_idx}" in state.bay_assignments:
-                slot_idx += 1
-            if slot_idx >= plan.virtual_bay_count:
-                break
-            virtual_map[slot_idx] = d
-            slot_idx += 1
-        for i in range(plan.virtual_bay_count):
-            key = f"v{i}"
-            installed = virtual_map.get(i)
-            virtual_bays.append(_bay_card(state, session, key, i + 1, installed_drive=installed))
-        # Any bay_eligible drives that didn't fit fall through to unbayed
-        assigned_serials = {d.serial for d in virtual_map.values()}
-        overflow = [d for d in bay_eligible if d.serial not in assigned_serials
-                    and d.serial not in state.bay_assignments.values()]
-    else:
-        overflow = []
-
-    # Unbayed section: NVMe / USB drives + overflow from virtual bays
-    unbayed: list[dict] = []
-    for d in unbayed_eligible + overflow:
-        key = enclosures.unbayed_key(d.serial)
-        card = _bay_card(state, session, key, 0, installed_drive=d)
-        unbayed.append(card)
+        elapsed_sec = int(delta.total_seconds())
+    eta = _eta_seconds(phase, drive)
     return {
-        "enclosures": enclosure_groups,
-        "virtual_bays": virtual_bays,
-        "unbayed": unbayed,
-        "has_real_enclosures": plan.has_real_enclosures,
-        "total_bays": plan.total_bays,
+        "state": "active",
+        "key": serial,
+        "serial": serial,
+        "model": drive.model,
+        "manufacturer": drive.manufacturer,
+        "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
+        "phase": phase,
+        "phase_class": _PHASE_CLASS.get(phase, "info"),
+        "percent": state.active_percent.get(serial, 0.0),
+        "sublabel": state.active_sublabel.get(serial),
+        "io_rate": state.active_io_rate.get(serial),
+        "elapsed_label": _format_duration(elapsed_sec),
+        "eta_label": f"~{_format_duration(eta)}" if eta else None,
+    }
+
+
+def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
+    """Render an Installed-section card for a drive that is present but
+    not currently in the test pipeline. Shows last-grade info pulled from
+    the most recent completed TestRun, when there is one.
+    """
+    last_run = (
+        session.query(m.TestRun)
+        .filter_by(drive_serial=drive.serial)
+        .filter(m.TestRun.completed_at.isnot(None))
+        .order_by(m.TestRun.completed_at.desc())
+        .first()
+    )
+    last_grade = last_run.grade if last_run else None
+    last_tested = last_run.completed_at if last_run else None
+    last_phase = last_run.phase if last_run else None
+    last_quick = bool(last_run.quick_mode) if last_run else False
+    last_error = None
+    if last_run and last_run.error_message:
+        msg = last_run.error_message.strip().split("\n", 1)[0]
+        last_error = msg[:80] + ("…" if len(msg) > 80 else "")
+    # Prefer live discover-time manufacturer detection (catches newly-added
+    # OEM rules); fall back to the DB row written at last enrollment.
+    db_drive = session.get(m.Drive, drive.serial)
+    mfr = drive.manufacturer or (db_drive.manufacturer if db_drive else None)
+    return {
+        "state": "installed",
+        "key": drive.serial,
+        "serial": drive.serial,
+        "model": drive.model,
+        "manufacturer": mfr,
+        "capacity_tb": drive.capacity_tb,
+        "transport": drive.transport.value,
+        "last_grade": last_grade,
+        "last_tested": last_tested,
+        "last_phase": last_phase,
+        "last_quick": last_quick,
+        "last_error": last_error,
+    }
+
+
+def _drive_view(state, session) -> dict:
+    """Compose the drive-centric dashboard view.
+
+    Returns two flat lists:
+      - active: one card per drive currently in the test pipeline (serial
+        is in state.active_phase). Ordered by insertion into the pipeline.
+      - installed: one card per drive currently present on the host that
+        is NOT active. Ordered by serial.
+
+    No enclosures, no slot groupings, no empty placeholders. Drives that
+    are pulled disappear from the view automatically on the next refresh.
+    """
+    # One-shot lsblk to get the currently-present drives.
+    discovered = {d.serial: d for d in drive_mod.discover()}
+
+    # Active section: preserve orchestrator insertion order (dict iteration).
+    active_cards: list[dict] = []
+    for serial in state.active_phase.keys():
+        card = _active_card(state, session, serial)
+        if card is not None:
+            active_cards.append(card)
+    active_serials = {c["serial"] for c in active_cards}
+
+    # Installed section: every currently-present drive that isn't active.
+    installed_cards: list[dict] = []
+    for serial in sorted(discovered.keys()):
+        if serial in active_serials:
+            continue
+        installed_cards.append(_installed_card(state, session, discovered[serial]))
+
+    return {
+        "active": active_cards,
+        "installed": installed_cards,
+        "total_present": len(discovered),
     }
 
 
@@ -274,7 +206,7 @@ def _bay_view(state, session) -> dict:
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
     with state.session_factory() as session:
-        view = _bay_view(state, session)
+        view = _drive_view(state, session)
         batch_count = session.query(m.Batch).count()
         drive_count = session.query(m.Drive).count()
     return templates.TemplateResponse(
@@ -289,7 +221,7 @@ def bays_partial(request: Request) -> HTMLResponse:
     """HTMX polling endpoint for live dashboard refresh."""
     state = get_state()
     with state.session_factory() as session:
-        view = _bay_view(state, session)
+        view = _drive_view(state, session)
     return templates.TemplateResponse(request, "_bays.html", {"view": view})
 
 
@@ -716,7 +648,13 @@ def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
+    from driveforge.core import telemetry
     from driveforge.core import updates as updates_mod
+
+    # Live-sample chassis telemetry for the Hardware panel. Skipped silently
+    # when the underlying capability is False (no BMC / no /dev/ipmi0 perms).
+    chassis_power = telemetry.read_chassis_power() if state.capabilities.chassis_power else None
+    chassis_temps = telemetry.read_chassis_temperatures() if state.capabilities.chassis_temperature else {}
 
     return templates.TemplateResponse(
         request,
@@ -728,6 +666,9 @@ def settings_page(request: Request) -> HTMLResponse:
             "update_info": updates_mod.cached(),
             "update_command": updates_mod.update_command(),
             "current_version": updates_mod.CURRENT_VERSION,
+            "capabilities": state.capabilities,
+            "chassis_power": chassis_power,
+            "chassis_temps": chassis_temps,
         },
     )
 
@@ -812,12 +753,6 @@ async def save_daemon(request: Request) -> RedirectResponse:
     port_v = form.get("port")
     if port_v:
         d.port = int(port_v)
-    virtual_v = form.get("virtual_bays")
-    if virtual_v is not None and str(virtual_v).strip() != "":
-        d.virtual_bays = max(0, int(virtual_v))
-        # Re-plan so the dashboard picks up the new count immediately (only
-        # effective when no real enclosures are present)
-        state.refresh_bay_plan()
     restart_needed = old_host != d.host or old_port != d.port
     await _save_settings_or_ignore(request)
     suffix = "&restart=1" if restart_needed else ""
