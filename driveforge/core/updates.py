@@ -167,5 +167,17 @@ def update_command() -> str:
     (see the discussion in the chat history; daemon-self-update needs a
     polkit-gated systemd unit + batch refusal + reconnect logic, deferred
     as a follow-on feature).
+
+    Probes common install locations so the snippet points at the right
+    source tree. ISO-installed hosts have /opt/driveforge-src (cloned
+    by preseed late_command); hosts installed via the README "Path B"
+    clone-and-run flow typically have ~driveforge/driveforge-src.
+    Falls back to the latter when neither exists (user is mid-install
+    or the daemon was installed from elsewhere).
     """
-    return "cd /home/driveforge/driveforge-src && git pull && sudo ./scripts/install.sh"
+    import os
+
+    for candidate in ("/opt/driveforge-src", "/home/driveforge/driveforge-src"):
+        if os.path.isdir(os.path.join(candidate, ".git")):
+            return f"cd {candidate} && sudo git pull && sudo ./scripts/install.sh"
+    return "cd /home/driveforge/driveforge-src && sudo git pull && sudo ./scripts/install.sh"
