@@ -84,6 +84,22 @@ if [[ $DEB_COUNT -lt 10 ]]; then
   exit 1
 fi
 
+# 2b. Generate an apt repo index for the downloaded .debs so the target
+# can install via `apt-get install` (which does proper dep resolution,
+# including virtual packages like `python3:any`) instead of iterative
+# `dpkg -i` passes that can't converge on deep python dep chains.
+# apt-ftparchive is in apt-utils (already installed in the build container).
+echo "==> Generating apt repo index (Packages / Packages.gz)"
+(
+  cd "$WORK/debs"
+  # Packages file lists every .deb in this dir with its metadata so apt
+  # can resolve dependencies properly against our closed set.
+  apt-ftparchive packages . > Packages
+  # Compressed variant — apt prefers this when both exist.
+  gzip -9 --keep --force Packages
+)
+echo "    index: $(wc -l < "$WORK/debs/Packages") metadata lines ($(stat -c%s "$WORK/debs/Packages.gz") bytes compressed)"
+
 # 3. Python wheels. `pip wheel` is the right tool for an offline bundle:
 #    a) Builds the DriveForge package itself into a .whl using its
 #       build backend (hatchling). hatchling is only needed AT build

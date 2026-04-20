@@ -44,35 +44,38 @@ APT_PACKAGES=(
 )
 if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/debs" ]]; then
   # Air-gapped install — debs were pre-downloaded by build-offline-bundle.sh
-  # on an internet-connected machine.
-  log "Using offline .deb cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
-  # Iterate dpkg -i up to 3 passes — a single pass installs in shell-glob
-  # alphabetical order, which can fail when a package's deps haven't been
-  # processed yet (e.g. `python3` needs `python3-minimal` and `libpython3.11-*`
-  # first). Subsequent passes pick up the ones that failed the previous time
-  # now that their deps are satisfied. Three passes cover any normal dep
-  # chain depth; we log the outcome of each so the install log actually
-  # shows what happened instead of swallowing errors.
-  for pass in 1 2 3; do
-    log "dpkg -i pass $pass..."
-    if dpkg -i "${DRIVEFORGE_OFFLINE_BUNDLE}"/debs/*.deb; then
-      ok "all .debs installed on pass $pass"
-      break
-    fi
-    if [[ $pass -eq 3 ]]; then
-      warn "dpkg -i still reporting errors after 3 passes — check the log above"
-    fi
-  done
-  # Fix-broken pass to resolve anything still hanging. Use cached debs only.
-  # --no-remove is critical: without it, apt's broken-state resolver will
-  # silently REMOVE packages (including the kernel!) if it can't otherwise
-  # satisfy dependencies from the cached .debs. ISO #12 and #13 both hit
-  # exactly this: udev version skew in the bundle caused apt to "fix" the
-  # broken state by removing linux-image-amd64, initramfs-tools, and udev,
-  # leaving /boot/vmlinuz missing and the VM booting to a grub> prompt.
-  # Better to fail loud here than produce an unbootable install.
-  apt-get install -y --no-download --fix-broken --no-remove || \
-    die "apt-get --fix-broken failed — the offline bundle has a dependency conflict that apt refuses to resolve without removing packages. Rebuild the bundle with matching versions."
+  # into $DRIVEFORGE_OFFLINE_BUNDLE/debs with a Packages index alongside.
+  #
+  # Strategy: register the debs dir as a local apt repo and let apt install
+  # handle dep resolution. This is the Debian-approved pattern for offline
+  # bulk installs and handles virtual packages (e.g. `python3:any`, which
+  # `python3-distutils` depends on) that iterative `dpkg -i` can't resolve
+  # across passes. Hit this with ISO #13/#14: dpkg -i couldn't configure
+  # python3, which cascaded into 8+ python3-* packages broken, which led
+  # apt's fix-broken resolver to want to nuke the kernel. Using apt-install
+  # from the start avoids the broken-state trap entirely.
+  log "Setting up local apt repo at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
+  cat > /etc/apt/sources.list.d/driveforge-offline.list <<EOF
+deb [trusted=yes] file://${DRIVEFORGE_OFFLINE_BUNDLE}/debs ./
+EOF
+  # Update apt's index from ONLY our local repo — override the default
+  # sources.list and sourceparts dir so apt doesn't try to reach Debian
+  # mirrors (target is air-gapped).
+  apt-get -o Dir::Etc::sourceparts=- \
+          -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/driveforge-offline.list \
+          -o APT::Get::List-Cleanup=0 \
+          update 2>&1 | tail -3
+  # Now install with full apt dep resolution. --no-download ensures we
+  # never accidentally try to fetch from the real internet if the local
+  # repo is incomplete (we'd rather fail loud with "unable to fetch X"
+  # than silently succeed against a mirror).
+  apt-get install -y --no-install-recommends --no-download \
+    "${APT_PACKAGES[@]}"
+  # Clean up: remove the local repo source + refresh apt's state so
+  # future package operations on this system aren't confused by a
+  # file:// URL that may or may not still be there.
+  rm -f /etc/apt/sources.list.d/driveforge-offline.list
+  apt-get -o Acquire::Check-Valid-Until=false update >/dev/null 2>&1 || true
 else
   apt-get update -qq
   apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" >/dev/null
@@ -167,11 +170,18 @@ ok "defaults written to /etc/driveforge/"
 log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/
+install -m 0644 "$(dirname "$0")/../systemd/driveforge-issue.service" /etc/systemd/system/
+install -m 0755 "$(dirname "$0")/../scripts/driveforge-update-issue.sh" /usr/local/sbin/driveforge-update-issue
 systemctl daemon-reload
 # Avahi usually autostarts on Debian but enable explicitly so
 # driveforge.local is reachable on first boot.
 systemctl enable --now avahi-daemon.service >/dev/null 2>&1 || true
 systemctl enable driveforge-daemon.service
+# Refresh /etc/issue on every boot with the current IP + dashboard URL so
+# the TTY login banner shows where to point a browser (Proxmox-style).
+systemctl enable driveforge-issue.service
+# Run it once now so the banner is right on first login BEFORE a reboot.
+/usr/local/sbin/driveforge-update-issue || true
 # Restart (not just start) so re-running install.sh after a code update
 # picks up the new package instead of keeping the old daemon in memory.
 systemctl restart driveforge-daemon.service
