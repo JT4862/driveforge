@@ -74,6 +74,24 @@
         {%- if card.io_rate.read_mbps >= 0.1 %}<span class="io-read">{{ "%.0f"|format(card.io_rate.read_mbps) }} MB/s read</span>{% endif -%}
       </div>
       {% endif %}
+      {#- 30-second throughput sparkline: one polyline per card,
+         normalized to the window's peak so the shape stays visible
+         regardless of absolute throughput. Only rendered when the
+         peak in the last 30 s is >= 1 MB/s (idle phases just draw a
+         flat line, not useful). -#}
+      {% if card.spark_points %}
+      <svg class="io-spark" viewBox="0 0 100 20" preserveAspectRatio="none"
+           title="30-second throughput trend (peak {{ '%.0f'|format(card.spark_peak) }} MB/s)">
+        {%- set n = card.spark_points|length -%}
+        {%- set peak = card.spark_peak if card.spark_peak > 0 else 1.0 -%}
+        <polyline fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"
+                  points="
+          {%- for v in card.spark_points -%}
+            {{ (loop.index0 / (n - 1) * 100) if n > 1 else 50 }},{{ 20 - (v / peak * 18) }}
+            {%- if not loop.last %} {% endif -%}
+          {%- endfor -%}" />
+      </svg>
+      {% endif %}
       <div class="progress">
         <div class="bar" style="width: {{ card.percent }}%"></div>
       </div>

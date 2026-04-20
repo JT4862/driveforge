@@ -149,6 +149,8 @@ async def _poll_io_rates(state: DaemonState) -> None:
     still runs, it's just a no-op.
     """
     tracker = diskstats.IoRateTracker()
+    # 10 samples at 3-second polling = a 30-second sparkline window.
+    HISTORY_MAX = 10
     while True:
         try:
             rates = tracker.poll()
@@ -171,11 +173,25 @@ async def _poll_io_rates(state: DaemonState) -> None:
                         "read_mbps": round(rate.read_mbps, 1),
                         "write_mbps": round(rate.write_mbps, 1),
                     }
+                    # Append to rolling history for the sparkline. Store
+                    # total throughput (read + write) as a single series so
+                    # the sparkline is one polyline rather than two.
+                    history = state.active_io_history.setdefault(serial, [])
+                    history.append({
+                        "read": round(rate.read_mbps, 1),
+                        "write": round(rate.write_mbps, 1),
+                    })
+                    if len(history) > HISTORY_MAX:
+                        del history[: len(history) - HISTORY_MAX]
                 # Replace wholesale so serials that just left active_phase
                 # drop out of the display instead of showing stale rates.
                 state.active_io_rate = fresh
+                # Trim history for serials no longer active.
+                for stale in list(state.active_io_history.keys() - active):
+                    state.active_io_history.pop(stale, None)
             elif not active:
                 state.active_io_rate.clear()
+                state.active_io_history.clear()
         except Exception:  # noqa: BLE001
             # Never let a transient error kill the poller — the dashboard
             # losing a rate display is fine; a crashed background task is not.

@@ -42,6 +42,12 @@ class DaemonState:
     # renderer. Unit: MB/s (decimal megabytes). Cleared when a drive leaves
     # active_phase.
     active_io_rate: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Rolling history of recent I/O rates per drive — last 10 samples at
+    # 3-second intervals = 30 s window. Used by the dashboard to render an
+    # SVG sparkline during high-throughput phases (badblocks) so operators
+    # can spot a stalling drive at a glance. Each entry: {"read": MB/s,
+    # "write": MB/s}. Capped to len=10; older samples drop off the end.
+    active_io_history: dict[str, list[dict[str, float]]] = field(default_factory=dict)
     # Serial → kernel device basename ("sda", "nvme0n1") for drives currently
     # in active_phase. The DB doesn't persist device_path (kernel letters
     # drift), so the I/O rate poller needs this to map its diskstats basename

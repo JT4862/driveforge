@@ -196,6 +196,22 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 
 /* Drive age label on installed cards (e.g. "5.2y" from last recorded POH). */
 .drive-age { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Throughput sparkline — 30-second rolling window, normalized to peak.
+   Uses currentColor so each phase-tinted card pulls the line into its
+   own palette (burn=purple, long=cyan, info=blue). Height matches
+   progress bar for visual symmetry. */
+.bay-card .io-spark {
+  width: 100%;
+  height: 18px;
+  display: block;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+.bay-card.active.phase-burn .io-spark { color: #a371f7; }
+.bay-card.active.phase-long .io-spark { color: #39c5cf; }
+.bay-card.active.phase-info .io-spark { color: var(--accent); }
+.bay-card.active.phase-erase .io-spark { color: var(--warn); }
 .percent { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
 .empty-msg { font-size: 14px; color: var(--muted); }
 .empty-hint { font-size: 11px; color: var(--muted); opacity: 0.7; }

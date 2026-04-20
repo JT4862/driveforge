@@ -128,6 +128,19 @@ def _active_card(state, session, serial: str) -> dict | None:
         elapsed_sec = int(delta.total_seconds())
     eta = _eta_seconds(phase, drive)
     drive_temp = state.active_drive_temp.get(serial)
+    # Render a sparkline of recent total throughput during high-I/O phases.
+    # Only show when there's meaningful flow (peak >= 1 MB/s in the window)
+    # — idle phases (secure_erase, smart tests) would just draw a flat line
+    # and add noise.
+    history = state.active_io_history.get(serial, [])
+    spark_points: list[float] | None = None
+    spark_peak: float | None = None
+    if history:
+        totals = [(h["read"] + h["write"]) for h in history]
+        peak = max(totals)
+        if peak >= 1.0:
+            spark_points = totals
+            spark_peak = peak
     return {
         "state": "active",
         "key": serial,
@@ -140,6 +153,8 @@ def _active_card(state, session, serial: str) -> dict | None:
         "phase_icon": _PHASE_ICONS.get(phase, ""),
         "drive_temp_c": drive_temp,
         "drive_temp_band": _temp_band(drive_temp),
+        "spark_points": spark_points,
+        "spark_peak": spark_peak,
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),
