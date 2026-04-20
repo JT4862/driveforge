@@ -108,54 +108,91 @@ def _try_ledctl(action: str, device_path: str) -> bool:
 
 # -------------------- activity-LED patterns (always run) --------------- #
 
+def _sustained_read_burst(
+    device_path: str, offsets: list[int], size: int, duration_s: float
+) -> int:
+    """Issue back-to-back reads for duration_s seconds from a single fd.
+
+    Runs in a thread (via asyncio.to_thread). The single-fd + in-thread
+    loop eliminates per-read asyncio overhead — the drive's I/O queue
+    stays continuously filled, which is what keeps the activity LED
+    visibly lit on fast drives. On SSD, a 64 KB read completes in
+    ~100 µs; the multi-millisecond thread hop that Python does per
+    `asyncio.to_thread` call would otherwise dominate and make the
+    LED flash instead of staying solid.
+
+    Returns the number of reads done. Raises OSError if the device goes
+    away mid-burst (drive pulled) — caller treats that as "exit blinker."
+    """
+    import time as _time  # local, so macOS dev path without posix_fadvise still imports
+    fd = os.open(device_path, os.O_RDONLY)
+    count = 0
+    try:
+        end = _time.monotonic() + duration_s
+        n_offsets = len(offsets)
+        while _time.monotonic() < end:
+            offset = offsets[count % n_offsets]
+            os.pread(fd, size, offset)
+            try:
+                os.posix_fadvise(fd, offset, size, os.POSIX_FADV_DONTNEED)
+            except (AttributeError, OSError):
+                pass
+            count += 1
+    finally:
+        os.close(fd)
+    return count
+
+
+# How long each burst runs in the worker thread. Bounds cancellation
+# latency (cancel is honored at the next await boundary, i.e. once per
+# burst) and controls the yield cadence for other asyncio tasks.
+_BURST_DURATION_SEC = 0.5
+
+
 async def _pass_solid_cycle(device_path: str, idx_ref: list[int]) -> bool:
     """Drive the activity LED to a visually-solid ON state forever.
 
-    Back-to-back reads with no sleep between them. On HDD each 64 KB
-    read completes in ~25-30 ms; on SSD in ~0.1-1 ms. Either way the
-    stream of reads keeps the activity LED continuously lit. Returns
-    False if the drive is gone (OSError).
+    One sustained-read burst per cycle. The burst runs in a worker
+    thread (bypassing per-read asyncio overhead), keeping the drive's
+    I/O queue continuously filled so the activity LED stays lit.
 
-    One read per iteration so cancellation latency is bounded to ~30 ms
-    worst case — no long stretch where a cancel would be ignored.
+    Returns False if the drive is gone (OSError).
     """
-    for _ in range(40):  # ~1 s of reads per cycle loop iteration
-        offset = _PROBE_OFFSETS[idx_ref[0] % len(_PROBE_OFFSETS)]
-        idx_ref[0] += 1
-        try:
-            await asyncio.to_thread(_physical_read, device_path, offset, _PROBE_SIZE)
-        except OSError as exc:
-            logger.info(
-                "blinker exiting for %s: %s (drive likely pulled)",
-                device_path, exc,
-            )
-            return False
+    try:
+        count = await asyncio.to_thread(
+            _sustained_read_burst, device_path, _PROBE_OFFSETS, _PROBE_SIZE, _BURST_DURATION_SEC
+        )
+        idx_ref[0] += count
+    except OSError as exc:
+        logger.info(
+            "blinker exiting for %s: %s (drive likely pulled)",
+            device_path, exc,
+        )
+        return False
     # Micro-yield so other asyncio tasks (dashboard polls, other blinkers)
-    # don't get starved. 0 gives the loop a chance to schedule; the LED
-    # doesn't visibly dim at this cadence.
+    # don't get starved between bursts.
     await asyncio.sleep(0)
     return True
 
 
 async def _lighthouse_cycle(device_path: str, idx_ref: list[int]) -> bool:
-    """1.5 s of continuous reads (LED solid-on) + 1.5 s dark.
+    """1.5 s sustained-read burst (LED solid-on) + 1.5 s dark.
 
-    Same read size as the pass pattern; the difference is the 1.5 s dark
-    gap that produces the distinctive ON-OFF lighthouse rhythm.
+    Same burst mechanism as the pass pattern, but with a clear 1.5 s
+    dark gap afterward — which produces the distinctive ON-OFF
+    lighthouse rhythm for failed drives.
     """
-    import time as _time  # local import to keep top-level imports minimal
-    deadline = _time.monotonic() + _FAIL_ON_DURATION_SEC
-    while _time.monotonic() < deadline:
-        offset = _PROBE_OFFSETS[idx_ref[0] % len(_PROBE_OFFSETS)]
-        idx_ref[0] += 1
-        try:
-            await asyncio.to_thread(_physical_read, device_path, offset, _PROBE_SIZE)
-        except OSError as exc:
-            logger.info(
-                "blinker exiting for %s: %s (drive likely pulled)",
-                device_path, exc,
-            )
-            return False
+    try:
+        count = await asyncio.to_thread(
+            _sustained_read_burst, device_path, _PROBE_OFFSETS, _PROBE_SIZE, _FAIL_ON_DURATION_SEC
+        )
+        idx_ref[0] += count
+    except OSError as exc:
+        logger.info(
+            "blinker exiting for %s: %s (drive likely pulled)",
+            device_path, exc,
+        )
+        return False
     await asyncio.sleep(_FAIL_OFF_DURATION_SEC)
     return True
 
