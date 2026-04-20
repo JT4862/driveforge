@@ -127,6 +127,7 @@ def _active_card(state, session, serial: str) -> dict | None:
         )
         elapsed_sec = int(delta.total_seconds())
     eta = _eta_seconds(phase, drive)
+    drive_temp = state.active_drive_temp.get(serial)
     return {
         "state": "active",
         "key": serial,
@@ -137,6 +138,8 @@ def _active_card(state, session, serial: str) -> dict | None:
         "phase": phase,
         "phase_class": _PHASE_CLASS.get(phase, "info"),
         "phase_icon": _PHASE_ICONS.get(phase, ""),
+        "drive_temp_c": drive_temp,
+        "drive_temp_band": _temp_band(drive_temp),
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),
@@ -161,6 +164,17 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     last_tested = last_run.completed_at if last_run else None
     last_phase = last_run.phase if last_run else None
     last_quick = bool(last_run.quick_mode) if last_run else False
+    last_poh = last_run.power_on_hours_at_test if last_run else None
+    # Compact age label: "45k POH" or "5.2y" when POH is meaningful.
+    # Hours → years at 24*365.25 = 8766 h/y. Skipped for drives we've
+    # never tested (no POH captured) or drives still showing near-zero.
+    drive_age_label: str | None = None
+    if last_poh and last_poh >= 100:
+        years = last_poh / 8766.0
+        if years >= 0.9:
+            drive_age_label = f"{years:.1f}y"
+        else:
+            drive_age_label = f"{int(last_poh / 1000)}k POH" if last_poh >= 1000 else f"{last_poh} POH"
     last_error = None
     if last_run and last_run.error_message:
         msg = last_run.error_message.strip().split("\n", 1)[0]
@@ -188,6 +202,7 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "last_phase": last_phase,
         "last_quick": last_quick,
         "last_error": last_error,
+        "drive_age_label": drive_age_label,
     }
 
 

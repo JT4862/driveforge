@@ -48,6 +48,12 @@ class DaemonState:
     # rows back to the active drives. Populated by the orchestrator when a
     # drive starts running, cleared when it leaves active_phase.
     device_basenames: dict[str, str] = field(default_factory=dict)
+    # Latest drive temperature (°C) for drives currently in the pipeline.
+    # Populated by `_record_telemetry()` in the orchestrator on each SMART
+    # snapshot (pre/post + periodic polls). Drives that never report a
+    # readable temperature are simply absent from this dict; callers
+    # should handle `.get(serial)` → None cleanly. Cleared on pipeline exit.
+    active_drive_temp: dict[str, int] = field(default_factory=dict)
     # Ring buffer of recent log lines per in-flight drive (last ~40 lines)
     active_log: dict[str, list[str]] = field(default_factory=dict)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.

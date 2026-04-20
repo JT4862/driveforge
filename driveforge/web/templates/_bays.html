@@ -16,7 +16,11 @@
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
-      <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB{% if card.transport %} &middot; {{ card.transport|upper }}{% endif %}</div>
+      <div class="drive-meta">
+        SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
+        {%- if card.transport %} &middot; {{ card.transport|upper }}{% endif -%}
+        {%- if card.drive_age_label %} &middot; <span class="drive-age" title="Power-on hours at last test">{{ card.drive_age_label }}</span>{% endif -%}
+      </div>
       {% if card.last_grade == "fail" %}
         <div class="phase last-test fail-text">✗ Failed {{ card.last_tested.strftime('%Y-%m-%d') }}{% if card.last_phase %} &middot; {{ card.last_phase|replace("_", " ") }}{% endif %}</div>
         {% if card.last_error %}
@@ -45,7 +49,13 @@
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
-      <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
+      <div class="drive-meta">
+        SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB
+        {%- if card.drive_temp_c is not none -%}
+          &middot; <span class="drive-temp temp-band-{{ card.drive_temp_band }}"
+                         title="Drive temperature from SMART">{{ card.drive_temp_c }}&deg;C</span>
+        {%- endif -%}
+      </div>
       <div class="phase">
         {%- if card.phase_icon %}<span class="phase-icon" aria-hidden="true">{{ card.phase_icon }}</span>{% endif -%}
         {{ card.phase|replace("_", " ") }}

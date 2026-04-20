@@ -184,6 +184,18 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 /* Phase icon inline with the phase label. Nudge the glyph up a hair so
    it sits on the same baseline as the phase text. */
 .phase-icon { display: inline-block; margin-right: 6px; font-size: 13px; line-height: 1; vertical-align: -1px; }
+
+/* Live drive temperature pip on active cards. Shares the chassis
+   temperature band colors so a hot drive visually matches a hot inlet. */
+.drive-temp { font-variant-numeric: tabular-nums; font-weight: 500; }
+.drive-temp.temp-band-cool   { color: #58a6ff; }
+.drive-temp.temp-band-normal { color: var(--ok); }
+.drive-temp.temp-band-warm   { color: var(--warn); }
+.drive-temp.temp-band-hot    { color: var(--fail); }
+.drive-temp.temp-band-unknown { color: var(--muted); }
+
+/* Drive age label on installed cards (e.g. "5.2y" from last recorded POH). */
+.drive-age { color: var(--muted); font-variant-numeric: tabular-nums; }
 .percent { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
 .empty-msg { font-size: 14px; color: var(--muted); }
 .empty-hint { font-size: 11px; color: var(--muted); opacity: 0.7; }

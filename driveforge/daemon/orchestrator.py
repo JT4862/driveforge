@@ -318,6 +318,7 @@ class Orchestrator:
         self.state.active_phase.clear()
         self.state.active_percent.clear()
         self.state.active_sublabel.clear()
+        self.state.active_drive_temp.clear()
         # Stop all post-pipeline blinkers too — abort implies "don't touch
         # anything on these devices anymore."
         for serial in list(self.state.done_blinkers):
@@ -386,6 +387,7 @@ class Orchestrator:
                 self.state.active_phase.pop(drive.serial, None)
                 self.state.active_percent.pop(drive.serial, None)
                 self.state.active_sublabel.pop(drive.serial, None)
+                self.state.active_drive_temp.pop(drive.serial, None)
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.
@@ -743,6 +745,10 @@ class Orchestrator:
         phase: str,
         drive_temp_c: int | None,
     ) -> None:
+        # Surface the live temp on the dashboard in addition to persisting it.
+        # Cleared when the drive leaves active_phase (in _run_drive's finally).
+        if drive_temp_c is not None:
+            self.state.active_drive_temp[drive_serial] = drive_temp_c
         chassis_w = telemetry.read_chassis_power()
         with self.state.session_factory() as session:
             session.add(
