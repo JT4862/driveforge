@@ -128,6 +128,42 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
         return
     orch.restore_blinker_for_drive(match)
 
+    # Auto-enroll — optional, operator opts in via the dashboard toggle.
+    # Priority-lower than recovery + blinker restore. Skipped silently when:
+    #   - auto_enroll_mode is "off" (default)
+    #   - drive is already running in this daemon
+    #   - drive has a completed TestRun within the last hour (don't restart
+    #     a drive that just passed on a momentary pull + re-insert)
+    mode = (state.settings.daemon.auto_enroll_mode or "off").lower()
+    if mode not in ("quick", "full"):
+        return
+    if match.serial in state.active_phase:
+        return
+    from datetime import UTC, datetime, timedelta
+    from driveforge.db import models as m
+    recent_cutoff = datetime.now(UTC) - timedelta(hours=1)
+    with state.session_factory() as session:
+        recent = (
+            session.query(m.TestRun)
+            .filter_by(drive_serial=match.serial)
+            .filter(m.TestRun.completed_at.isnot(None))
+            .filter(m.TestRun.completed_at >= recent_cutoff)
+            .first()
+        )
+    if recent is not None:
+        logger.info(
+            "hotplug add: drive %s has a run completed in the last hour; "
+            "skipping auto-enroll",
+            match.serial,
+        )
+        return
+    logger.info("hotplug add: auto-enrolling drive %s (%s mode)", match.serial, mode)
+    await orch.start_batch(
+        [match],
+        source=f"auto-enroll ({mode})",
+        quick=(mode == "quick"),
+    )
+
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
     """Cancel any active blinker for the removed drive + flag pull-interrupted

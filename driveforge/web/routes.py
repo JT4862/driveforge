@@ -330,8 +330,21 @@ def dashboard(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"view": view, "chassis": chassis},
+        {"view": view, "chassis": chassis, "settings": state.settings},
     )
+
+
+@router.post("/settings/auto-enroll")
+async def set_auto_enroll(request: Request) -> RedirectResponse:
+    """Toggle auto-enrollment mode from the dashboard segmented control."""
+    state = get_state()
+    form = await request.form()
+    mode = (form.get("mode") or "off").strip().lower()
+    if mode not in ("off", "quick", "full"):
+        mode = "off"
+    state.settings.daemon.auto_enroll_mode = mode
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @router.get("/_partials/bays", response_class=HTMLResponse)

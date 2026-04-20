@@ -29,6 +29,23 @@
   {% endif %}
   <div class="actions">
     <a class="btn primary" href="/batches/new">+ New Batch</a>
+    {#- Auto-enroll segmented toggle. Three mutually-exclusive modes; clicking
+        one POSTs immediately and redirects back. Meant for the unattended
+        rack workflow: operator watches LEDs, swaps drives as they pass/fail,
+        DriveForge handles everything between inserts. -#}
+    <form method="post" action="/settings/auto-enroll" class="auto-enroll-toggle"
+          title="Auto-start a pipeline on every new drive insertion">
+      <span class="auto-label">Auto:</span>
+      {% for mode, label, hint in [
+          ("off", "Off", "Drives only run when you click New Batch."),
+          ("quick", "Quick", "Auto quick-mode on insert. Skips badblocks + long self-test."),
+          ("full", "Full", "Auto full pipeline on insert, including burn-in + cert label print."),
+      ] %}
+      <button type="submit" name="mode" value="{{ mode }}"
+              class="auto-pill{% if settings.daemon.auto_enroll_mode == mode %} active{% endif %}"
+              title="{{ hint }}">{{ label }}</button>
+      {% endfor %}
+    </form>
   </div>
 </section>
 

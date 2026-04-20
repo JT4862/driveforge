@@ -52,6 +52,46 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .page-head .actions { display: flex; gap: 10px; justify-self: end; }
 .page-head .stats { display: flex; gap: 10px; }
 
+/* Auto-enroll segmented toggle in the dashboard actions bar. Three
+   buttons, one active at a time. Active pill highlights in the accent
+   color; inactive pills are muted so the group reads as a minor
+   control rather than competing with the primary New Batch button. */
+.auto-enroll-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 3px 10px 3px 12px;
+  margin-left: 10px;
+}
+.auto-enroll-toggle .auto-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.auto-enroll-toggle .auto-pill {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.1s, color 0.1s;
+}
+.auto-enroll-toggle .auto-pill:hover { color: var(--text); }
+.auto-enroll-toggle .auto-pill.active {
+  background: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+}
+.auto-enroll-toggle .auto-pill.active:hover { color: #0d1117; }
+
 /* Chassis telemetry strip in the dashboard header. Mutes by default
    (not meant to dominate the eye), but temperature values shift toward
    warm colors as things heat up so thermal trouble catches the eye. */
