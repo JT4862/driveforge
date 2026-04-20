@@ -114,8 +114,17 @@ class Orchestrator:
         double-booking a drive into two batches — the second start would
         overwrite the task handle, orphan the first pipeline, and race the
         same device with parallel smartctl/hdparm/badblocks calls.
+
+        Only task entries whose futures haven't completed are counted. A
+        done task in `_tasks` isn't actually busy — and prior to v0.2.7 a
+        missing pop in `_run_drive`'s finally meant every previously-run
+        serial showed up as "busy" here, which in turn caused
+        `start_batch` to reject auto-enroll of an aborted → re-inserted
+        drive via `BatchRejected`. The finally now pops, but this filter
+        is defence-in-depth against the same class of bug re-emerging.
         """
-        return set(self._tasks) | self.state.active_serials()
+        running = {s for s, t in self._tasks.items() if not t.done()}
+        return running | self.state.active_serials()
 
     def _spawn_done_blinker(self, drive: Drive, outcome: str) -> None:
         """Start the post-pipeline activity-LED blinker for this drive.
@@ -628,6 +637,14 @@ class Orchestrator:
                 # End of recovery-triggered pipeline — clear the amber
                 # glow flag. No-op for normal (non-recovery) pipelines.
                 self.state.recovery_serials.discard(drive.serial)
+                # Drop this drive's (now-finished) task handle so the
+                # orchestrator doesn't treat the serial as "still busy"
+                # forever. Without this pop, `active_serials()` keeps
+                # returning every serial ever run, which causes
+                # `start_batch` to raise `BatchRejected` on auto-enroll
+                # of a re-inserted drive (common path: abort → pull →
+                # reinsert with auto-enroll on). Bug fixed in v0.2.7.
+                self._tasks.pop(drive.serial, None)
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.

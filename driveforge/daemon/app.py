@@ -142,10 +142,23 @@ async def _hotplug_loop(state: DaemonState, orch: Orchestrator) -> None:
         # the monitor's own events() does the same, so just call it.
     try:
         async for event in monitor.events():
-            if event.kind == EventKind.DRIVE_ADDED:
-                await _handle_drive_added(state, orch, event)
-            elif event.kind == EventKind.DRIVE_REMOVED:
-                _handle_drive_removed(state, orch, event)
+            # Per-event try/except so one handler blowing up doesn't
+            # starve the daemon of all subsequent hotplug events. The
+            # inner handlers already do their own defensive handling,
+            # but this is the load-bearing guarantee that the monitor
+            # task survives.
+            try:
+                if event.kind == EventKind.DRIVE_ADDED:
+                    await _handle_drive_added(state, orch, event)
+                elif event.kind == EventKind.DRIVE_REMOVED:
+                    _handle_drive_removed(state, orch, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "hotplug handler for event %s crashed; continuing",
+                    event,
+                )
     except asyncio.CancelledError:
         monitor.stop()
         raise
@@ -196,8 +209,17 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     # Priority-lower than recovery + blinker restore. Skipped silently when:
     #   - auto_enroll_mode is "off" (default)
     #   - drive is already running in this daemon
-    #   - drive has a completed TestRun within the last hour (don't restart
-    #     a drive that just passed on a momentary pull + re-insert)
+    #   - drive's LATEST completed run has a real grade AND finished within
+    #     the last hour (don't re-test a drive that just passed on a
+    #     momentary pull + re-insert)
+    #
+    # The "latest-run" framing is the key v0.2.7 fix: previously we looked
+    # for ANY recent graded run, which meant a drive that passed 20 min
+    # ago, was then aborted mid-retest, would still be blocked from
+    # auto-enroll on re-insert because the stale Grade A row matched the
+    # filter. Aborts stamp grade=None (since v0.2.6) — as long as we key
+    # the decision off the most recent run, aborted drives correctly
+    # appear as "never tested" to auto-enroll too.
     mode = (state.settings.daemon.auto_enroll_mode or "off").lower()
     if mode not in ("quick", "full"):
         return
@@ -205,33 +227,62 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
         return
     from datetime import UTC, datetime, timedelta
     from driveforge.db import models as m
+    from driveforge.daemon.orchestrator import BatchRejected
     recent_cutoff = datetime.now(UTC) - timedelta(hours=1)
-    # Aborted runs don't count as "recent completion" — the user cancelled
-    # the pipeline before a verdict was reached, and the drive is
-    # effectively untested. A re-insert should kick off a fresh auto-run.
-    # Only pass/fail runs (grade IS NOT NULL) block auto-enrollment.
     with state.session_factory() as session:
-        recent = (
+        latest = (
             session.query(m.TestRun)
             .filter_by(drive_serial=match.serial)
             .filter(m.TestRun.completed_at.isnot(None))
-            .filter(m.TestRun.completed_at >= recent_cutoff)
-            .filter(m.TestRun.grade.isnot(None))
+            .order_by(m.TestRun.completed_at.desc())
             .first()
         )
-    if recent is not None:
+    # SQLite stores DateTime(timezone=True) columns as naive strings and
+    # SQLAlchemy surfaces them as naive Python datetimes. Normalize to
+    # UTC-aware before comparing to `recent_cutoff` so the comparison
+    # works identically across SQLite and timezone-aware backends.
+    latest_completed = latest.completed_at if latest is not None else None
+    if latest_completed is not None and latest_completed.tzinfo is None:
+        latest_completed = latest_completed.replace(tzinfo=UTC)
+    if (
+        latest is not None
+        and latest.grade is not None
+        and latest_completed is not None
+        and latest_completed >= recent_cutoff
+    ):
         logger.info(
-            "hotplug add: drive %s has a pass/fail run completed in the last hour; "
+            "hotplug add: drive %s most-recent run is %s (completed %s); "
             "skipping auto-enroll",
             match.serial,
+            latest.grade,
+            latest_completed.isoformat(),
         )
         return
     logger.info("hotplug add: auto-enrolling drive %s (%s mode)", match.serial, mode)
-    await orch.start_batch(
-        [match],
-        source=f"auto-enroll ({mode})",
-        quick=(mode == "quick"),
-    )
+    try:
+        await orch.start_batch(
+            [match],
+            source=f"auto-enroll ({mode})",
+            quick=(mode == "quick"),
+        )
+    except BatchRejected as exc:
+        # Defensive: the drive is already busy in another batch somehow.
+        # Log and move on instead of letting the exception kill the
+        # hotplug loop — prior to v0.2.7 a stale self._tasks entry could
+        # cause this path to fire for a perfectly-idle drive.
+        logger.warning(
+            "hotplug add: auto-enroll rejected for %s: %s",
+            match.serial,
+            exc,
+        )
+    except Exception:  # noqa: BLE001
+        # Same defensive posture for any other orchestrator misbehaviour.
+        # Hotplug loop MUST keep running; a single failed auto-enroll
+        # must not starve the rest of the daemon's insert handling.
+        logger.exception(
+            "hotplug add: auto-enroll crashed for %s; hotplug loop continues",
+            match.serial,
+        )
 
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
