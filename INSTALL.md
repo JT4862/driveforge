@@ -51,10 +51,21 @@ dashboard reachable at `http://driveforge.local:8080`.
 
 ## Path A: ISO installer (recommended)
 
-The DriveForge ISO is a Debian 12 netinst with our preseed + offline
-bundle baked in. One USB, one boot, one manual confirmation of the OS
-disk at partitioning — everything else runs unattended. No internet
-access required on the target server during install.
+The DriveForge ISO is a Debian 12 netinst with our preseed layered on
+top. One USB, one boot, one manual confirmation of the OS disk at
+partitioning — everything else runs unattended.
+
+**The target server needs internet during install.** The ISO only
+contains the Debian installer + DriveForge preseed; during the
+`late_command` step, the installer:
+
+1. Reaches Debian's mirrors for the base system packages
+2. `git clone`s DriveForge from the public GitHub repo
+3. Runs `./scripts/install.sh` which apt-installs DriveForge's runtime
+   deps and pip-installs the app
+
+If you're setting up on an air-gapped network, see
+[Path C (Air-gapped install)](#path-c-air-gapped-install) below.
 
 ### 1. Download the ISO
 
@@ -176,6 +187,70 @@ Open the web UI at:
 ```
 
 You're ready.
+
+---
+
+## Path C: Air-gapped install
+
+For environments where the DriveForge server cannot reach the internet
+during installation. Requires an internet-connected staging machine
+(your laptop works) and a way to shuttle files to the target — USB
+stick, internal network, whatever you have.
+
+### 1. On the internet-connected staging machine
+
+Clone DriveForge and pre-download its Debian package dependencies +
+Python wheels using the supplied bundler script:
+
+```bash
+git clone https://github.com/JT4862/driveforge.git
+cd driveforge
+sudo ./scripts/build-offline-bundle.sh
+```
+
+This produces a single `dist/driveforge-offline-<version>.tar.gz`
+(~113 MB) containing:
+
+- The DriveForge source tree (git archive of HEAD)
+- All required `.deb` packages pre-resolved and downloaded
+- All Python wheels (including a pre-built `driveforge-*.whl`)
+
+Copy the tarball to a USB stick or somewhere the air-gapped machine
+can reach.
+
+### 2. Install Debian 12 on the target the normal way
+
+Use the standard Debian 12 netinst ISO from
+[debian.org](https://www.debian.org/distrib/netinst) (NOT the
+DriveForge ISO — that one assumes internet during install).
+
+Install Debian as usual, picking **SSH server + standard system
+utilities** at the tasksel step. Set hostname to `driveforge` so mDNS
+works later. The Debian installer itself can run from the netinst
+ISO's own package set without a mirror — pick "Do not use a network
+mirror" when prompted.
+
+### 3. On the target, extract + install from the bundle
+
+Copy the tarball over (USB, local network, however you're doing it),
+then:
+
+```bash
+# As root on the target:
+cd /tmp
+tar xzf driveforge-offline-<version>.tar.gz
+cd driveforge-offline-<version>
+sudo DRIVEFORGE_OFFLINE_BUNDLE="$(pwd)" ./scripts/install.sh
+```
+
+The `DRIVEFORGE_OFFLINE_BUNDLE` env var tells `install.sh` to resolve
+.debs and Python wheels from the bundle instead of reaching out to
+Debian mirrors and PyPI.
+
+If the target has sporadic internet (behind a firewall, NAT, etc.),
+simpler option: use [Path A](#path-a-iso-installer-recommended) and
+let whatever intermittent connectivity it has fetch packages during
+install.
 
 ---
 

@@ -22,9 +22,10 @@ die() { echo "${RED}✗${RESET} $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "must run as root (try: curl ... | sudo bash)"
 
-# Defense against being invoked with a minimal PATH (Debian installer's
-# in-target chroot on the ISO path gives us just /sbin:/bin, which misses
-# /usr/bin where python3 lives). Harmless no-op for interactive sudo runs.
+# Debian installer's in-target chroot invokes us with a minimal PATH (often
+# just /sbin:/bin), so /usr/bin/python3, /usr/sbin/useradd, etc. aren't
+# resolvable. Prepend the standard Debian search path so the offline / ISO
+# late_command path matches what a user's interactive sudo session would see.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 log "Checking Debian version..."
@@ -34,17 +35,35 @@ fi
 
 log "Installing system dependencies..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y --no-install-recommends \
-  python3 python3-venv python3-pip \
-  smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio \
-  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils \
-  fonts-dejavu-core \
-  curl ca-certificates >/dev/null
-# Post-install sanity check — if any critical binary is missing, fail now
-# with a useful message instead of crashing two sections later at e.g.
-# `python3 -m venv`. Hit a silent version of this on 2026-04-20 in the ISO
-# path where errors were being swallowed.
+APT_PACKAGES=(
+  python3 python3-venv python3-pip
+  smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
+  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils
+  fonts-dejavu-core
+  curl ca-certificates
+)
+# Normal path uses Debian's mirrors. Air-gapped path (DRIVEFORGE_OFFLINE_BUNDLE
+# set) points apt at the local .debs repo pre-built by build-offline-bundle.sh —
+# see INSTALL.md Path C for the full flow.
+if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/debs" ]]; then
+  log "Using offline .deb cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
+  cat > /etc/apt/sources.list.d/driveforge-offline.list <<EOF
+deb [trusted=yes] file://${DRIVEFORGE_OFFLINE_BUNDLE}/debs ./
+EOF
+  # Update apt's index from ONLY our local repo — override the default
+  # sourcelist + sourceparts so apt doesn't try Debian mirrors.
+  apt-get -o Dir::Etc::sourceparts=- \
+          -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/driveforge-offline.list \
+          -o APT::Get::List-Cleanup=0 \
+          update 2>&1 | tail -3
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+  rm -f /etc/apt/sources.list.d/driveforge-offline.list
+else
+  apt-get update -qq
+  apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
+fi
+# Post-install sanity check — fail loud if a critical binary is missing
+# after apt instead of crashing two sections later at e.g. `python3 -m venv`.
 for bin in python3 apt-get useradd systemctl; do
   command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
 done
@@ -85,16 +104,19 @@ python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# On Linux we need the `linux` extra — it pulls in pyudev for the hotplug
-# event monitor. Without this, the daemon boots fine but never sees drive
-# add/remove events and the LED-blinker-on-reinsert feature silently
-# no-ops. `--upgrade` so re-running install.sh after deps change actually
-# refreshes them instead of pip concluding "driveforge X.Y.Z already
-# present, skip" on an unchanged version string.
-if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
-  pip install --quiet --upgrade "$SRC_DIR[linux]"
+# Normal path: install from the local source tree + PyPI for deps
+# (hatchling build backend resolves from PyPI automatically). Air-gap
+# path (DRIVEFORGE_OFFLINE_BUNDLE set): install the pre-built
+# driveforge wheel from the bundle's wheels/ dir by name so pip picks
+# the .whl directly and doesn't try to rebuild (which would need
+# hatchling from PyPI we can't reach). `[linux]` extra pulls pyudev
+# for the hotplug monitor.
+if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" ]]; then
+  pip install --quiet --upgrade \
+    --no-index --find-links "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" \
+    "driveforge[linux]"
 else
-  pip install --quiet --upgrade "driveforge[linux]"
+  pip install --quiet --upgrade "$SRC_DIR[linux]"
 fi
 deactivate
 ln -sf /opt/driveforge/bin/driveforge-daemon /usr/bin/driveforge-daemon
