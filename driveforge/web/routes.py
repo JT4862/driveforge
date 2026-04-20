@@ -39,6 +39,25 @@ _PHASE_CLASS = {
     "aborted": "fail",
 }
 
+# Single-glyph cues per phase so the card reads at a glance. Unicode
+# symbols + a couple of emoji; kept monochrome-ish so they don't
+# compete with the phase-colored progress bar. Intentionally minimal —
+# not meant to replace the text label, just reinforce it.
+_PHASE_ICONS = {
+    "queued": "\u22EF",           # ⋯ horizontal ellipsis
+    "pre_smart": "\u2695",        # ⚕ medical staff
+    "short_test": "\u25D0",       # ◐ half-filled circle
+    "firmware_check": "\u2699",   # ⚙ gear
+    "secure_erase": "\u26A1",     # ⚡ high voltage
+    "badblocks": "\U0001F525",    # 🔥 fire
+    "long_test": "\u29D6",        # ⧖ hourglass
+    "post_smart": "\u2695",       # ⚕ medical staff
+    "grading": "\u2605",          # ★ black star
+    "done": "\u2713",             # ✓ check
+    "failed": "\u2717",           # ✗ ballot x
+    "aborted": "\u2298",          # ⊘ circled division slash
+}
+
 
 def _format_duration(seconds: float | int) -> str:
     s = max(0, int(seconds))
@@ -117,6 +136,7 @@ def _active_card(state, session, serial: str) -> dict | None:
         "capacity_tb": round(drive.capacity_bytes / 1_000_000_000_000, 2),
         "phase": phase,
         "phase_class": _PHASE_CLASS.get(phase, "info"),
+        "phase_icon": _PHASE_ICONS.get(phase, ""),
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),

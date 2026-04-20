@@ -155,7 +155,35 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .drive-meta { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .phase { font-family: var(--mono); font-size: 12px; color: var(--accent); }
 .progress { height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; overflow: hidden; }
-.progress .bar { height: 100%; background: var(--accent); transition: width 0.4s; }
+.progress .bar { height: 100%; background: var(--accent); transition: width 0.4s; position: relative; }
+
+/* Shimmer overlay for actively-progressing bars. Gives a subtle "the
+   drive is alive" signal on phases where the percent bar barely moves
+   (e.g. multi-hour badblocks passes where the bar creeps by 1% a minute).
+   Pure CSS, no JS, one GPU-compositable animation. Static percent-stall
+   looks less frozen as a result. */
+.bay-card.active .progress .bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.25) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: bay-shimmer 2.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes bay-shimmer {
+  0%   { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
+}
+
+/* Phase icon inline with the phase label. Nudge the glyph up a hair so
+   it sits on the same baseline as the phase text. */
+.phase-icon { display: inline-block; margin-right: 6px; font-size: 13px; line-height: 1; vertical-align: -1px; }
 .percent { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
 .empty-msg { font-size: 14px; color: var(--muted); }
 .empty-hint { font-size: 11px; color: var(--muted); opacity: 0.7; }

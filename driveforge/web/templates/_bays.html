@@ -46,7 +46,10 @@
     <div class="bay-body">
       <div class="drive-model">{% if card.manufacturer %}<span class="mfr">{{ card.manufacturer }}</span> {% endif %}{{ card.model }}</div>
       <div class="drive-meta">SN: {{ card.serial }} &middot; {{ "%.1f"|format(card.capacity_tb) }} TB</div>
-      <div class="phase">{{ card.phase|replace("_", " ") }}</div>
+      <div class="phase">
+        {%- if card.phase_icon %}<span class="phase-icon" aria-hidden="true">{{ card.phase_icon }}</span>{% endif -%}
+        {{ card.phase|replace("_", " ") }}
+      </div>
       {% if card.sublabel %}<div class="phase-sub">{{ card.sublabel }}</div>{% endif %}
       {# Only render the I/O-rate row when there's actual host-visible
          throughput. Phases like secure_erase (hdparm), short_test, and
