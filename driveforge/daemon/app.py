@@ -76,13 +76,19 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
             )
             stamped += 1
 
-        # Case 2: recently-closed failed secure_erase runs — probable
-        # pre-v0.2.2 pulls. Re-open them so recovery can pick them up.
+        # Case 2: recently-closed secure_erase failures — probable pulls.
+        #
+        # When _record_failure closes a run, it rewrites `phase = "failed"`
+        # and `grade = "fail"`, and encodes the ORIGINAL phase in
+        # `error_message` as `[secure_erase] ...`. So we need to query on
+        # the error_message prefix, not the phase column. Narrow window
+        # (2 h) + strict criteria so we don't re-litigate ancient failures.
         recent_cutoff = datetime.now(UTC) - timedelta(hours=2)
         closed_erases = (
             session.query(m.TestRun)
-            .filter(m.TestRun.phase == "secure_erase")
-            .filter(m.TestRun.grade.is_(None))
+            .filter(m.TestRun.phase == "failed")
+            .filter(m.TestRun.grade == "fail")
+            .filter(m.TestRun.error_message.like("[secure_erase]%"))
             .filter(m.TestRun.completed_at.isnot(None))
             .filter(m.TestRun.completed_at >= recent_cutoff)
             .filter(m.TestRun.interrupted_at_phase.is_(None))
@@ -90,6 +96,8 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
         )
         for run in closed_erases:
             run.completed_at = None
+            run.phase = "secure_erase"  # restore original phase for UI
+            run.grade = None
             run.interrupted_at_phase = "secure_erase"
             logger.warning(
                 "daemon startup: re-opening closed-as-failed secure_erase run %d "
@@ -101,6 +109,34 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
         if stamped:
             session.commit()
             logger.warning("daemon startup: %d run(s) flagged for pull-recovery", stamped)
+
+
+async def _trigger_recovery_for_present_drives(state: DaemonState, orch: Orchestrator) -> None:
+    """After `_flag_dangling_runs_as_interrupted`, any drives physically
+    present at daemon startup that have an open interrupted TestRun
+    should have recovery kicked off immediately — the hotplug `add` event
+    path that normally triggers recovery won't fire for drives that were
+    inserted before the daemon started.
+
+    Covers the common upgrade scenario: `install.sh` restarts the daemon
+    mid-batch, the new daemon's startup sweep flags the in-progress runs
+    as interrupted, then we need to actively dispatch recovery instead of
+    waiting for a re-insert that will never happen.
+    """
+    try:
+        present = drive_mod.discover()
+    except Exception:  # noqa: BLE001
+        logger.info("startup recovery sweep: drive discovery unavailable, skipping")
+        return
+    recovered = 0
+    for d in present:
+        try:
+            if await orch.recover_drive(d):
+                recovered += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("startup recovery sweep: failed for drive %s", d.serial)
+    if recovered:
+        logger.warning("startup recovery sweep: dispatched recovery for %d drive(s)", recovered)
 
 
 def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None:
@@ -247,12 +283,27 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
     sg_format call inside the pipeline task will error out a moment
     later when its I/O starts failing against the gone device).
     """
-    if not event.serial:
+    # Resolve serial — udev's remove event usually carries it, but
+    # sometimes it's been cleared by the time we get the event. Fall back
+    # to reverse-lookup via device_basenames (populated by the orchestrator
+    # when the drive entered active_phase).
+    serial = event.serial
+    if not serial and event.device_node:
+        basename = event.device_node.rsplit("/", 1)[-1]
+        for s, bn in state.device_basenames.items():
+            if bn == basename:
+                serial = s
+                logger.info(
+                    "hotplug remove: event had no serial; recovered %s from device_basenames[%s]",
+                    serial, basename,
+                )
+                break
+    if not serial:
         return
-    orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
-    interrupted_phase = state.active_phase.get(event.serial)
+    orch._cancel_blinker(serial)  # type: ignore[attr-defined]
+    interrupted_phase = state.active_phase.get(serial)
     if interrupted_phase is not None:
-        state.interrupted_serials.add(event.serial)
+        state.interrupted_serials.add(serial)
         # Stamp the open TestRun so recovery can find it after daemon restart
         # or page refresh. We look for the most recent non-completed run for
         # this serial — the pipeline creates exactly one such row per batch.
@@ -260,7 +311,7 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
         with state.session_factory() as session:
             run = (
                 session.query(m.TestRun)
-                .filter_by(drive_serial=event.serial, completed_at=None)
+                .filter_by(drive_serial=serial, completed_at=None)
                 .order_by(m.TestRun.started_at.desc())
                 .first()
             )
@@ -269,7 +320,7 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
                 session.commit()
         logger.warning(
             "drive %s pulled during phase=%s — flagged for recovery on re-insert",
-            event.serial,
+            serial,
             interrupted_phase,
         )
 
@@ -353,12 +404,19 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             logger.exception("startup blinker restore failed (non-fatal)")
         # Pick up any TestRuns left dangling by a crash, restart, or the
         # pre-v0.2.2 case where a drive was pulled while the old daemon
-        # couldn't stamp the interrupt. Flagged ones will auto-recover
-        # on re-insert via the hotplug add handler.
+        # couldn't stamp the interrupt.
         try:
             _flag_dangling_runs_as_interrupted(state)
         except Exception:  # noqa: BLE001
             logger.exception("startup dangling-run flag failed (non-fatal)")
+        # For drives that are physically present at startup AND now carry
+        # a freshly-flagged interrupted run, dispatch recovery NOW — the
+        # hotplug `add` path would never fire for drives that were there
+        # before the daemon started (daemon-restart-mid-batch scenario).
+        try:
+            await _trigger_recovery_for_present_drives(state, orch)
+        except Exception:  # noqa: BLE001
+            logger.exception("startup recovery dispatch failed (non-fatal)")
         hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s)",
