@@ -122,24 +122,22 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
 
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
-    """Cancel any active blinker for the removed drive. The blinker's
-    own read loop also exits on OSError, but explicit cancel prevents a
-    brief window where it's still holding device_path references."""
-    # The udev REMOVE event doesn't always carry the serial (device is
-    # already gone). Fall back to cancelling by device_node match — walk
-    # state and kill blinkers whose serial's drive.device_path matched.
-    target_serial = event.serial
-    if not target_serial and event.device_node:
-        with state.session_factory() as session:
-            drive = (
-                session.query(m.Drive)
-                .filter_by(device_path=event.device_node)
-                .first()
-            )
-            if drive is not None:
-                target_serial = drive.serial
-    if target_serial:
-        orch._cancel_blinker(target_serial)  # type: ignore[attr-defined]
+    """Cancel any active blinker for the removed drive.
+
+    If the REMOVE event carries a serial, we use that directly. If it
+    doesn't (rare — udev usually has cached info even at unplug), we
+    don't try to reverse-lookup via the DB: `m.Drive` doesn't persist
+    `device_path` (kernel letters drift across reboots), and falling
+    back to `filter_by(device_path=...)` would AttributeError on the
+    SQLAlchemy row.
+
+    Missing the explicit cancel is safe — the blinker's own read loop
+    exits on the next OSError (EIO, ENOENT) when it tries to touch the
+    gone device. We just lose the ~0-2 second window between unplug
+    and that read catching up.
+    """
+    if event.serial:
+        orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
 
 
 async def _poll_io_rates(state: DaemonState) -> None:

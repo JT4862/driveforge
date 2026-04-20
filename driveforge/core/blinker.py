@@ -52,10 +52,27 @@ _FAIL_READ_SIZE = 64 * 1024
 
 
 def _physical_read(device_path: str, offset: int, size: int) -> None:
-    """Open the raw block device, pread one small chunk, close."""
+    """Open the raw block device, pread one small chunk, hint the kernel
+    to drop the read pages from cache, close.
+
+    The fadvise is *load-bearing*. Without it the Linux page cache absorbs
+    our 20-offset rotation within ~1 GiB of span — after the first pass
+    through the offsets, every subsequent read is served from memory, no
+    block I/O actually hits the drive, and the activity LED goes dark.
+    POSIX_FADV_DONTNEED asks the kernel to drop the just-read pages so
+    the next cycle's reads have to go back to the platter, keeping the
+    LED visibly pulsing indefinitely.
+
+    Graceful no-op on macOS / any platform without posix_fadvise — the
+    dashboard on dev laptops doesn't drive LEDs anyway.
+    """
     fd = os.open(device_path, os.O_RDONLY)
     try:
         os.pread(fd, size, offset)
+        try:
+            os.posix_fadvise(fd, offset, size, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
     finally:
         os.close(fd)
 

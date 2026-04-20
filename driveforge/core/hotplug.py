@@ -92,9 +92,22 @@ class Monitor:
         subsystem = device.subsystem
         vid = (device.properties.get("ID_VENDOR_ID") or "").lower()
         if subsystem == "usb" and vid == BROTHER_VID:
-            return EventKind.PRINTER_CONNECTED if action == "add" else EventKind.PRINTER_DISCONNECTED
+            if action == "add":
+                return EventKind.PRINTER_CONNECTED
+            if action == "remove":
+                return EventKind.PRINTER_DISCONNECTED
+            return None
         if subsystem == "block" and device.device_type == "disk":
-            return EventKind.DRIVE_ADDED if action == "add" else EventKind.DRIVE_REMOVED
+            # ONLY explicit add / remove — kernel also fires "change" events
+            # after partition-table rereads, udevadm triggers, etc. Mapping
+            # those to DRIVE_REMOVED cancels active blinkers for drives that
+            # are still physically present, which we saw in the wild as LEDs
+            # briefly lighting up on re-insert then going dark.
+            if action == "add":
+                return EventKind.DRIVE_ADDED
+            if action == "remove":
+                return EventKind.DRIVE_REMOVED
+            return None
         return None
 
     def stop(self) -> None:
