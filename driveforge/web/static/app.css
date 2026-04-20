@@ -52,6 +52,17 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .page-head .subtitle { grid-column: 1 / -1; color: var(--muted); }
 .page-head .actions { display: flex; gap: 10px; justify-self: end; }
 .page-head .stats { display: flex; gap: 10px; }
+
+/* Dashboard-specific head layout — 3 columns on row 2 so New Batch sits
+   at the far left and Abort All at the far right, with stats centered
+   between them. The visual separation is a safety measure: an off-by-one
+   click on the primary action button shouldn't land on the destructive
+   Abort All button an inch to its right. */
+.page-head.dashboard-head { grid-template-columns: auto 1fr auto; }
+.page-head.dashboard-head h1 { grid-column: 1 / -1; }
+.page-head.dashboard-head .action-new-batch { justify-self: start; }
+.page-head.dashboard-head .stats { justify-self: center; }
+.page-head.dashboard-head .action-abort-all { justify-self: end; }
 .back { color: var(--muted); font-size: 13px; }
 
 .pill { background: rgba(255,255,255,0.06); color: var(--muted); padding: 4px 10px; border-radius: 999px; font-size: 12px; }
