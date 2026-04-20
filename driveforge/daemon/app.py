@@ -40,34 +40,67 @@ IO_RATE_POLL_INTERVAL_SEC = 3.0
 
 
 def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
-    """Any TestRun with completed_at NULL at daemon startup was dangling
-    from a previous run — daemon crash, systemd restart, package upgrade
-    mid-batch, or (the pre-v0.2.2 case) a drive pulled while the old
-    daemon couldn't stamp the interrupt. Mark them so the re-insert
-    handler can pick up recovery.
+    """Flag TestRuns that look pull-interrupted so the re-insert handler
+    picks up recovery automatically.
 
-    Only sets `interrupted_at_phase` if it isn't already set — we never
-    overwrite a more-specific phase the remove-handler already stamped.
+    Two classes get caught:
+
+    1. **Open runs** — `completed_at IS NULL` — means the previous daemon
+       died mid-batch (crash / systemd restart / package upgrade).
+    2. **Recently-closed failed secure_erase runs** — `completed_at`
+       within the last 2 hours, `phase=secure_erase`, `grade IS NULL`.
+       This covers the pre-v0.2.2 case: old daemon marked the run failed
+       (it had no interrupt concept) when hdparm / sg_format errored out
+       after the drive was yanked. Narrow window + narrow criteria so
+       we don't second-guess legitimate erase failures from weeks ago.
+
+    Never overwrites an already-set `interrupted_at_phase`.
     """
+    from datetime import UTC, datetime, timedelta
     from driveforge.db import models as m
 
+    stamped = 0
     with state.session_factory() as session:
-        dangling = (
+        # Case 1: runs never closed.
+        open_dangling = (
             session.query(m.TestRun)
             .filter(m.TestRun.completed_at.is_(None))
             .filter(m.TestRun.interrupted_at_phase.is_(None))
             .all()
         )
-        for run in dangling:
+        for run in open_dangling:
             run.interrupted_at_phase = run.phase
             logger.warning(
-                "daemon startup: flagging dangling run %d (drive=%s, phase=%s) as interrupted",
-                run.id,
-                run.drive_serial,
-                run.phase,
+                "daemon startup: flagging open dangling run %d (drive=%s, phase=%s) as interrupted",
+                run.id, run.drive_serial, run.phase,
             )
-        if dangling:
+            stamped += 1
+
+        # Case 2: recently-closed failed secure_erase runs — probable
+        # pre-v0.2.2 pulls. Re-open them so recovery can pick them up.
+        recent_cutoff = datetime.now(UTC) - timedelta(hours=2)
+        closed_erases = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.phase == "secure_erase")
+            .filter(m.TestRun.grade.is_(None))
+            .filter(m.TestRun.completed_at.isnot(None))
+            .filter(m.TestRun.completed_at >= recent_cutoff)
+            .filter(m.TestRun.interrupted_at_phase.is_(None))
+            .all()
+        )
+        for run in closed_erases:
+            run.completed_at = None
+            run.interrupted_at_phase = "secure_erase"
+            logger.warning(
+                "daemon startup: re-opening closed-as-failed secure_erase run %d "
+                "(drive=%s) as interrupted for recovery",
+                run.id, run.drive_serial,
+            )
+            stamped += 1
+
+        if stamped:
             session.commit()
+            logger.warning("daemon startup: %d run(s) flagged for pull-recovery", stamped)
 
 
 def _restore_blinkers_on_startup(state: DaemonState, orch: Orchestrator) -> None:
