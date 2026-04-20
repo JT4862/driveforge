@@ -27,7 +27,7 @@ _IPMITOOL_POWER_RE = re.compile(r"Instantaneous power reading\s*:\s*(\d+)\s*Watt
 
 
 def read_chassis_power() -> float | None:
-    """Return instantaneous chassis power draw in watts, via iDRAC / IPMI."""
+    """Return instantaneous chassis power draw in watts, via local BMC (IPMI DCMI)."""
     result = run(["ipmitool", "dcmi", "power", "reading"])
     if not result.ok:
         return None
