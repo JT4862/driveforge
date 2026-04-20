@@ -28,7 +28,15 @@ from driveforge.db import models as m
 
 logger = logging.getLogger(__name__)
 
-MAX_PARALLEL = 8
+# Upper bound on drives running concurrent pipelines. Drives past this
+# limit still get asyncio tasks spawned, but they block on _semaphore
+# until a slot frees up — and while blocked they're NOT in state.active_phase,
+# so the dashboard renders them under "Installed" rather than "Active",
+# which looks like "nothing happened to those drives." Keep this >= the
+# largest chassis we expect to see. 32 covers the NX-3200 (14 bays) and a
+# 24-bay JBOD expander in a single rig with room to spare. The historical
+# 8 was an R720-era accident.
+MAX_PARALLEL = 32
 
 # Poll intervals (real-hardware)
 SMART_SHORT_POLL_SEC = 15.0
