@@ -141,6 +141,9 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .bay-card.active.phase-fail { border-left-color: var(--fail); }
 .bay-card.active.phase-fail .bar { background: var(--fail); }
 .bay-card.active.phase-fail .phase { color: var(--fail); }
+.bay-card.active.phase-recover { border-left-color: #d29922; }
+.bay-card.active.phase-recover .bar { background: #d29922; }
+.bay-card.active.phase-recover .phase { color: #d29922; }
 
 .bay-stats { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--muted); }
 .bay-stats .percent { font-weight: 600; }

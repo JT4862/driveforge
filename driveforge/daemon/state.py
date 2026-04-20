@@ -71,6 +71,13 @@ class DaemonState:
     # Used to flash a card's "just completed" state for a short window
     # after it transitions from Active → Installed.
     just_completed_ts: dict[str, float] = field(default_factory=dict)
+    # Serials known to have been pulled mid-pipeline. Set by the hotplug
+    # remove handler right before the pipeline's failure path fires, so
+    # _run_drive's except block can leave the TestRun row "open"
+    # (interrupted_at_phase set, completed_at NULL) for recovery instead
+    # of closing it as a permanent failure. Cleared when recovery completes
+    # or the user dismisses the interrupted state.
+    interrupted_serials: set[str] = field(default_factory=set)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)

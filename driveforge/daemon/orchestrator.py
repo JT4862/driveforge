@@ -341,6 +341,197 @@ class Orchestrator:
         logger.warning("aborted drive %s", serial)
         return True
 
+    # ------------------------------------------------------------------ recovery
+
+    async def recover_drive(self, drive: Drive) -> bool:
+        """Look up an open `interrupted_at_phase` TestRun for this drive's
+        serial and dispatch a recovery flow. Returns True if a recovery
+        was started, False if there was nothing to recover.
+
+        Called from the hotplug add handler BEFORE the blinker-restore /
+        auto-enroll logic so that pull-interrupted drives get fixed up
+        before anything else touches them.
+        """
+        serial = drive.serial
+        with self.state.session_factory() as session:
+            run = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=serial, completed_at=None)
+                .filter(m.TestRun.interrupted_at_phase.isnot(None))
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            if run is None:
+                return False
+            interrupted_phase = run.interrupted_at_phase
+            quick = bool(run.quick_mode)
+            # Close the interrupted run: mark it done-as-superseded-by-recovery.
+            # The new recovery pipeline gets its own TestRun row via start_batch.
+            run.completed_at = datetime.now(UTC)
+            run.phase = "interrupted"
+            run.grade = None
+            run.error_message = (
+                f"Drive pulled during {interrupted_phase}; recovery initiated on re-insert."
+            )
+            session.commit()
+
+        self.state.interrupted_serials.discard(serial)
+        logger.warning(
+            "drive %s recovery dispatched (was interrupted during %s, quick=%s)",
+            serial,
+            interrupted_phase,
+            quick,
+        )
+        asyncio.create_task(self._run_recovery(drive, interrupted_phase, quick))
+        return True
+
+    async def _run_recovery(self, drive: Drive, interrupted_phase: str, quick: bool) -> None:
+        """Restore drive state after a pull, then re-enroll in a fresh pipeline."""
+        serial = drive.serial
+        self.state.active_log[serial] = []
+        self._log(serial, f"recovery: drive was pulled during {interrupted_phase}")
+        # Show a "recovering" phase on the dashboard while we repair state
+        self.state.active_phase[serial] = "recovering"
+        self.state.active_percent[serial] = 0.0
+        self.state.active_sublabel[serial] = f"restoring after pull during {interrupted_phase}"
+        self.state.device_basenames[serial] = drive.device_path.rsplit("/", 1)[-1]
+        import time as _time
+        self.state.phase_change_ts[serial] = _time.monotonic()
+
+        try:
+            if interrupted_phase == "secure_erase":
+                await self._recover_secure_erase(drive)
+            else:
+                # Non-erase phases need no drive-side recovery — half-written
+                # badblocks data will be overwritten by the fresh pipeline's
+                # erase step; SMART self-test state clears on re-issue.
+                self._log(
+                    serial,
+                    f"recovery: no drive-state repair needed for {interrupted_phase}; "
+                    "restarting pipeline",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("recovery failed for drive %s", serial)
+            self._log(serial, f"recovery failed: {exc}. Drive left idle; retry manually.")
+            # Leave drive idle — user can click New Batch to retry.
+            self.state.active_phase.pop(serial, None)
+            self.state.active_percent.pop(serial, None)
+            self.state.active_sublabel.pop(serial, None)
+            self.state.device_basenames.pop(serial, None)
+            return
+
+        # Clear the recovering-phase state so start_batch can initialize fresh.
+        self.state.active_phase.pop(serial, None)
+        self.state.active_percent.pop(serial, None)
+        self.state.active_sublabel.pop(serial, None)
+        # Fresh pipeline run. Same quick flag as the interrupted run.
+        await self.start_batch(
+            [drive],
+            source=f"auto-recovery after pull during {interrupted_phase}",
+            quick=quick,
+        )
+
+    async def _recover_secure_erase(self, drive: Drive) -> None:
+        """Per-transport drive-state repair after a mid-erase pull.
+
+        SAS: Complete the sg_format that was interrupted (drive is in
+             "Medium format corrupted" state; only sg_format-to-completion
+             recovers it).
+        SATA: The drive fell out of its ATA security session. Hdparm
+              leaves it `security-locked`. Try unlock with the known
+              password; on failure, try security-disable. Frozen state
+              (BIOS re-froze at boot) can't be fixed in software.
+        NVMe: Crypto-erase is atomic at the drive; power-cycle leaves
+              the drive in a clean state. No action needed.
+        """
+        serial = drive.serial
+        # Same transport-refinement pattern as erase.secure_erase() so
+        # SATA-on-SAS drives take the SATA recovery path.
+        effective = drive.transport
+        if effective == Transport.SAS:
+            refined = drive_mod.detect_true_transport(drive.device_path)
+            if refined in (Transport.SATA, Transport.SAS, Transport.NVME):
+                effective = refined
+
+        if effective == Transport.NVME:
+            self._log(serial, "recovery: NVMe crypto-erase is atomic — nothing to recover")
+            return
+
+        if effective == Transport.SAS:
+            self._log(
+                serial,
+                "recovery: running sg_format --format to completion "
+                "(drive was in 'Medium format corrupted' state; expect 15-60+ min)",
+            )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                erase._sas_secure_erase,
+                drive.device_path,
+            )
+            self._log(serial, "recovery: sg_format completed; media is valid again")
+            return
+
+        if effective == Transport.SATA:
+            # Check the security block of hdparm -I
+            result = process.run(["hdparm", "-I", drive.device_path], timeout=10)
+            out = (result.stdout or "").lower() if result.ok else ""
+            is_frozen = "\tfrozen" in out and "not\tfrozen" not in out
+            is_locked = "\tlocked" in out and "not\tlocked" not in out
+
+            if is_frozen:
+                self._log(
+                    serial,
+                    "recovery: drive security is FROZEN (BIOS/OS froze it at boot) — "
+                    "cannot unlock via software. Power-cycle required with a BIOS "
+                    "that doesn't issue SECURITY FREEZE LOCK.",
+                )
+                raise RuntimeError("SATA security is frozen; cannot recover via software")
+
+            if is_locked:
+                self._log(serial, "recovery: drive security-locked; attempting unlock")
+                unlock = process.run(
+                    [
+                        "hdparm",
+                        "--user-master", "u",
+                        "--security-unlock", "driveforge",
+                        drive.device_path,
+                    ],
+                    owner=serial,
+                )
+                if not unlock.ok:
+                    raise RuntimeError(
+                        f"hdparm --security-unlock failed: {unlock.stderr.strip() or 'unknown error'}"
+                    )
+                self._log(serial, "recovery: security-unlock succeeded")
+                # Clear the ATA security password so the next erase starts fresh.
+                disable = process.run(
+                    [
+                        "hdparm",
+                        "--user-master", "u",
+                        "--security-disable", "driveforge",
+                        drive.device_path,
+                    ],
+                    owner=serial,
+                )
+                if disable.ok:
+                    self._log(serial, "recovery: security-disable succeeded; drive is fully released")
+                else:
+                    # Non-fatal — pipeline will set its own password at next erase.
+                    self._log(
+                        serial,
+                        f"recovery: security-disable failed (non-fatal): {disable.stderr.strip()}",
+                    )
+                return
+
+            # Not locked, not frozen — drive's security state was never entered
+            # (pull happened before security-set-pass succeeded) or the drive
+            # self-cleared on power-cycle. Either way, nothing to do.
+            self._log(serial, "recovery: drive not locked; fresh pipeline will re-erase")
+            return
+
+        self._log(serial, f"recovery: unknown transport {effective}; skipping drive-state repair")
+
     # ------------------------------------------------------------------ pipeline
 
     async def _run_drive(self, batch_id: str, drive: Drive, *, quick: bool) -> None:
@@ -363,14 +554,37 @@ class Orchestrator:
                 self._record_failure(drive, phase="aborted", detail="aborted by user")
                 outcome = None
             except PipelineFailure as exc:
-                logger.error("drive %s failed in %s: %s", drive.serial, exc.phase, exc.detail)
-                self._record_failure(drive, phase=exc.phase, detail=exc.detail)
-                outcome = "fail"
+                # Pull-interrupt: the hotplug remove handler fires first and
+                # flags the serial. The subprocess then errors out (device
+                # gone) and raises PipelineFailure, landing us here. Don't
+                # close the TestRun — leave `completed_at` NULL so the
+                # re-insert handler can find it and recover.
+                if drive.serial in self.state.interrupted_serials:
+                    logger.warning(
+                        "drive %s pipeline aborted by pull during phase=%s "
+                        "(leaving TestRun open for recovery)",
+                        drive.serial,
+                        exc.phase,
+                    )
+                    outcome = None  # no blinker — drive is physically gone
+                else:
+                    logger.error("drive %s failed in %s: %s", drive.serial, exc.phase, exc.detail)
+                    self._record_failure(drive, phase=exc.phase, detail=exc.detail)
+                    outcome = "fail"
             except Exception:
                 tb = traceback.format_exc()
-                logger.exception("drive %s pipeline crashed", drive.serial)
-                self._record_failure(drive, phase="error", detail=tb)
-                outcome = "fail"
+                # Same interrupt check — crashes caused by a pulled drive
+                # should land in recovery, not the permanent-fail bucket.
+                if drive.serial in self.state.interrupted_serials:
+                    logger.warning(
+                        "drive %s pipeline crashed after pull (recovery-eligible)",
+                        drive.serial,
+                    )
+                    outcome = None
+                else:
+                    logger.exception("drive %s pipeline crashed", drive.serial)
+                    self._record_failure(drive, phase="error", detail=tb)
+                    outcome = "fail"
             else:
                 # Normal completion — a grading "fail" verdict is not an
                 # exception, so refine outcome from the DB grade.

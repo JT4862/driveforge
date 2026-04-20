@@ -114,15 +114,24 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     if match is None:
         logger.debug("hotplug add: no matching drive for event %s", event)
         return
-    # `match` is a freshly-discovered Pydantic Drive with current device_path;
-    # the restore helper reads that directly instead of round-tripping through
-    # the DB (which doesn't store device_path — kernel letters drift across
-    # reboots).
+    # Priority order on drive-insert:
+    #   1. Recovery — drive was pulled mid-pipeline and has an open
+    #      interrupted run. Takes precedence over everything: the drive is
+    #      in an ambiguous state (SAS: "Medium format corrupted"; SATA:
+    #      security-locked) and needs repair before we do anything with it.
+    #   2. Blinker restore — drive with a completed test history gets its
+    #      pass/fail activity-LED cadence restarted.
+    #   3. Auto-enroll (future) — start a fresh pipeline if the user has
+    #      opted in to "auto-test on insert".
+    if await orch.recover_drive(match):
+        logger.info("hotplug add: drive %s entered recovery flow", match.serial)
+        return
     orch.restore_blinker_for_drive(match)
 
 
 def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None:
-    """Cancel any active blinker for the removed drive.
+    """Cancel any active blinker for the removed drive + flag pull-interrupted
+    pipelines for recovery on re-insert.
 
     If the REMOVE event carries a serial, we use that directly. If it
     doesn't (rare — udev usually has cached info even at unplug), we
@@ -131,13 +140,38 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
     back to `filter_by(device_path=...)` would AttributeError on the
     SQLAlchemy row.
 
-    Missing the explicit cancel is safe — the blinker's own read loop
-    exits on the next OSError (EIO, ENOENT) when it tries to touch the
-    gone device. We just lose the ~0-2 second window between unplug
-    and that read catching up.
+    Interrupt detection: if the removed drive is currently in
+    `state.active_phase`, mark its open TestRun with `interrupted_at_phase`
+    so the re-insert handler can find it and kick off a recovery flow.
+    This runs BEFORE the subprocess-failure path fires (the hdparm /
+    sg_format call inside the pipeline task will error out a moment
+    later when its I/O starts failing against the gone device).
     """
-    if event.serial:
-        orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
+    if not event.serial:
+        return
+    orch._cancel_blinker(event.serial)  # type: ignore[attr-defined]
+    interrupted_phase = state.active_phase.get(event.serial)
+    if interrupted_phase is not None:
+        state.interrupted_serials.add(event.serial)
+        # Stamp the open TestRun so recovery can find it after daemon restart
+        # or page refresh. We look for the most recent non-completed run for
+        # this serial — the pipeline creates exactly one such row per batch.
+        from driveforge.db import models as m
+        with state.session_factory() as session:
+            run = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=event.serial, completed_at=None)
+                .order_by(m.TestRun.started_at.desc())
+                .first()
+            )
+            if run is not None:
+                run.interrupted_at_phase = interrupted_phase
+                session.commit()
+        logger.warning(
+            "drive %s pulled during phase=%s — flagged for recovery on re-insert",
+            event.serial,
+            interrupted_phase,
+        )
 
 
 async def _poll_io_rates(state: DaemonState) -> None:

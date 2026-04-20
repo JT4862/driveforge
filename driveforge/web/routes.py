@@ -34,9 +34,11 @@ _PHASE_CLASS = {
     "secure_erase": "erase",
     "badblocks": "burn",
     "long_test": "long",
+    "recovering": "recover",
     "done": "done",
     "failed": "fail",
     "aborted": "fail",
+    "interrupted": "fail",
 }
 
 # Single-glyph cues per phase so the card reads at a glance. Unicode
@@ -53,9 +55,11 @@ _PHASE_ICONS = {
     "long_test": "\u29D6",        # ⧖ hourglass
     "post_smart": "\u2695",       # ⚕ medical staff
     "grading": "\u2605",          # ★ black star
+    "recovering": "\u21BB",       # ↻ clockwise open circle arrow
     "done": "\u2713",             # ✓ check
     "failed": "\u2717",           # ✗ ballot x
     "aborted": "\u2298",          # ⊘ circled division slash
+    "interrupted": "\u2298",      # ⊘ same
 }
 
 
