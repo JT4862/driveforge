@@ -320,6 +320,7 @@ class Orchestrator:
         self.state.active_sublabel.clear()
         self.state.active_drive_temp.clear()
         self.state.phase_change_ts.clear()
+        self.state.recovery_serials.clear()
         # Stop all post-pipeline blinkers too — abort implies "don't touch
         # anything on these devices anymore."
         for serial in list(self.state.done_blinkers):
@@ -388,6 +389,11 @@ class Orchestrator:
     async def _run_recovery(self, drive: Drive, interrupted_phase: str, quick: bool) -> None:
         """Restore drive state after a pull, then re-enroll in a fresh pipeline."""
         serial = drive.serial
+        # Mark this drive as "in recovery" for the ENTIRE duration —
+        # drive-state repair + the fresh pipeline that follows. Cleared
+        # in _run_drive's finally when that pipeline exits (pass/fail).
+        # The dashboard reads this to draw a persistent amber glow.
+        self.state.recovery_serials.add(serial)
         self.state.active_log[serial] = []
         self._log(serial, f"recovery: drive was pulled during {interrupted_phase}")
         # Show a "recovering" phase on the dashboard while we repair state
@@ -418,6 +424,7 @@ class Orchestrator:
             self.state.active_percent.pop(serial, None)
             self.state.active_sublabel.pop(serial, None)
             self.state.device_basenames.pop(serial, None)
+            self.state.recovery_serials.discard(serial)
             return
 
         # Clear the recovering-phase state so start_batch can initialize fresh.
@@ -618,6 +625,9 @@ class Orchestrator:
                 self.state.active_sublabel.pop(drive.serial, None)
                 self.state.active_drive_temp.pop(drive.serial, None)
                 self.state.phase_change_ts.pop(drive.serial, None)
+                # End of recovery-triggered pipeline — clear the amber
+                # glow flag. No-op for normal (non-recovery) pipelines.
+                self.state.recovery_serials.discard(drive.serial)
                 # Keep the last log in memory briefly so a refresh after a
                 # batch completes still shows the final lines. Let the next
                 # run clear it.

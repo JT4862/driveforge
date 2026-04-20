@@ -261,6 +261,42 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .bay-card.active.phase-info .io-spark { color: var(--accent); }
 .bay-card.active.phase-erase .io-spark { color: var(--warn); }
 
+/* Recovery-mode glow — persistent amber pulse around any card that's
+   in a recovery-triggered pipeline (from the moment `_run_recovery`
+   kicks off through the fresh pipeline's pass/fail completion).
+   Visually distinctive so an operator can tell at a glance "that drive
+   is being retried after a pull" vs. "that drive is running a normal
+   batch." Overrides the phase-color border with amber so the card's
+   identity as a recovery drive is consistent across phases.
+
+   Slow 2.8 s cycle — fast enough to feel alive, slow enough not to
+   distract during multi-hour secure_erase. Pure box-shadow animation,
+   GPU-compositable, zero layout thrash.
+*/
+@keyframes recovery-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35),
+                0 0 10px 0 rgba(210, 153, 34, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.75),
+                0 0 22px 5px rgba(210, 153, 34, 0.45);
+  }
+}
+.bay-card.active.recovery-mode {
+  animation: recovery-glow 2.8s ease-in-out infinite;
+  border-left-color: #d29922 !important;
+}
+.bay-card.active.recovery-mode .bar {
+  background: #d29922 !important;
+}
+/* Recovery-mode trumps phase-pulse (which only lasts 1.4 s and uses
+   box-shadow too). If both classes are present, let the recovery
+   animation run — phase pulses are ambient, recovery is the headline. */
+.bay-card.active.recovery-mode.phase-pulse {
+  animation: recovery-glow 2.8s ease-in-out infinite;
+}
+
 /* Phase transition pulse — briefly brightens the card's left-border
    when a drive advances to a new phase. Fires on any active card whose
    phase changed in the last 2.5 s (server-side gate in _active_card).

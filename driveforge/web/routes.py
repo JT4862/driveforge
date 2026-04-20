@@ -169,6 +169,7 @@ def _active_card(state, session, serial: str) -> dict | None:
         "spark_points": spark_points,
         "spark_peak": spark_peak,
         "phase_just_changed": phase_just_changed,
+        "recovery_mode": serial in state.recovery_serials,
         "percent": state.active_percent.get(serial, 0.0),
         "sublabel": state.active_sublabel.get(serial),
         "io_rate": state.active_io_rate.get(serial),

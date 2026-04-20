@@ -48,7 +48,7 @@
   {% endif %}
 </div>
 {% else %}
-<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}">
+<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}{% if card.recovery_mode %} recovery-mode{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">

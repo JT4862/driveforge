@@ -78,6 +78,15 @@ class DaemonState:
     # of closing it as a permanent failure. Cleared when recovery completes
     # or the user dismisses the interrupted state.
     interrupted_serials: set[str] = field(default_factory=set)
+    # Serials currently running a recovery-triggered pipeline. Populated
+    # by `_run_recovery` when a pulled drive is re-inserted and cleared
+    # in `_run_drive`'s finally when that pipeline exits. The dashboard
+    # uses this to draw a persistent amber glow around the card for the
+    # full duration of recovery — including the brief drive-state repair
+    # step AND the fresh pipeline that follows — so an operator can see
+    # at a glance which drives are "I'm retrying after a pull" vs.
+    # "normal test run".
+    recovery_serials: set[str] = field(default_factory=set)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)
