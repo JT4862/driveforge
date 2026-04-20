@@ -53,9 +53,17 @@ echo "==> Resolving apt deps (recursive)..."
 # "  Depends: foo" sit at column 2 and we skip them. Use a POSIX bracket
 # class instead of `\w` so this works in both gawk (host) and mawk (the
 # debian:12-slim Docker image).
+#
+# CRITICAL: we must NOT use --no-pre-depends here. `python3` Pre-Depends on
+# `python3-minimal`, and if python3-minimal is absent from the bundle then
+# dpkg -i silently fails for the python3 meta-package, leaving /usr/bin/python3
+# un-created, which in turn kills install.sh at its `python3 -m venv` line.
+# Hit this on 2026-04-20 during the ISO late_command pipeline. Pre-Depends
+# are strict predecessors that MUST be installed before the dependent package,
+# so we need them in the bundle even more than regular Depends.
 DEPS=$(apt-cache depends --recurse --no-recommends --no-suggests \
   --no-conflicts --no-breaks --no-replaces --no-enhances \
-  --no-pre-depends "${APT_PACKAGES[@]}" \
+  "${APT_PACKAGES[@]}" \
   | awk '/^[a-zA-Z0-9]/ {gsub(/[<>:]/, "", $1); print $1}' | sort -u)
 DEP_COUNT=$(echo "$DEPS" | wc -l)
 echo "==> Downloading $DEP_COUNT .deb packages → $WORK/debs"

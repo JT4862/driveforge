@@ -22,9 +22,10 @@ die() { echo "${RED}✗${RESET} $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "must run as root (try: curl ... | sudo bash)"
 
-# Defense against being invoked with a minimal PATH (Debian installer's
-# in-target chroot on the ISO path gives us just /sbin:/bin, which misses
-# /usr/bin where python3 lives). Harmless no-op for interactive sudo runs.
+# Debian installer's in-target chroot invokes us with a minimal PATH (often
+# just /sbin:/bin), so /usr/bin/python3, /usr/sbin/useradd, etc. aren't
+# resolvable. Prepend the standard Debian search path so the offline / ISO
+# late_command path matches what a user's interactive sudo session would see.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 log "Checking Debian version..."
@@ -47,9 +48,11 @@ if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/de
   log "Using offline .deb cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/debs"
   # Iterate dpkg -i up to 3 passes — a single pass installs in shell-glob
   # alphabetical order, which can fail when a package's deps haven't been
-  # processed yet (e.g. `python3` needs `python3-minimal` and
-  # `libpython3.11-*` first). Subsequent passes pick up the ones that
-  # failed the previous time now that their deps are satisfied.
+  # processed yet (e.g. `python3` needs `python3-minimal` and `libpython3.11-*`
+  # first). Subsequent passes pick up the ones that failed the previous time
+  # now that their deps are satisfied. Three passes cover any normal dep
+  # chain depth; we log the outcome of each so the install log actually
+  # shows what happened instead of swallowing errors.
   for pass in 1 2 3; do
     log "dpkg -i pass $pass..."
     if dpkg -i "${DRIVEFORGE_OFFLINE_BUNDLE}"/debs/*.deb; then
@@ -60,18 +63,19 @@ if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/de
       warn "dpkg -i still reporting errors after 3 passes — check the log above"
     fi
   done
+  # Fix-broken pass to resolve anything still hanging. Use cached debs only.
   apt-get install -y --no-download --fix-broken || \
     warn "apt-get --fix-broken reported errors"
 else
   apt-get update -qq
   apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}" >/dev/null
 fi
-# Post-install sanity check — if any critical binary is missing, fail now
-# with a useful message instead of crashing two sections later at e.g.
-# `python3 -m venv`. Hit a silent version of this on 2026-04-20 in the ISO
-# path where errors were being swallowed.
+# Post-install sanity check — the specific failure we hit was `python3`
+# missing even though setup claimed success, because errors were being
+# silently swallowed. A loud check here fails the install at a useful spot
+# instead of crashing later at `python3 -m venv`.
 for bin in python3 apt-get useradd systemctl; do
-  command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
+  command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt/dpkg log above"
 done
 ok "system packages installed"
 
