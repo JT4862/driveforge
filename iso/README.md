@@ -67,7 +67,7 @@ qemu-img create -f qcow2 /tmp/test-disk.qcow2 20G
 
 qemu-system-x86_64 \
   -m 4G -smp 2 -accel tcg \
-  -drive file=dist/driveforge-installer-0.0.1-amd64.iso,format=raw,readonly=on,if=none,id=cdrom \
+  -drive file=dist/driveforge-installer-0.1.0-amd64.iso,format=raw,readonly=on,if=none,id=cdrom \
   -device ide-cd,drive=cdrom,bootindex=2 \
   -drive file=/tmp/test-disk.qcow2,if=none,id=disk0,format=qcow2 \
   -device virtio-blk-pci,drive=disk0,bootindex=1 \
