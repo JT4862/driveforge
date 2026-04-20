@@ -67,10 +67,11 @@ qemu-img create -f qcow2 /tmp/test-disk.qcow2 20G
 
 qemu-system-x86_64 \
   -m 4G -smp 2 -accel tcg \
-  -drive file=dist/driveforge-installer-0.1.0-amd64.iso,format=raw,readonly=on,if=none,id=cdrom \
-  -device ide-cd,drive=cdrom,bootindex=1 \
-  -drive file=/tmp/test-disk.qcow2,if=virtio \
-  -netdev user,id=n0,hostfwd=tcp::8081-:8080 \
+  -drive file=dist/driveforge-installer-0.0.1-amd64.iso,format=raw,readonly=on,if=none,id=cdrom \
+  -device ide-cd,drive=cdrom,bootindex=2 \
+  -drive file=/tmp/test-disk.qcow2,if=none,id=disk0,format=qcow2 \
+  -device virtio-blk-pci,drive=disk0,bootindex=1 \
+  -netdev user,id=n0,hostfwd=tcp::8081-:8080,hostfwd=tcp::2222-:22 \
   -device virtio-net,netdev=n0 \
   -audiodev none,id=ad \
   -device intel-hda -device hda-duplex,audiodev=ad \
@@ -78,6 +79,13 @@ qemu-system-x86_64 \
   -monitor unix:/tmp/qemu-mon.sock,server,nowait \
   -daemonize -pidfile /tmp/qemu.pid
 ```
+
+**Boot-order note**: the disk is `bootindex=1` and the CD is `bootindex=2`
+on purpose. First boot, the empty qcow2 has no valid MBR so SeaBIOS
+falls through to the CD and runs the installer. After install + reboot,
+the disk now has GRUB → boots the installed Debian directly. If you
+reverse these (CD=1, disk=2) you get an infinite install loop because
+every reboot lands back on the installer ISO.
 
 Set the VNC password (macOS Screen Sharing requires one):
 
