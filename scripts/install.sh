@@ -60,6 +60,10 @@ APT_PACKAGES=(
   python3 python3-venv python3-pip
   smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
   tmux lshw lsscsi ipmitool avahi-daemon avahi-utils
+  # ledmon provides `ledctl` for SGPIO/IBPI LED control on SES-capable
+  # backplanes. Expander-only backplanes (e.g. some NX-3200 SKUs) fall
+  # back silently — see driveforge/core/blinker.py _try_ledctl().
+  ledmon
   fonts-dejavu-core
   curl ca-certificates
 )
@@ -89,6 +93,53 @@ for bin in python3 apt-get useradd systemctl; do
   command -v "$bin" >/dev/null || die "required binary '$bin' not on PATH after apt install; check the apt log above"
 done
 ok "system packages installed"
+
+# Auto-load kernel modules at boot that DriveForge relies on but which
+# Debian doesn't always trigger via udev on a fresh install:
+#   ses             - binds to SES target devices so /sys/class/enclosure/
+#                     populates. Skipped here → SAS-layer fallback, but with
+#                     less info and no LED control.
+#   ipmi_si         - detects the local BMC via KCS/SMIC/BT interface.
+#   ipmi_devintf    - creates /dev/ipmi[0-9]* for userspace tools (ipmitool).
+# Harmless no-ops on hardware that doesn't have SES or IPMI.
+install -d /etc/modules-load.d
+cat > /etc/modules-load.d/driveforge.conf <<'EOF'
+# Managed by DriveForge install.sh — regenerated on each run.
+ses
+ipmi_si
+ipmi_devintf
+EOF
+# Load them now so we don't need a reboot before first discover.
+for m in ses ipmi_si ipmi_devintf; do
+  modprobe "$m" 2>/dev/null || true
+done
+
+# The daemon runs as the unprivileged `driveforge` user, but /dev/ipmi0 is
+# created mode 0600 root:root by default — so ipmitool fails for the daemon
+# ("could not reach the local BMC"). Install a udev rule that makes
+# /dev/ipmi[0-9]* group-readable by the driveforge group, then chmod the
+# existing device (if any) so it takes effect without waiting for a reboot.
+install -d /etc/udev/rules.d
+cat > /etc/udev/rules.d/90-driveforge-ipmi.rules <<'EOF'
+# Allow the driveforge daemon to read chassis power / sensor data via IPMI.
+KERNEL=="ipmi[0-9]*", MODE="0660", GROUP="driveforge"
+EOF
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=ipmi 2>/dev/null || true
+# Immediate effect for a /dev/ipmi0 that already exists from earlier boot.
+for dev in /dev/ipmi[0-9]*; do
+  [[ -e "$dev" ]] || continue
+  chgrp driveforge "$dev" 2>/dev/null || true
+  chmod 0660 "$dev" 2>/dev/null || true
+done
+
+# `ledmon` ships with a systemd daemon that auto-starts and polls for
+# RAID rebuild events to drive LEDs. DriveForge calls `ledctl` directly
+# on state transitions (pass/fail/blinker), so the daemon is redundant
+# and just adds background CPU. Disable if installed.
+if systemctl list-unit-files ledmon.service >/dev/null 2>&1; then
+  systemctl disable --now ledmon.service >/dev/null 2>&1 || true
+fi
 
 log "Creating driveforge user and directories..."
 if id -u driveforge >/dev/null 2>&1; then
