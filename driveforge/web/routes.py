@@ -715,6 +715,8 @@ def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
+    from driveforge.core import updates as updates_mod
+
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -722,7 +724,24 @@ def settings_page(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "saved_panel": saved,
             "restart_required": restart == "1",
+            "update_info": updates_mod.cached(),
+            "update_command": updates_mod.update_command(),
+            "current_version": updates_mod.CURRENT_VERSION,
         },
+    )
+
+
+@router.post("/settings/check-updates")
+def check_updates(request: Request) -> RedirectResponse:
+    """Manual-trigger update check. Hits the GitHub Releases API once,
+    caches the result for an hour. Never installs anything — surfaces a
+    copy-paste command for the operator to run via SSH."""
+    from driveforge.core import updates as updates_mod
+
+    info = updates_mod.check_for_updates(force=True)
+    return RedirectResponse(
+        url=f"/settings?saved=updates&update_status={info.status}",
+        status_code=303,
     )
 
 

@@ -102,6 +102,71 @@
   </div>
 </form>
 
+<section class="panel">
+  <div class="panel-head">
+    <h2>About / Updates</h2>
+    {% if saved_panel == "updates" %}<span class="pill saved">checked</span>{% endif %}
+  </div>
+  <dl class="kv">
+    <dt>Current version</dt>
+    <dd><code>v{{ current_version }}</code></dd>
+    {% if update_info %}
+      <dt>Last checked</dt>
+      <dd>{{ update_info.checked_at.strftime('%Y-%m-%d %H:%M UTC') if update_info.checked_at else "—" }}</dd>
+      <dt>Latest release</dt>
+      <dd>
+        {% if update_info.latest_version %}
+          <code>{{ update_info.latest_version }}</code>
+          {% if update_info.release_url %}
+            &middot; <a href="{{ update_info.release_url }}" target="_blank" rel="noopener">release notes ↗</a>
+          {% endif %}
+        {% else %}
+          —
+        {% endif %}
+      </dd>
+      <dt>Status</dt>
+      <dd>
+        {% if update_info.status == "available" %}
+          <span class="pill" style="background: rgba(63,185,80,0.2); color: var(--ok);">update available</span>
+        {% elif update_info.status == "current" %}
+          <span class="pill" style="background: rgba(63,185,80,0.15); color: var(--ok);">up to date</span>
+        {% elif update_info.status == "no_releases" %}
+          <span class="pill">no releases published yet</span>
+        {% elif update_info.status == "rate_limited" %}
+          <span class="pill" style="background: rgba(210,153,34,0.2); color: var(--warn);">rate limited</span>
+        {% else %}
+          <span class="pill" style="background: rgba(248,81,73,0.2); color: var(--fail);">check failed</span>
+        {% endif %}
+        {% if update_info.error_detail %}
+          <span class="muted small" style="margin-left: 6px;">{{ update_info.error_detail }}</span>
+        {% endif %}
+      </dd>
+    {% else %}
+      <dt>Status</dt>
+      <dd class="muted">Not checked yet — click below to check now.</dd>
+    {% endif %}
+  </dl>
+
+  {% if update_info and update_info.update_available %}
+  <div class="banner ok-banner" style="margin-top: 14px;">
+    <strong>Update {{ update_info.latest_version }} is available.</strong>
+    Run this on the DriveForge host via SSH to install it
+    (we don't auto-install from the web UI for security reasons):
+    <pre class="log-tail" style="margin-top: 8px;">{{ update_command }}</pre>
+  </div>
+  {% endif %}
+
+  <p class="muted small" style="margin-top: 12px;">
+    Clicking Check sends one HTTPS request to <code>api.github.com</code>
+    revealing this server's IP. No telemetry is sent. Result is cached for
+    one hour.
+  </p>
+
+  <form action="/settings/check-updates" method="post" class="form-actions">
+    <button type="submit" class="btn">Check for updates</button>
+  </form>
+</section>
+
 <form class="panel" method="post" action="/settings/daemon">
   <div class="panel-head">
     <h2>Daemon</h2>

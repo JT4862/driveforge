@@ -1,0 +1,171 @@
+"""Release-update checker.
+
+Hits the GitHub Releases API on demand and reports whether a newer
+DriveForge release is available. Manual-only — never auto-updates,
+never auto-checks. The operator clicks a button in Settings, the
+daemon makes one HTTPS request, the result is cached for an hour to
+avoid hammering the API on repeat page loads.
+
+No telemetry is sent — the request body is empty and the User-Agent
+identifies DriveForge so GitHub's logs see what tool is asking, but
+the request reveals only the operator's IP (which is the same IP that
+appears in any other outbound HTTPS request from the box).
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+import httpx
+
+from driveforge.version import __version__ as CURRENT_VERSION
+
+logger = logging.getLogger(__name__)
+
+GITHUB_RELEASES_URL = "https://api.github.com/repos/JT4862/driveforge/releases/latest"
+CACHE_TTL_SEC = 3600  # one hour
+HTTP_TIMEOUT_SEC = 10
+
+
+@dataclass
+class UpdateInfo:
+    """Snapshot of an update-check result. Always non-None after a check; the
+    `status` field tells the caller what happened."""
+
+    status: str  # "current" | "available" | "no_releases" | "rate_limited" | "error"
+    current_version: str
+    latest_version: str | None = None
+    release_url: str | None = None
+    release_notes: str | None = None
+    published_at: datetime | None = None
+    error_detail: str | None = None
+    checked_at: datetime | None = None
+
+    @property
+    def update_available(self) -> bool:
+        return self.status == "available"
+
+
+# In-memory cache shared across the process. Reset on daemon restart.
+_cached: UpdateInfo | None = None
+_cached_at: float = 0.0
+
+
+def _parse_version(raw: str) -> tuple[int, ...]:
+    """Parse 'v0.1.0' / '0.1.0' / '0.1.0-rc1' → comparable tuple.
+
+    Returns () for anything that doesn't parse — caller treats unknown as
+    "can't compare, assume current" so we never falsely claim an update.
+    """
+    v = raw.lstrip("vV").strip()
+    if not v:
+        return ()
+    head = v.split("-")[0]  # drop pre-release suffix for the numeric compare
+    parts = head.split(".")
+    out: list[int] = []
+    for p in parts[:3]:
+        try:
+            out.append(int(p))
+        except ValueError:
+            return ()
+    return tuple(out)
+
+
+def _cached_or_fresh() -> UpdateInfo | None:
+    """Return the cached UpdateInfo if still within TTL, else None."""
+    if _cached is None:
+        return None
+    if (time.monotonic() - _cached_at) > CACHE_TTL_SEC:
+        return None
+    return _cached
+
+
+def cached() -> UpdateInfo | None:
+    """Public accessor — returns the last cache value (even if stale) or None."""
+    return _cached
+
+
+def check_for_updates(force: bool = False) -> UpdateInfo:
+    """Hit the GitHub Releases API and return current vs latest comparison.
+
+    Honors the 1-hour memory cache unless `force=True`. Always returns an
+    UpdateInfo — the `status` field tells the caller what happened (the
+    daemon should never crash because the network is down).
+    """
+    global _cached, _cached_at
+    if not force:
+        cached_result = _cached_or_fresh()
+        if cached_result is not None:
+            return cached_result
+
+    info = UpdateInfo(
+        status="error",
+        current_version=CURRENT_VERSION,
+        checked_at=datetime.now(UTC),
+    )
+    try:
+        resp = httpx.get(
+            GITHUB_RELEASES_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"DriveForge/{CURRENT_VERSION}",
+            },
+            timeout=HTTP_TIMEOUT_SEC,
+        )
+    except httpx.RequestError as exc:
+        info.error_detail = f"network: {exc}"
+        logger.warning("update check failed: %s", exc)
+        _cached, _cached_at = info, time.monotonic()
+        return info
+
+    if resp.status_code == 404:
+        # No releases published yet — common during pre-alpha.
+        info.status = "no_releases"
+        info.error_detail = "no GitHub releases published yet"
+    elif resp.status_code == 403:
+        # GitHub rate limit (60 req/hr unauthenticated). Rare in practice
+        # given our 1-hour cache.
+        info.status = "rate_limited"
+        info.error_detail = "GitHub API rate limit hit (try again in an hour)"
+    elif resp.status_code != 200:
+        info.error_detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
+    else:
+        try:
+            data = resp.json()
+            info.latest_version = data.get("tag_name") or data.get("name")
+            info.release_url = data.get("html_url")
+            info.release_notes = data.get("body")
+            published = data.get("published_at")
+            if published:
+                # GitHub uses RFC3339 with trailing Z
+                info.published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            current = _parse_version(CURRENT_VERSION)
+            latest = _parse_version(info.latest_version or "")
+            if not current or not latest:
+                # Couldn't parse one of them — don't claim an update.
+                info.status = "current"
+                info.error_detail = "version string unparseable; treating as current"
+            elif latest > current:
+                info.status = "available"
+            else:
+                info.status = "current"
+        except (ValueError, KeyError) as exc:
+            info.error_detail = f"malformed response: {exc}"
+
+    _cached, _cached_at = info, time.monotonic()
+    return info
+
+
+def update_command() -> str:
+    """The exact shell snippet to run on the host for a manual update.
+
+    Surfaced in the Settings panel so the operator can copy-paste it into
+    an SSH session — we don't run it from the web UI for security reasons
+    (see the discussion in the chat history; daemon-self-update needs a
+    polkit-gated systemd unit + batch refusal + reconnect logic, deferred
+    as a follow-on feature).
+    """
+    return "cd /home/driveforge/driveforge-src && git pull && sudo ./scripts/install.sh"
