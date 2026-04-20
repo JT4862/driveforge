@@ -113,36 +113,63 @@ tar xzf "$BUNDLE_TGZ" -C "$WORK/cd" --strip-components=1 -C "$WORK/cd/driveforge
 
 # --- 6. Customize boot menu — auto-select preseeded install ------------------
 # isolinux/BIOS boot
-if [[ -f "$WORK/cd/isolinux/isolinux.cfg" ]]; then
-  echo "==> Patching isolinux boot menu"
-  cat > "$WORK/cd/isolinux/txt.cfg" <<'EOF'
+#
+# Strategy: REPLACE Debian's whole isolinux.cfg with a single-entry menu
+# that auto-fires our preseeded install. The default ISO has multiple
+# config files (isolinux.cfg → menu.cfg → txt.cfg/gtk.cfg/spk.cfg) where
+# the speech-synth path triggers automatically after 5 sec of boot-prompt
+# inactivity, and the default-selected entry is "Graphical install" which
+# has no preseed args. Stripping all that to one entry makes the wrong
+# path impossible to hit.
+if [[ -d "$WORK/cd/isolinux" ]]; then
+  echo "==> Replacing isolinux boot menu (single entry, no speech-synth, auto-fire)"
+  # Wipe Debian's includes so they don't override our config.
+  rm -f "$WORK/cd/isolinux/menu.cfg" \
+        "$WORK/cd/isolinux/txt.cfg" \
+        "$WORK/cd/isolinux/gtk.cfg" \
+        "$WORK/cd/isolinux/spk.cfg" \
+        "$WORK/cd/isolinux/adtxt.cfg" \
+        "$WORK/cd/isolinux/adgtk.cfg"
+  # No `ui menu.c32` — that module isn't present in every netinst layout
+  # (last build hit "Failed to load COM32 file menu.c32" loop). Without a UI
+  # module, isolinux drops to a "boot:" prompt and auto-fires `default` after
+  # `timeout`. For a single-entry installer that's exactly what we want.
+  # `prompt 1` keeps the prompt visible for 5s so the operator can type
+  # `rescue` to fall through to the manual path.
+  cat > "$WORK/cd/isolinux/isolinux.cfg" <<'EOF'
+# Single-entry boot config. After 5 seconds the DriveForge automated
+# install fires automatically. Type `rescue` + Enter at the boot prompt
+# to drop to a manual Debian installer instead.
 default driveforge
+prompt 1
+timeout 50
+
+say DriveForge installer — auto-firing in 5s. Type `rescue` for manual install.
+
 label driveforge
-        menu label ^DriveForge automated install (recommended)
-        kernel /install.amd/vmlinuz
-        append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
-label install
-        menu label ^Manual Debian install
-        kernel /install.amd/vmlinuz
-        append vga=788 initrd=/install.amd/initrd.gz --- quiet
+    kernel /install.amd/vmlinuz
+    append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+
+label rescue
+    kernel /install.amd/vmlinuz
+    append vga=788 initrd=/install.amd/initrd.gz --- quiet
 EOF
-  # Force auto-select after 5 sec
-  sed -i 's/^timeout .*/timeout 50/' "$WORK/cd/isolinux/isolinux.cfg" 2>/dev/null || true
 fi
 
 # UEFI boot (grub)
 if [[ -f "$WORK/cd/boot/grub/grub.cfg" ]]; then
-  echo "==> Patching grub boot menu (UEFI)"
+  echo "==> Replacing grub boot menu (UEFI, single entry, auto-fire)"
   cat > "$WORK/cd/boot/grub/grub.cfg" <<'EOF'
 set timeout=5
 set default="0"
 
-menuentry "DriveForge automated install (recommended)" {
+menuentry "DriveForge automated install (Debian 12)" {
     set background_color=black
     linux  /install.amd/vmlinuz auto=true priority=critical preseed/file=/cdrom/preseed.cfg quiet
     initrd /install.amd/initrd.gz
 }
-menuentry "Manual Debian install" {
+
+menuentry "Manual Debian install (no preseed)" {
     set background_color=black
     linux  /install.amd/vmlinuz quiet
     initrd /install.amd/initrd.gz
