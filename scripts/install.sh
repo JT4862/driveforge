@@ -114,24 +114,33 @@ python3 -m venv /opt/driveforge
 # shellcheck disable=SC1091
 source /opt/driveforge/bin/activate
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# Offline-bundle path: the ISO installer's late_command sets
-# DRIVEFORGE_OFFLINE_BUNDLE so pip resolves from the bundled wheels cache
-# instead of pypi.org.
-PIP_OFFLINE_ARGS=()
+
+# Two install modes:
+#
+#   Offline (ISO bundle path): DRIVEFORGE_OFFLINE_BUNDLE is set and contains
+#     pre-built wheels (including a driveforge-*.whl produced by
+#     build-offline-bundle.sh's `pip wheel` step). Install by PACKAGE NAME
+#     from the wheels cache so pip picks the prebuilt wheel directly —
+#     critically, never tries to rebuild from an sdist. A rebuild would
+#     need hatchling (DriveForge's PEP 517 build backend), which isn't
+#     in the bundle because build backends don't get packaged by
+#     `pip wheel`. Hit this on 2026-04-20 with the "No matching
+#     distribution found for hatchling" error.
+#
+#   Online (direct clone path): no offline bundle, internet available.
+#     Install from the local source directory; pip resolves hatchling
+#     from PyPI at build time.
 if [[ -n "${DRIVEFORGE_OFFLINE_BUNDLE:-}" && -d "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" ]]; then
   log "Using offline wheel cache at ${DRIVEFORGE_OFFLINE_BUNDLE}/wheels"
-  PIP_OFFLINE_ARGS=(--no-index --find-links "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels")
-fi
-# On Linux we need the `linux` extra — it pulls in pyudev for the hotplug
-# event monitor. Without this, the daemon boots fine but never sees drive
-# add/remove events and the LED-blinker-on-reinsert feature silently
-# no-ops. `--upgrade` so re-running install.sh after deps change actually
-# refreshes them instead of pip concluding "driveforge X.Y.Z already
-# present, skip" on an unchanged version string.
-if [[ -f "$SRC_DIR/pyproject.toml" ]]; then
-  pip install --quiet --upgrade "${PIP_OFFLINE_ARGS[@]}" "$SRC_DIR[linux]"
+  # By-name install from the wheels dir — pip finds driveforge-*.whl
+  # and installs it directly, no build step, no backend needed.
+  pip install --quiet --upgrade \
+    --no-index --find-links "${DRIVEFORGE_OFFLINE_BUNDLE}/wheels" \
+    "driveforge[linux]"
 else
-  pip install --quiet --upgrade "${PIP_OFFLINE_ARGS[@]}" "driveforge[linux]"
+  # Online path. `--upgrade` so re-running install.sh on a drift-free
+  # version string still refreshes deps that may have changed.
+  pip install --quiet --upgrade "$SRC_DIR[linux]"
 fi
 deactivate
 ln -sf /opt/driveforge/bin/driveforge-daemon /usr/bin/driveforge-daemon
