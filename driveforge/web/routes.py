@@ -755,11 +755,22 @@ def _print_label_for_run(request: Request, state, drive, run) -> tuple[bool, str
     except Exception as exc:  # noqa: BLE001
         logger.exception("label render failed for %s", drive.serial)
         return False, f"render failed: {exc}"
-    ok = printer_mod.print_label(
-        img, model=pc.model, backend=backend, identifier=pc.backend_identifier
+    # v0.6.1+: print_label now returns (ok, message). The message
+    # carries the specific failure reason (unknown model, no USB
+    # printer detected, pyusb error string, wrong-roll rejection)
+    # so the banner can surface it verbatim instead of the old
+    # generic "dispatch failed." The `roll` parameter (also v0.6.1+)
+    # gets translated to brother_ql's label identifier so the raster's
+    # label-type metadata matches the physical roll loaded.
+    ok, print_msg = printer_mod.print_label(
+        img,
+        model=pc.model,
+        backend=backend,
+        identifier=pc.backend_identifier,
+        roll=pc.label_roll,
     )
     if not ok:
-        return False, "printer dispatch failed (check Settings → Printer and device connection)"
+        return False, print_msg
     return True, f"printed label for {drive.serial}"
 
 
@@ -988,6 +999,11 @@ def settings_page(request: Request) -> HTMLResponse:
     hostname_error = request.query_params.get("hostname_error")
     install_error = request.query_params.get("install_error")
     install_started = request.query_params.get("install_started") == "1"
+    # v0.6.1+: test-print flow uses `saved=test_print` on success and
+    # `test_print_error=<msg>` on failure so the template can render a
+    # green "sent to printer" pill or a warn banner with the specific
+    # reason (same pattern as install-update's error handling).
+    test_print_error = request.query_params.get("test_print_error")
     from driveforge.core import hostname as hostname_mod
     from driveforge.core import telemetry
     from driveforge.core import updates as updates_mod
@@ -1023,6 +1039,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "hostname_error": hostname_error,
             "install_error": install_error,
             "install_started": install_started,
+            "test_print_error": test_print_error,
         },
     )
 
@@ -1203,6 +1220,56 @@ async def save_printer(request: Request) -> RedirectResponse:
     p.label_roll = (form.get("label_roll") or "").strip() or None
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/settings?saved=printer", status_code=303)
+
+
+@router.post("/settings/test-print")
+async def test_print(request: Request) -> RedirectResponse:
+    """Fire a single sentinel label to the configured printer. v0.6.1+.
+
+    Purpose: confirm the printer is wired up and the backend can
+    dispatch raster bytes, without having to wait for a completed
+    drive run. Also the mechanism for v1.0's Brother QL hardware-test
+    validation gate. Refuses cleanly when no model is saved so the
+    button can't be hit before the operator has saved the printer
+    panel (though the template hides it in that case too).
+
+    Redirects back to /settings with either ``?saved=test_print`` on
+    success (green pill) or ``?test_print_error=<msg>`` on failure
+    (warn banner with the specific error — unknown model, no USB
+    printer detected, wrong label roll, etc.).
+    """
+    from urllib.parse import quote
+    from driveforge.core import printer as printer_mod
+
+    state = get_state()
+    pc = state.settings.printer
+    if not pc.model:
+        return RedirectResponse(
+            url="/settings?test_print_error=" + quote("no printer configured — pick a model + connection and Save first"),
+            status_code=303,
+        )
+    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
+    try:
+        img = printer_mod.render_test_label(roll=pc.label_roll or "DK-1209")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("test-print render failed")
+        return RedirectResponse(
+            url="/settings?test_print_error=" + quote(f"render failed: {exc}"),
+            status_code=303,
+        )
+    ok, msg = printer_mod.print_label(
+        img,
+        model=pc.model,
+        backend=backend,
+        identifier=pc.backend_identifier,
+        roll=pc.label_roll,
+    )
+    if not ok:
+        return RedirectResponse(
+            url="/settings?test_print_error=" + quote(msg),
+            status_code=303,
+        )
+    return RedirectResponse(url="/settings?saved=test_print", status_code=303)
 
 
 @router.post("/settings/integrations")

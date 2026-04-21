@@ -65,6 +65,13 @@ APT_PACKAGES=(
   # back silently — see driveforge/core/blinker.py _try_ledctl().
   ledmon
   fonts-dejavu-core
+  # v0.6.1+: policykit-1 is required for v0.6.0's polkit-mediated
+  # in-app update path. It is NOT installed by default on Debian 12
+  # netinst — a fact that bit v0.6.0. Without it, install.sh's rule
+  # drop to /etc/polkit-1/rules.d/ is silently skipped and the
+  # in-app update button fails with "Interactive authentication
+  # required." Pin it explicitly so every DriveForge host has it.
+  policykit-1
   curl ca-certificates
 )
 # Normal path uses Debian's mirrors. Air-gapped path (DRIVEFORGE_OFFLINE_BUNDLE
@@ -132,6 +139,19 @@ for dev in /dev/ipmi[0-9]*; do
   chgrp driveforge "$dev" 2>/dev/null || true
   chmod 0660 "$dev" 2>/dev/null || true
 done
+
+# v0.6.1+: Brother QL-series USB label printers (VID 0x04f9) are
+# created root:lp mode 0664 by default, and the daemon isn't in the
+# `lp` group (nor should it be — that'd grant access to all lp
+# devices indiscriminately). This rule grants the `driveforge` group
+# access to the one VID we care about so brother_ql's pyusb backend
+# can send raster data without the daemon running as root.
+cat > /etc/udev/rules.d/90-driveforge-brother-usb.rules <<'EOF'
+# Brother QL-series label printers — access for the driveforge daemon.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04f9", MODE="0660", GROUP="driveforge"
+EOF
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger --subsystem-match=usb --attr-match=idVendor=04f9 2>/dev/null || true
 
 # `ledmon` ships with a systemd daemon that auto-starts and polls for
 # RAID rebuild events to drive LEDs. DriveForge calls `ledctl` directly

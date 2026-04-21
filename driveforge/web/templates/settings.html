@@ -122,42 +122,85 @@
   </div>
 </form>
 
-<form class="panel" method="post" action="/settings/printer">
+<section class="panel">
   <div class="panel-head">
     <h2>Printer</h2>
     {% if saved_panel == "printer" %}<span class="pill saved">saved</span>{% endif %}
+    {% if saved_panel == "test_print" %}<span class="pill" style="background: rgba(63,185,80,0.18); color: var(--ok);">sent to printer</span>{% endif %}
   </div>
-  <label class="field">
-    <span>Model</span>
-    <select name="model">
-      <option value="">— not configured —</option>
-      {% for m in ["QL-800", "QL-810W", "QL-820NWBc", "QL-1100", "QL-1110NWBc"] %}
-      <option value="{{ m }}"{% if settings.printer.model == m %} selected{% endif %}>{{ m }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <label class="field">
-    <span>Connection</span>
-    <select name="connection">
-      {% for c in ["usb", "network", "bluetooth"] %}
-      <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
-      {% endfor %}
-      <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
-    </select>
-  </label>
-  <label class="field">
-    <span>Label roll</span>
-    <select name="label_roll">
-      <option value="">— auto-detect (QL-820/810/1100 only) —</option>
-      {% for r in ["DK-1209", "DK-1208", "DK-1201", "DK-1221", "DK-22210"] %}
-      <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  <div class="form-actions">
-    <button type="submit" class="btn primary">Save printer</button>
+
+  {% if test_print_error %}
+  <div class="banner warn-banner" style="margin-bottom: 14px;">
+    &#9888; <strong>Test print failed:</strong> {{ test_print_error }}
   </div>
-</form>
+  {% endif %}
+
+  <form method="post" action="/settings/printer">
+    <label class="field">
+      <span>Model</span>
+      {# v0.6.1: model values are exact brother_ql identifiers — pre-
+         v0.6.1 offered QL-820NWBc / QL-1110NWBc which brother_ql's
+         library rejects (BrotherQLUnknownModel → 500). The labels
+         include the "c" suffix variants for operator recognition
+         since that's what's printed on many physical units. #}
+      <select name="model">
+        <option value="">— not configured —</option>
+        <option value="QL-800"{% if settings.printer.model == "QL-800" %} selected{% endif %}>QL-800</option>
+        <option value="QL-810W"{% if settings.printer.model == "QL-810W" %} selected{% endif %}>QL-810W</option>
+        <option value="QL-820NWB"{% if settings.printer.model == "QL-820NWB" %} selected{% endif %}>QL-820NWB / QL-820NWBc</option>
+      </select>
+      <p class="muted small" style="margin-top: 4px;">
+        The QL-1100 / QL-1110NWB aren't offered here because
+        <code>brother_ql</code>, the raster library we ship with, doesn't
+        recognize those models. Support requires a library upgrade; the
+        800-series covers most DriveForge deployments.
+      </p>
+    </label>
+    <label class="field">
+      <span>Connection</span>
+      <select name="connection">
+        {% for c in ["usb", "network", "bluetooth"] %}
+        <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+        <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Label roll</span>
+      <select name="label_roll">
+        <option value="">— auto-detect (QL-820/810/1100 only) —</option>
+        {% for r in ["DK-1209", "DK-1208", "DK-1201", "DK-1221", "DK-22210"] %}
+        <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="form-actions">
+      <button type="submit" class="btn primary">Save printer</button>
+    </div>
+  </form>
+
+  {# v0.6.1+ Test print button. Shown only after model + connection are
+     saved so there's something real to dispatch. Uses a separate
+     <form> rather than a second submit on the save form so clicking
+     Test Print can't accidentally re-save unsaved dropdown edits. #}
+  {% if settings.printer.model %}
+  <form method="post" action="/settings/test-print"
+        style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--panel-border);">
+    <div style="display: flex; gap: 12px; align-items: center;">
+      <button type="submit" class="btn">Test print</button>
+      <span class="muted small">
+        Prints a sentinel label (dummy serial "TEST-PRINT", grade A) using the
+        currently-saved settings &mdash; useful for verifying the printer is
+        wired up before committing a real cert. v0.6.1+.
+      </span>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted small" style="margin-top: 12px;">
+    Save a printer model above to enable the Test print button.
+  </p>
+  {% endif %}
+</section>
 
 <form class="panel" method="post" action="/settings/integrations">
   <div class="panel-head">
