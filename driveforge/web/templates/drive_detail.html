@@ -17,8 +17,12 @@
 <section class="panel">
   <h2 style="display: flex; align-items: center; gap: 12px;">
     Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}
+    {# A/B/C → "Preview cert label"; F → "Preview fail label"; ERR and
+       legacy fail → no preview, nothing to print. #}
     {% if latest.completed_at and latest.grade in ("A", "B", "C") %}
     <button type="button" class="btn" style="margin-left: auto;" onclick="document.getElementById('label-preview-modal').showModal()">Preview cert label</button>
+    {% elif latest.completed_at and latest.grade == "F" %}
+    <button type="button" class="btn" style="margin-left: auto;" onclick="document.getElementById('label-preview-modal').showModal()">Preview fail label</button>
     {% endif %}
   </h2>
   {% if latest.error_message %}
@@ -43,17 +47,21 @@
   </dl>
 </section>
 
-{% if latest.completed_at and latest.grade in ("A", "B", "C") %}
+{% if latest.completed_at and latest.grade in ("A", "B", "C", "F") %}
 <dialog id="label-preview-modal" class="label-preview-dialog">
   <header class="label-preview-head">
-    <strong>Cert label preview</strong>
+    <strong>{% if latest.grade == "F" %}Fail label preview{% else %}Cert label preview{% endif %}</strong>
     <form method="dialog" class="inline"><button type="submit" class="btn-link" aria-label="Close">×</button></form>
   </header>
   <div class="label-preview-body">
-    <img src="/drives/{{ drive.serial }}/label-preview.png" alt="Cert label for {{ drive.serial }}">
+    <img src="/drives/{{ drive.serial }}/label-preview.png" alt="Label for {{ drive.serial }}">
     <p class="label-preview-note muted">
       Rendered at the configured roll size ({{ label_roll }}).
       QR code resolves to <code>/reports/{{ drive.serial }}</code>.
+      {% if latest.grade == "F" %}
+      This sticker marks the drive as a failed unit — it carries the
+      primary failure reason; scan the QR for the full rule breakdown.
+      {% endif %}
     </p>
   </div>
   <footer class="label-preview-actions">
