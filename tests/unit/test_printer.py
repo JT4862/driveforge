@@ -356,6 +356,81 @@ def test_render_pass_label_omits_remapped_line_on_legacy_none() -> None:
     assert not any("Remapped" in s for s in captured_strings)
 
 
+# ---------------------------------------------------------------- v0.5.6 throughput line
+
+
+def test_render_pass_label_includes_sustained_throughput_line() -> None:
+    """v0.5.6: full-pipeline pass-tier labels print a
+    "Sustained N MB/s over 8-pass burn-in" line when throughput stats
+    were captured during badblocks."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(throughput_mean_mbps=178.4))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert any("Sustained 178 MB/s" in s for s in captured_strings), (
+        f"expected 'Sustained 178 MB/s' line; got strings: {captured_strings}"
+    )
+    assert any("over 8-pass burn-in" in s for s in captured_strings)
+
+
+def test_render_pass_label_omits_throughput_line_when_none() -> None:
+    """Legacy rows and diskstats-failed runs have throughput_mean_mbps=None;
+    label must stay silent about throughput in that case."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(throughput_mean_mbps=None))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert not any("Sustained" in s for s in captured_strings)
+    assert not any("MB/s" in s for s in captured_strings)
+
+
+def test_render_quick_mode_label_omits_throughput_line() -> None:
+    """Quick-pass runs skip badblocks entirely, so any throughput_mean_mbps
+    would be misleading. Label must not render the sustained line on
+    quick-mode labels even if a value somehow got into CertLabelData."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(throughput_mean_mbps=200.0, quick_mode=True))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert not any("Sustained" in s for s in captured_strings), (
+        "quick-mode label must not print sustained throughput; "
+        f"got: {captured_strings}"
+    )
+
+
 def test_render_quick_mode_label_uses_quick_pass_wording() -> None:
     """Quick-pass runs that somehow still print a label (future use)
     should say 'during quick pass' instead of 'during burn-in'."""

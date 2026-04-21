@@ -75,6 +75,13 @@ class CertLabelData:
     # labels when this value is > 0 and falsy otherwise, so old rows
     # (None) and drives that didn't heal anything (0) both stay quiet.
     remapped_during_run: int | None = None
+    # v0.5.6+ sustained throughput mean (MB/s) across the 8-pass
+    # badblocks sweep. NULL on quick-pass / legacy / diskstats-failed
+    # runs. Pass-tier labels print "Sustained N MB/s over 8-pass
+    # burn-in" when present. Keeps the label honest — we're not
+    # claiming a synthetic benchmark number, just surfacing what the
+    # drive actually did during the burn-in we ran on it.
+    throughput_mean_mbps: float | None = None
 
 
 def primary_fail_reason(rules: list[dict]) -> str | None:
@@ -339,6 +346,12 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
         if data.remapped_during_run and data.remapped_during_run > 0:
             suffix = "during quick pass" if data.quick_mode else "during burn-in"
             lines.append(f"Remapped {data.remapped_during_run} {suffix}")
+
+        # v0.5.6+ sustained-throughput line \u2014 only printed on full
+        # pipeline runs where diskstats was available. Silent on
+        # quick-pass (no badblocks) and legacy rows (None).
+        if data.throughput_mean_mbps is not None and not data.quick_mode:
+            lines.append(f"Sustained {data.throughput_mean_mbps:.0f} MB/s over 8-pass burn-in")
 
         wipe_line = (
             "Wipe: NIST 800-88 Purge*"

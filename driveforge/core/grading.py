@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from driveforge.config import GradingConfig
 from driveforge.core.smart import SmartSnapshot
+from driveforge.core.throughput import ThroughputStats
 
 
 class Grade(str, Enum):
@@ -70,6 +71,7 @@ def grade_drive(
     long_test_passed: bool | None = True,
     badblocks_errors: tuple[int, int, int] = (0, 0, 0),
     max_temperature_c: int | None = None,
+    throughput: ThroughputStats | None = None,
 ) -> GradingResult:
     """Apply grading rules against pre/post snapshots + test outcomes.
 
@@ -211,6 +213,62 @@ def grade_drive(
                 fail_tier=Grade.C if overheated else None,  # demote to C, not fail
             )
         )
+
+    # v0.5.6+ throughput-consistency rules. Both are self-referential
+    # (drive vs itself) to avoid the "maintain a per-SKU benchmark
+    # table" trap. See driveforge/core/throughput.py for design rationale.
+    #
+    # Rule applies only when throughput stats are present AND non-None
+    # (full pipeline runs where diskstats was available). Quick-pass
+    # runs, legacy rows, and runs where diskstats failed all skip
+    # these rules rather than firing false positives on missing data.
+    if throughput is not None and throughput.mean_mbps is not None:
+        # Rule 1 — within-pass variance. If p5 dropped below
+        # within_pass_variance_ratio × mean, the drive had significant
+        # mid-pass slowdowns (signal of sector recovery via internal
+        # ECC retry). Demotes one tier; does not F outright.
+        if config.within_pass_variance_ratio is not None and throughput.mean_mbps > 0:
+            ratio = (throughput.p5_mbps or 0) / throughput.mean_mbps
+            threshold = config.within_pass_variance_ratio
+            consistent = ratio >= threshold
+            rules.append(
+                _rule(
+                    "throughput_within_pass_consistent",
+                    consistent,
+                    f"p5/mean={ratio:.2f} (threshold {threshold:.2f}); "
+                    f"p5={throughput.p5_mbps:.0f} mean={throughput.mean_mbps:.0f} MB/s",
+                    fail_tier=Grade.C if not consistent else None,
+                )
+            )
+
+        # Rule 2 — pass-to-pass degradation. Compare the LAST pass
+        # mean to pass 2's mean (pass 1 skipped to avoid false-firing
+        # on SLC-cache exhaustion in consumer SSDs, where pass 1 is
+        # cached-fast and pass 2+ are sustained-slow). Fires F if
+        # the drive visibly degraded during burn-in.
+        #
+        # Needs at least 3 passes completed (pass 1 skipped, need
+        # pass 2 and a later pass to compare). Short/aborted runs
+        # skip silently rather than firing on partial data.
+        if (
+            config.pass_to_pass_degradation_ratio is not None
+            and len(throughput.per_pass_means) >= 3
+        ):
+            baseline = throughput.per_pass_means[1]  # pass 2 (index 1)
+            final = throughput.per_pass_means[-1]
+            threshold = config.pass_to_pass_degradation_ratio
+            ratio = final / baseline if baseline > 0 else 1.0
+            stable = ratio >= threshold
+            rules.append(
+                _rule(
+                    "throughput_pass_to_pass_stable",
+                    stable,
+                    f"last-pass/pass-2 ratio={ratio:.2f} (threshold {threshold:.2f}); "
+                    f"pass2={baseline:.0f} last={final:.0f} MB/s "
+                    f"across {len(throughput.per_pass_means)} passes",
+                    fail_tier=Grade.FAIL if not stable else None,
+                )
+            )
 
     # --- Resolve final grade ---
     worst: Grade = Grade.A

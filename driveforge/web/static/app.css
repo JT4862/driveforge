@@ -477,6 +477,28 @@ table tr:hover { background: rgba(255,255,255,0.02); }
 }
 .remapped-inline { color: var(--grade-a); font-weight: 500; }
 .bay-card .watch-text { color: #e8a73c; font-weight: 600; font-style: normal; }
+/* v0.5.6+ per-pass throughput mini-chart on drive detail. Simple
+   bar-chart row where each bar is a pass, height scaled to the max
+   per-pass mean so the shape is always visible regardless of the
+   drive's absolute speed. Hover reveals pass index + MB/s. */
+.throughput-passes {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 44px;
+  margin-top: 6px;
+  padding: 2px 4px;
+  background: rgba(88,166,255,0.08);
+  border-radius: 3px;
+}
+.throughput-bar {
+  width: 8px;
+  background: var(--grade-b);
+  border-radius: 1px;
+  min-height: 2px;
+  transition: background 120ms;
+}
+.throughput-bar:hover { background: var(--grade-a); cursor: help; }
 /* v0.5.5+ quick-pass fail prompt banner. Rendered on the card when
    settings.daemon.quick_pass_fail_action="prompt" AND the drive's
    latest quick pass triaged as Fail. Ambered styling to match the
