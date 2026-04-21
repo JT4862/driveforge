@@ -194,6 +194,30 @@
         wired up before committing a real cert. v0.6.1+.
       </span>
     </div>
+
+    {# v0.6.2+ template-mode hint. Brother QL printers ship (or get
+       left) in "template mode" — a Brother-proprietary ESC/P command
+       mode for their P-touch Editor software. The brother_ql library
+       only speaks raster; any QL left in template mode silently
+       discards the raster bytes and prints nothing. This bit JT's
+       QL-820NWB during v0.6.1 validation — collapsed by default so
+       it's not noise for operators whose printers already work. #}
+    <details class="printer-troubleshoot" style="margin-top: 10px;">
+      <summary class="muted small">Not printing? Check raster mode &mdash; Brother QLs default to template mode</summary>
+      <p class="muted small" style="margin-top: 8px; line-height: 1.5;">
+        Brother QL printers have two command modes: <strong>raster</strong>
+        (what DriveForge sends) and <strong>template</strong> (Brother's
+        P-touch Editor pre-stored templates). A printer in template mode
+        silently discards raster data &mdash; you see "Printing was
+        successful" in the daemon log but nothing comes out.
+      </p>
+      <p class="muted small">
+        Switch to raster mode via the printer's physical menu:
+        <strong>Setup &rarr; Command Mode &rarr; Raster</strong> on the
+        QL-820NWB (path varies by model &mdash; consult the Brother user
+        guide). Power-cycle the printer once changed.
+      </p>
+    </details>
   </form>
   {% else %}
   <p class="muted small" style="margin-top: 12px;">

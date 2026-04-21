@@ -39,24 +39,37 @@ def test_argv_does_not_include_sudo() -> None:
     )
 
 
-def test_argv_is_systemctl_start_update_service() -> None:
-    """The only thing we ask systemctl to do is `start` the specific
-    update unit. Any drift here — wrong verb, wrong unit name —
-    would also drift from what the polkit rule whitelists, and the
-    call would fail on real hardware with a confusing "authentication
-    required" error."""
+def test_argv_is_systemctl_start_no_block_update_service() -> None:
+    """The only thing we ask systemctl to do is `start --no-block` the
+    specific update unit. Any drift here — wrong verb, wrong unit
+    name — would also drift from what the polkit rule whitelists and
+    the call would fail on real hardware with a confusing
+    "authentication required" error.
+
+    v0.6.2+ adds `--no-block` so systemctl returns after queueing the
+    StartUnit instead of waiting for the oneshot unit's full ExecStart
+    (the install.sh run) to complete. Without this, the 10-second
+    subprocess.run timeout fires mid-update on a successful run and
+    the operator sees a false "failed to invoke" banner while the
+    update is actually in progress."""
     fake_proc = MagicMock(returncode=0, stdout="", stderr="")
     with patch("subprocess.run", return_value=fake_proc) as run_mock, \
          patch("shutil.which", return_value="/usr/bin/systemctl"):
         trigger_in_app_update()
     argv = run_mock.call_args.args[0]
-    # Exactly three args: [systemctl_path, "start", unit_name]. No
-    # flags, no sudo wrapper, no nothing.
-    assert len(argv) == 3, f"expected 3-element argv, got {argv}"
+    # Exactly four args: [systemctl_path, "start", "--no-block", unit_name].
+    # No sudo wrapper. `--no-block` order must come BEFORE the unit name
+    # because systemctl interprets anything after the verb as positional
+    # arguments (unit names) once it hits a non-flag.
+    assert len(argv) == 4, f"expected 4-element argv, got {argv}"
     assert argv[0].endswith("systemctl")
     assert argv[1] == "start"
-    assert argv[2] == UPDATE_SERVICE
-    assert argv[2] == "driveforge-update.service"  # exact string the polkit rule matches
+    assert argv[2] == "--no-block", (
+        f"v0.6.2 requires --no-block to avoid subprocess timeout waiting for "
+        f"the oneshot unit to finish; got {argv[2]!r}"
+    )
+    assert argv[3] == UPDATE_SERVICE
+    assert argv[3] == "driveforge-update.service"  # exact string the polkit rule matches
 
 
 def test_non_zero_exit_returns_failure_with_stderr() -> None:

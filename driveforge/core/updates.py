@@ -362,7 +362,20 @@ def trigger_in_app_update() -> tuple[bool, str]:
     # systemctl path varies (some distros: /usr/bin, others: /bin). Use
     # the resolver so a PATH-trimmed systemd-managed environment finds it.
     systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
-    argv = [systemctl, "start", UPDATE_SERVICE]
+    # v0.6.2+: `--no-block` returns as soon as systemd has queued the
+    # StartUnit job rather than waiting for the unit to reach `active`.
+    # driveforge-update.service is Type=oneshot — ExecStart runs the full
+    # install.sh (git pull + pip install + daemon restart), which can
+    # take 10-30 seconds. Without --no-block, the subprocess.run timeout
+    # fires while the unit is still executing — the StartUnit already
+    # succeeded and the update is proceeding, but systemctl is blocked
+    # waiting for it, and we falsely surface "failed to invoke...timed
+    # out" to the operator. The live-log tail panel already handles UI
+    # progress reporting, so there's nothing to wait for in the request
+    # handler. Polkit authorization still happens synchronously before
+    # --no-block returns, so an unauthorized call still surfaces
+    # "Interactive authentication required" cleanly.
+    argv = [systemctl, "start", "--no-block", UPDATE_SERVICE]
     try:
         proc = subprocess.run(
             argv,
