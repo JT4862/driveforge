@@ -375,7 +375,42 @@ def sat_secure_erase(
     intervening command resets the prepare state and ERASE UNIT will
     refuse. Caller MUST NOT introduce parallelism between PREPARE and
     UNIT for the same device.
+
+    Cleanup on failure (v0.4.4+): if SET PASSWORD succeeds but a later
+    step fails, we attempt to DISABLE PASSWORD before raising so the
+    drive doesn't stay security-enabled with a lingering password.
+    Without this cleanup, the next erase attempt's SET PASSWORD would
+    either (a) succeed by overwriting the password (if drive still
+    powered) — fine — or (b) fail with a security-locked error after
+    any power cycle, requiring manual recovery. The recovery workflow
+    only handles pulled-drive scenarios, not "failed in place" ones —
+    so cleaning up in the failure path is the right layer.
+
+    The cleanup is best-effort — a failing DISABLE PASSWORD call is
+    logged but doesn't mask the original error that triggered cleanup.
     """
     security_set_password(device, password=password, owner=owner)
-    security_erase_prepare(device, owner=owner)
-    security_erase_unit(device, password=password, timeout_s=timeout_s, owner=owner)
+    try:
+        security_erase_prepare(device, owner=owner)
+        security_erase_unit(
+            device, password=password, timeout_s=timeout_s, owner=owner
+        )
+    except SatPassthruError:
+        # SET PASSWORD already succeeded — drive is now security-enabled
+        # with `password` set. Try to clear the password so the next
+        # attempt starts clean. Don't let a cleanup failure mask the
+        # original error; log and re-raise the original.
+        try:
+            security_disable_password(device, password=password, owner=owner)
+            logger.info(
+                "sat_secure_erase: cleaned up security password on %s after mid-sequence failure",
+                device,
+            )
+        except SatPassthruError as cleanup_exc:
+            logger.warning(
+                "sat_secure_erase: password cleanup also failed on %s (%s); "
+                "drive may need manual hdparm --security-disable after power cycle",
+                device,
+                cleanup_exc,
+            )
+        raise
