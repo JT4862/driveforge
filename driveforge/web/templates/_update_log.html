@@ -1,12 +1,20 @@
 {#
-  Live tail of /var/log/driveforge-update.log + the systemd unit's
-  current activity state. Polled by the Settings page via HTMX while
-  the update is running; stops polling on inactive/failed.
+  Live update-log partial (v0.5.0 rewrite).
 
-  The hx-trigger uses `every 2s` while the unit is active. When the
-  unit transitions to inactive/failed, we render WITHOUT hx-trigger,
-  which stops the polling loop. The page-level JS in settings.html
-  then watches for the daemon-restart window separately.
+  Three unambiguous states, decided by `classify_update_state()` in
+  core/updates.py — combines the systemd unit's activity AND the
+  explicit markers the update script emits:
+
+    running    — update in progress; HTMX keeps polling every 2s
+    succeeded  — UPDATE_SUCCESS marker seen; polling stops; page JS
+                 watches for the daemon to come back under the new
+                 version
+    failed     — UPDATE_FAILED marker seen, OR unit died without
+                 emitting SUCCESS; polling stops; banner shows the
+                 reason + log tail for diagnosis
+
+  No more "unit finished, dunno why" ambiguity — every render carries
+  a clear status the operator can act on.
 #}
 <div id="update-log-pane"
      {% if is_running %}
@@ -14,20 +22,55 @@
      hx-trigger="every 2s"
      hx-swap="outerHTML"
      {% endif %}>
-  <div class="update-status-row">
+
+  {% if update_state == "running" %}
+    <div class="banner info-banner">
+      &#9203; <strong>Update in progress.</strong>
+      <span class="muted small">
+        Live polling every 2 s &middot; daemon will restart toward the end
+        &middot; dashboard will reconnect automatically once the new
+        version is up.
+      </span>
+    </div>
+  {% elif update_state == "succeeded" %}
+    <div class="banner ok-banner">
+      &check; <strong>Update complete.</strong>
+      <span class="muted small">
+        The daemon has restarted (or is restarting) under the new
+        version. The Settings footer will refresh to show the new
+        version number shortly.
+      </span>
+    </div>
+  {% elif update_state == "failed" %}
+    <div class="banner warn-banner">
+      &#9888; <strong>Update failed.</strong>
+      {% if failure_detail %}
+        <div style="margin-top: 4px;"><em>{{ failure_detail }}</em></div>
+      {% endif %}
+      <div class="muted small" style="margin-top: 8px;">
+        The daemon is still running the previous version — nothing was
+        half-applied. See the log below for diagnosis, or fix the
+        underlying cause and try Install update again. If the
+        daemon itself is misbehaving after this, SSH in and run
+        <code>sudo systemctl status driveforge-daemon</code>.
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="update-status-row" style="margin-top: 10px;">
     <span class="muted small">systemd state:</span>
     <span class="pill update-state-{{ service_state }}">{{ service_state }}</span>
-    {% if is_running %}
-      <span class="muted small">live polling every 2s &middot; daemon will restart at end</span>
-    {% elif service_state == "failed" %}
-      <span class="muted small">update failed &mdash; see log below for details</span>
-    {% elif service_state == "inactive" %}
-      <span class="muted small">last run finished &mdash; if successful, daemon is restarting now</span>
-    {% endif %}
+    <span class="muted small">&middot; classification:</span>
+    <span class="pill update-classification-{{ update_state }}">{{ update_state }}</span>
   </div>
+
   {% if log %}
     <pre class="log-tail update-log-tail" id="update-log-tail">{{ log }}</pre>
   {% else %}
-    <p class="muted small">No update log yet &mdash; this is the first time the update flow has run on this host. The log will appear here once driveforge-update.service starts producing output.</p>
+    <p class="muted small">
+      No update log yet &mdash; this is the first time the update flow has
+      run on this host. Output will appear here once
+      <code>driveforge-update.service</code> produces any.
+    </p>
   {% endif %}
 </div>

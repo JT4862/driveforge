@@ -25,8 +25,24 @@
 set -uo pipefail
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "✗ $*"; exit 1; }
 
+# v0.5.0+: emit explicit machine-readable markers at the start and
+# end of the run. The daemon's /_partials/update-log partial greps
+# for these to determine unambiguous update state — rather than
+# relying on systemctl exit codes which surface "unit finished"
+# but not "update succeeded" vs. "update failed halfway".
+#
+# Markers (must match the regexes in driveforge/core/updates.py):
+#   UPDATE_MARKER_START   — top of run, always emitted
+#   UPDATE_MARKER_SUCCESS — clean exit from install.sh + daemon restart
+#   UPDATE_MARKER_FAILED  — any error path, with a short reason
+mark_start()   { printf '=== DRIVEFORGE_UPDATE_START ===\n'; }
+mark_success() { printf '=== DRIVEFORGE_UPDATE_SUCCESS ===\n'; }
+mark_failed()  { printf '=== DRIVEFORGE_UPDATE_FAILED: %s ===\n' "$*"; }
+
+die() { log "✗ $*"; mark_failed "$*"; exit 1; }
+
+mark_start
 log "========================================"
 log "DriveForge in-place update starting"
 log "========================================"
@@ -68,6 +84,7 @@ REMOTE_HEAD=$(git rev-parse origin/main)
 if [[ "$LOCAL_HEAD" == "$REMOTE_HEAD" ]]; then
   log "already at origin/main ($LOCAL_HEAD); nothing to do"
   log "✓ update no-op (already current)"
+  mark_success
   exit 0
 fi
 
@@ -85,4 +102,5 @@ log "running scripts/install.sh..."
 ./scripts/install.sh 2>&1 || die "install.sh failed (see output above)"
 
 log "✓ update complete; daemon restart pending"
+mark_success
 exit 0
