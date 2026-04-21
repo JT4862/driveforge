@@ -1,0 +1,106 @@
+name: Build + attach ISO on tag
+
+# Fires on any semver-shaped tag push. The local build flow is already
+# Docker-wrapped (scripts/build-iso-docker.sh), so we reuse it from the
+# Ubuntu runner — no "native vs containerized" drift between local and CI.
+#
+# Rationale: up through v0.2.8 every release required JT to run
+# `./scripts/build-iso-docker.sh` on his Mac, compute the SHA256, and
+# attach the ISO manually via `gh release create`. That works but gates
+# releases on one machine being online. This workflow makes a fresh
+# `git tag vX.Y.Z && git push --tags` enough to produce a signed release
+# with the ISO attached.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # v0.2.9
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # v0.3.0-rc1, etc.
+
+# Release creation + asset upload needs write scope.
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Show tag + version
+        run: |
+          echo "Tag: ${GITHUB_REF_NAME}"
+          echo "Version file:"
+          cat driveforge/version.py
+          # Defensive: the tag must match the version in driveforge/version.py
+          # — otherwise we'd attach an ISO labeled with the wrong version.
+          # Strip the leading "v" from the tag to compare against __version__.
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          FILE_VER=$(python3 -c "exec(open('driveforge/version.py').read()); print(__version__)")
+          if [[ "$TAG_VER" != "$FILE_VER" ]]; then
+            echo "::error::Tag ($TAG_VER) does not match driveforge/version.py ($FILE_VER)"
+            exit 1
+          fi
+          echo "Tag and version file agree on: $FILE_VER"
+
+      - name: Build ISO
+        run: |
+          # The build script wraps a debian:12-slim docker run. Ubuntu
+          # runners have docker available out of the box; no setup needed.
+          ./scripts/build-iso-docker.sh
+
+      - name: Compute SHA256 + stage asset
+        id: stage
+        run: |
+          cd dist
+          ISO=$(ls driveforge-installer-*-amd64.iso | head -1)
+          if [[ -z "$ISO" ]]; then
+            echo "::error::no ISO in dist/ after build"
+            exit 1
+          fi
+          SHA=$(sha256sum "$ISO" | awk '{print $1}')
+          echo "iso=$ISO" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Built: $ISO"
+          echo "SHA256: $SHA"
+          # Also write a detached sha256 file — some users prefer to verify
+          # with `sha256sum -c driveforge-installer-X.Y.Z-amd64.iso.sha256`.
+          echo "$SHA  $ISO" > "${ISO}.sha256"
+
+      - name: Attach ISO + SHA256 to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          ISO="${{ steps.stage.outputs.iso }}"
+          SHA="${{ steps.stage.outputs.sha256 }}"
+          # If the release already exists (manual `gh release create` earlier
+          # in the same tag push), upload to it. Otherwise create it with a
+          # minimal placeholder body — the release editor can flesh out the
+          # notes afterwards.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists — uploading asset"
+            gh release upload "${GITHUB_REF_NAME}" "$ISO" "${ISO}.sha256" --clobber
+          else
+            echo "Creating release ${GITHUB_REF_NAME}"
+            gh release create "${GITHUB_REF_NAME}" "$ISO" "${ISO}.sha256" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated build from tag ${GITHUB_REF_NAME}.
+
+          ## Verify
+          \`\`\`
+          shasum -a 256 $ISO
+          \`\`\`
+
+          Expected:
+          \`\`\`
+          $SHA  $ISO
+          \`\`\`
+
+          Edit this release to add detailed notes."
+          fi

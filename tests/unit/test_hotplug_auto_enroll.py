@@ -150,10 +150,10 @@ def _seed_pass_then_abort(state: DaemonState, drive: Drive) -> None:
 
 
 def _seed_recent_pass(state: DaemonState, drive: Drive) -> None:
-    """Grade A run completed 10 min ago. Latest run IS graded + recent,
-    so auto-enroll should be blocked — this is the "don't retest a freshly
-    passed drive that got momentarily pulled" behavior we DON'T want to
-    regress while fixing the aborted case."""
+    """Grade A run completed 10 min ago. Latest run IS graded, so
+    auto-enroll should be blocked — this is the "don't retest a drive
+    that already has a verdict" behavior we DON'T want to regress
+    while fixing the aborted case."""
     now = datetime.now(UTC)
     with state.session_factory() as session:
         session.add(
@@ -173,6 +173,66 @@ def _seed_recent_pass(state: DaemonState, drive: Drive) -> None:
                 completed_at=now - timedelta(minutes=10),
                 grade="A",
                 quick_mode=True,
+            )
+        )
+        session.commit()
+
+
+def _seed_stale_pass(state: DaemonState, drive: Drive, *, hours_ago: int) -> None:
+    """Grade A run completed hours or days ago. Models the "pre-tested
+    drive sitting on the shelf" case that v0.2.9 must handle: operator
+    drops it into a bay with auto-enroll on, the drive must NOT
+    auto-re-test — its verdict is still valid, and re-testing wastes
+    cycles. This was a bug prior to v0.2.9 where the 1-hour cutoff
+    would let a stale pass re-run."""
+    now = datetime.now(UTC)
+    with state.session_factory() as session:
+        session.add(
+            m.Drive(
+                serial=drive.serial,
+                model=drive.model,
+                manufacturer=drive.manufacturer,
+                capacity_bytes=drive.capacity_bytes,
+                transport=drive.transport.value,
+            )
+        )
+        session.add(
+            m.TestRun(
+                drive_serial=drive.serial,
+                phase="done",
+                started_at=now - timedelta(hours=hours_ago, minutes=2),
+                completed_at=now - timedelta(hours=hours_ago),
+                grade="A",
+                quick_mode=True,
+            )
+        )
+        session.commit()
+
+
+def _seed_stale_fail(state: DaemonState, drive: Drive, *, hours_ago: int) -> None:
+    """Failed drive from hours ago. Same principle as stale pass: a
+    failed drive shouldn't auto-retest on re-insert either — that's
+    retest-churn on drives the operator already knows are bad."""
+    now = datetime.now(UTC)
+    with state.session_factory() as session:
+        session.add(
+            m.Drive(
+                serial=drive.serial,
+                model=drive.model,
+                manufacturer=drive.manufacturer,
+                capacity_bytes=drive.capacity_bytes,
+                transport=drive.transport.value,
+            )
+        )
+        session.add(
+            m.TestRun(
+                drive_serial=drive.serial,
+                phase="failed",
+                started_at=now - timedelta(hours=hours_ago, minutes=5),
+                completed_at=now - timedelta(hours=hours_ago),
+                grade="fail",
+                quick_mode=False,
+                error_message="[badblocks] block 0x12345 read error",
             )
         )
         session.commit()
@@ -286,9 +346,8 @@ async def test_auto_enroll_fires_when_latest_run_is_abort_even_after_prior_pass(
 async def test_auto_enroll_skipped_when_latest_run_is_recent_pass(
     tmp_path, monkeypatch
 ) -> None:
-    """Guardrail: a drive that passed 10 min ago and was pulled + re-inserted
-    must NOT restart. This is the behavior we deliberately kept in v0.2.7 —
-    preventing accidental retest churn."""
+    """A drive that passed 10 min ago and was pulled + re-inserted
+    must NOT restart. Verdict already reached; no point re-testing."""
     settings = _make_settings(tmp_path, auto_enroll_mode="quick")
     state = DaemonState.boot(settings)
     orch = Orchestrator(state)
@@ -302,6 +361,49 @@ async def test_auto_enroll_skipped_when_latest_run_is_recent_pass(
 
     assert spy.start_batch_calls == [], (
         "recently-passed drive must not auto-re-enroll on momentary re-insert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_enroll_skipped_for_stale_pass(tmp_path, monkeypatch) -> None:
+    """v0.2.9 fix: a drive that passed 8 hours ago (way past the old
+    1-hour cutoff) STILL must not auto-re-enroll on re-insert. The
+    operator's verdict is durable; reinserting a previously-graded
+    drive is a shelf-check, not a request to re-test."""
+    settings = _make_settings(tmp_path, auto_enroll_mode="quick")
+    state = DaemonState.boot(settings)
+    orch = Orchestrator(state)
+    drive = _make_drive()
+    _seed_stale_pass(state, drive, hours_ago=8)
+
+    monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
+
+    spy = _SpyOrch(orch)
+    await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
+
+    assert spy.start_batch_calls == [], (
+        "stale pass (8h old) must NOT auto-re-enroll — graded drives are sticky"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_enroll_skipped_for_stale_fail(tmp_path, monkeypatch) -> None:
+    """Same principle as stale pass — a drive that failed days ago
+    must not auto-re-test itself just because it got re-inserted.
+    Operator can manually start a new batch if they want a re-check."""
+    settings = _make_settings(tmp_path, auto_enroll_mode="full")
+    state = DaemonState.boot(settings)
+    orch = Orchestrator(state)
+    drive = _make_drive()
+    _seed_stale_fail(state, drive, hours_ago=72)
+
+    monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
+
+    spy = _SpyOrch(orch)
+    await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
+
+    assert spy.start_batch_calls == [], (
+        "stale fail (72h old) must NOT auto-re-enroll — failed drives stay failed"
     )
 
 

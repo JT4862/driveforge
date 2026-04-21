@@ -52,7 +52,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-Pattern = Literal["pass", "fail"]
+Pattern = Literal["pass", "fail", "identify"]
 
 # Offsets to rotate through so repeated reads actually hit the device
 # instead of being served from page cache OR the drive's own onboard DRAM
@@ -77,6 +77,17 @@ _PASS_CYCLE_DARK_SEC = 2.0
 # FAIL lighthouse cadence — single slow pulse + long dark.
 _FAIL_ON_DURATION_SEC = 1.5
 _FAIL_OFF_DURATION_SEC = 1.5
+
+# IDENTIFY strobe — rapid, deliberately busy. 120 ms on / 120 ms off
+# is faster than any natural test pattern and faster than both the
+# pass heartbeat (long-dark) and fail lighthouse (slow-pulse), so the
+# operator walking the rack can pick it out at a glance even among
+# other blinking drives. Bounded by an outer-loop deadline (see
+# IDENTIFY_MAX_DURATION_SEC) so a forgotten ident doesn't churn I/O
+# forever — the user can always stop it sooner from the UI.
+_IDENT_ON_SEC = 0.12
+_IDENT_OFF_SEC = 0.12
+IDENTIFY_MAX_DURATION_SEC = 5 * 60.0  # 5 minutes — same as iDRAC/iLO default
 
 
 def _physical_read(device_path: str, offset: int, size: int) -> None:
@@ -200,6 +211,35 @@ async def _pass_heartbeat_cycle(device_path: str, idx_ref: list[int]) -> bool:
     return True
 
 
+async def _identify_cycle(device_path: str, idx_ref: list[int]) -> bool:
+    """Rapid strobe: 120 ms read-burst + 120 ms dark. Loops until the
+    task is cancelled (user clicked Stop) or the outer deadline hits.
+
+    Faster cadence than either done-blinker pattern so the operator
+    can distinguish "I asked for this drive" from "this drive finished
+    a test run." On hardware with a proper SES/SGPIO ident LED, the
+    blue locate light ALSO fires (see `blink_identify`) — the strobe
+    here is the portable fallback for direct-attach backplanes.
+    """
+    try:
+        count = await asyncio.to_thread(
+            _sustained_read_burst,
+            device_path,
+            _PROBE_OFFSETS,
+            _PROBE_SIZE,
+            _IDENT_ON_SEC,
+        )
+        idx_ref[0] += count
+    except OSError as exc:
+        logger.info(
+            "identify blinker exiting for %s: %s (drive likely pulled)",
+            device_path, exc,
+        )
+        return False
+    await asyncio.sleep(_IDENT_OFF_SEC)
+    return True
+
+
 async def _lighthouse_cycle(device_path: str, idx_ref: list[int]) -> bool:
     """1.5 s sustained-read burst (LED solid-on) + 1.5 s dark.
 
@@ -223,6 +263,50 @@ async def _lighthouse_cycle(device_path: str, idx_ref: list[int]) -> bool:
 
 
 # ---------------------- top-level blinker task ------------------------ #
+
+async def blink_identify(
+    device_path: str,
+    *,
+    max_duration_sec: float = IDENTIFY_MAX_DURATION_SEC,
+) -> None:
+    """Run the identify strobe pattern until cancelled or the safety
+    deadline fires (5 min default — matches iDRAC/iLO's UID timeout).
+
+    On hardware with SES/IBPI backplane LED management (ledctl available
+    + chassis supports it), ALSO lights the blue locate LED for the bay
+    via `ledctl locate=<dev>`, and clears it with `ledctl locate_off=`
+    on exit. No-op on direct-attach LFF backplanes (R720 LFF, NX-3200
+    expander-only); the read-pattern still runs as the portable fallback.
+
+    Cancelling the task (user clicks Stop, or the drive is pulled)
+    stops both the strobe AND the SES LED cleanly.
+    """
+    import time as _time
+    idx_ref = [0]
+    # Try the locate LED first so SES-capable chassis light up immediately.
+    # Uses the "locate" action (blue ident LED) rather than "fault" — this
+    # is "hey, it's over here" not "something's wrong."
+    ses_lit = await asyncio.to_thread(_try_ledctl, "locate", device_path)
+    if ses_lit:
+        logger.info("identify: blue locate LED lit via ledctl for %s", device_path)
+    else:
+        logger.info("identify: ledctl locate unavailable; falling back to read-strobe only")
+    deadline = _time.monotonic() + max_duration_sec
+    try:
+        while _time.monotonic() < deadline:
+            try:
+                alive = await _identify_cycle(device_path, idx_ref)
+                if not alive:
+                    return  # drive pulled
+            except asyncio.CancelledError:
+                return
+    finally:
+        if ses_lit:
+            try:
+                await asyncio.to_thread(_try_ledctl, "locate_off", device_path)
+            except Exception:  # noqa: BLE001
+                pass
+
 
 async def blink_done(device_path: str, *, pattern: Pattern = "pass") -> None:
     """Run the post-run LED pattern until the drive is pulled or cancelled.

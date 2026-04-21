@@ -209,26 +209,32 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     # Priority-lower than recovery + blinker restore. Skipped silently when:
     #   - auto_enroll_mode is "off" (default)
     #   - drive is already running in this daemon
-    #   - drive's LATEST completed run has a real grade AND finished within
-    #     the last hour (don't re-test a drive that just passed on a
-    #     momentary pull + re-insert)
+    #   - drive's LATEST completed run has a real grade (A/B/C/fail),
+    #     regardless of age. Graded drives are "done"; a pull + re-insert
+    #     must not start a re-test on its own. The operator can re-run
+    #     manually via New Batch if they want to. Re-test churn on a
+    #     shelf full of pre-tested drives was the v0.2.9 bug this
+    #     closes.
     #
-    # The "latest-run" framing is the key v0.2.7 fix: previously we looked
-    # for ANY recent graded run, which meant a drive that passed 20 min
-    # ago, was then aborted mid-retest, would still be blocked from
-    # auto-enroll on re-insert because the stale Grade A row matched the
-    # filter. Aborts stamp grade=None (since v0.2.6) — as long as we key
-    # the decision off the most recent run, aborted drives correctly
-    # appear as "never tested" to auto-enroll too.
+    # The "latest-run" framing is the v0.2.7 key insight: we key the
+    # decision off the single most recent completed run. Aborted runs
+    # stamp grade=None (v0.2.6) so they still let auto-enroll fire on
+    # re-insert — the "retest after an abort" case is explicitly
+    # supported because the operator's earlier click was a cancel, not
+    # a verdict.
+    #
+    # Prior to v0.2.9 this had a 1-hour cutoff instead of indefinite —
+    # a drive that graded A in the morning would re-run itself on
+    # afternoon shelf-check. That's the opposite of what operators
+    # want.
     mode = (state.settings.daemon.auto_enroll_mode or "off").lower()
     if mode not in ("quick", "full"):
         return
     if match.serial in state.active_phase:
         return
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC
     from driveforge.db import models as m
     from driveforge.daemon.orchestrator import BatchRejected
-    recent_cutoff = datetime.now(UTC) - timedelta(hours=1)
     with state.session_factory() as session:
         latest = (
             session.query(m.TestRun)
@@ -239,23 +245,18 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
         )
     # SQLite stores DateTime(timezone=True) columns as naive strings and
     # SQLAlchemy surfaces them as naive Python datetimes. Normalize to
-    # UTC-aware before comparing to `recent_cutoff` so the comparison
-    # works identically across SQLite and timezone-aware backends.
+    # UTC-aware for logging. (Kept even though we no longer compare to
+    # a cutoff — the isoformat() string is friendlier with tz info.)
     latest_completed = latest.completed_at if latest is not None else None
     if latest_completed is not None and latest_completed.tzinfo is None:
         latest_completed = latest_completed.replace(tzinfo=UTC)
-    if (
-        latest is not None
-        and latest.grade is not None
-        and latest_completed is not None
-        and latest_completed >= recent_cutoff
-    ):
+    if latest is not None and latest.grade is not None:
         logger.info(
-            "hotplug add: drive %s most-recent run is %s (completed %s); "
+            "hotplug add: drive %s has a graded completed run (%s, %s); "
             "skipping auto-enroll",
             match.serial,
             latest.grade,
-            latest_completed.isoformat(),
+            latest_completed.isoformat() if latest_completed else "?",
         )
         return
     logger.info("hotplug add: auto-enrolling drive %s (%s mode)", match.serial, mode)
