@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from driveforge.core import badblocks, blinker, erase, grading, process, smart, telemetry, timing, webhook
 from driveforge.core import drive as drive_mod
+from driveforge.core import throughput as throughput_mod
 from driveforge.core import triage as triage_mod
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
@@ -902,13 +903,16 @@ class Orchestrator:
         await self._run_secure_erase(drive, dev_mode=dev_mode)
 
         bb_errors = (0, 0, 0)
+        bb_throughput = throughput_mod.ThroughputCollector().finalize()
         long_ok: bool | None = True
         if quick:
             logger.info("drive %s quick-mode: skipping badblocks + long test", drive.serial)
         else:
             # Phase 5: badblocks
             await self._advance(run_id, "badblocks", drive)
-            bb_errors = await self._run_badblocks(drive, dev_mode=dev_mode, run_id=run_id)
+            bb_errors, bb_throughput = await self._run_badblocks(
+                drive, dev_mode=dev_mode, run_id=run_id
+            )
 
             # Phase 6: long self-test — same neutral-on-unsupported semantics
             await self._advance(run_id, "long_test", drive)
@@ -931,8 +935,9 @@ class Orchestrator:
             long_test_passed=long_ok,
             badblocks_errors=bb_errors,
             max_temperature_c=max_temp,
+            throughput=bb_throughput,
         )
-        await self._finalize_run(run_id, drive, post_snap, result)
+        await self._finalize_run(run_id, drive, post_snap, result, bb_throughput)
         # v0.5.5+ quick-pass fail action: prompt the operator or auto-promote
         # to a full pipeline run. Evaluated after finalize so the triage
         # verdict is committed to the DB first.
@@ -1164,12 +1169,23 @@ class Orchestrator:
             self._log(serial, f"secure_erase completed in {erase_elapsed / 60:.1f} min")
         self.state.active_percent[serial] = 100.0
 
-    async def _run_badblocks(self, drive: Drive, *, dev_mode: bool, run_id: int) -> tuple[int, int, int]:
+    async def _run_badblocks(
+        self, drive: Drive, *, dev_mode: bool, run_id: int
+    ) -> tuple[tuple[int, int, int], throughput_mod.ThroughputStats]:
+        """Run the 8-pass destructive badblocks sweep.
+
+        Returns `(errors, throughput_stats)` where `errors` is the
+        legacy (read, write, compare) tuple and `throughput_stats` is
+        the v0.5.6+ per-pass throughput summary. stats.mean_mbps is
+        None when diskstats was unavailable for this device (e.g.
+        some USB-SATA bridges); callers should treat it as "no
+        throughput data" rather than as zero.
+        """
         if dev_mode:
             for pct in range(0, 101, 20):
                 self.state.active_percent[drive.serial] = float(pct)
                 await asyncio.sleep(0.1)
-            return (0, 0, 0)
+            return ((0, 0, 0), throughput_mod.ThroughputCollector().finalize())
         serial = drive.serial
         self._log(
             serial,
@@ -1180,6 +1196,14 @@ class Orchestrator:
         last_logged_pct = [0.0]
         last_pass_label = [""]
 
+        # v0.5.6+ throughput collector. The on_progress callback writes
+        # the current pass label here; a background sampler task reads
+        # state.active_io_rate every few seconds and writes samples
+        # tagged with that label. At end of badblocks the collector is
+        # finalized into per-pass means + overall percentiles, which
+        # feed the new "throughput consistency" grading rules.
+        collector = throughput_mod.ThroughputCollector()
+
         def on_progress(
             pct: float,
             errs: tuple[int, int, int],
@@ -1188,6 +1212,7 @@ class Orchestrator:
             self.state.active_percent[serial] = float(pct)
             if pass_label is not None:
                 self.state.active_sublabel[serial] = pass_label
+                collector.note_pass(pass_label)
                 # Log once per pass transition so the phase log shows the
                 # sweep boundaries without drowning in per-% spam.
                 if pass_label != last_pass_label[0]:
@@ -1198,6 +1223,11 @@ class Orchestrator:
                 self._log(serial, f"badblocks: {pct:.1f}% errors={errs[0]}/{errs[1]}/{errs[2]}")
                 last_logged_pct[0] = pct
                 self._persist_log(serial, run_id)
+
+        sampler_task = asyncio.create_task(
+            self._throughput_sampler_loop(collector, serial),
+            name=f"throughput-sampler:{serial}",
+        )
 
         # 8 passes × capacity at pessimistic 100 MB/s with 2× headroom.
         # Old flat 72 h default choked anything over ~4 TB; 8 TB legit needs
@@ -1221,8 +1251,61 @@ class Orchestrator:
                 "badblocks",
                 f"badblocks exceeded capacity-based timeout of {hours:.1f}h",
             ) from None
-        self._log(serial, f"badblocks complete: errors={errs[0]}/{errs[1]}/{errs[2]}")
-        return errs
+        finally:
+            sampler_task.cancel()
+            try:
+                await sampler_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        stats = collector.finalize()
+        log_line = f"badblocks complete: errors={errs[0]}/{errs[1]}/{errs[2]}"
+        if stats.mean_mbps is not None:
+            log_line += (
+                f"; throughput mean={stats.mean_mbps:.0f} MB/s "
+                f"(p5={stats.p5_mbps:.0f}, p95={stats.p95_mbps:.0f}, "
+                f"{stats.sample_count} samples across {len(stats.per_pass_means)} pass(es))"
+            )
+        self._log(serial, log_line)
+        return errs, stats
+
+    async def _throughput_sampler_loop(
+        self,
+        collector: throughput_mod.ThroughputCollector,
+        serial: str,
+        *,
+        interval_s: float = 3.0,
+    ) -> None:
+        """Periodic sampler that correlates diskstats output (written
+        to state.active_io_rate by _poll_io_rates) with the current
+        badblocks pass label (written to the collector by the
+        on_progress callback).
+
+        Runs for the lifetime of one badblocks phase; cancelled by
+        _run_badblocks' finally block. Uses max(read, write) to get
+        the active I/O direction regardless of whether badblocks is
+        in a write-pattern pass or a verify-read pass.
+        """
+        while True:
+            try:
+                rate = self.state.active_io_rate.get(serial, {})
+                # badblocks alternates write and verify-read passes;
+                # the max captures whichever direction is active.
+                w = float(rate.get("write_mbps", 0.0) or 0.0)
+                r = float(rate.get("read_mbps", 0.0) or 0.0)
+                sample = max(w, r)
+                collector.note_sample(sample)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                # A transient dict-read error must not kill the sampler;
+                # the stats are advisory, not load-bearing.
+                logger.exception(
+                    "throughput sampler tick failed for %s; continuing", serial
+                )
+            try:
+                await asyncio.sleep(interval_s)
+            except asyncio.CancelledError:
+                return
 
     def _maybe_handle_quick_pass_fail(self, run_id: int, drive: Drive) -> None:
         """v0.5.5+ \u2014 act on a quick-pass triage=fail verdict per the
@@ -1391,6 +1474,7 @@ class Orchestrator:
         drive: Drive,
         post_snap: smart.SmartSnapshot,
         result: grading.GradingResult,
+        throughput_stats: throughput_mod.ThroughputStats | None = None,
     ) -> None:
         with self.state.session_factory() as session:
             run = session.get(m.TestRun, run_id)
@@ -1404,6 +1488,14 @@ class Orchestrator:
             run.smart_status_passed = post_snap.smart_status_passed
             run.rules = [rule.model_dump() for rule in result.rules]
             run.report_url = f"/reports/{drive.serial}"
+            # v0.5.6+ throughput stats. NULL when the run didn't go
+            # through badblocks (quick-pass), or diskstats wasn't
+            # available for this device.
+            if throughput_stats is not None and throughput_stats.mean_mbps is not None:
+                run.throughput_mean_mbps = throughput_stats.mean_mbps
+                run.throughput_p5_mbps = throughput_stats.p5_mbps
+                run.throughput_p95_mbps = throughput_stats.p95_mbps
+                run.throughput_pass_means = list(throughput_stats.per_pass_means)
             # v0.5.5 — verdict depends on pipeline mode:
             #   quick_mode=True  -> triage verdict (Clean/Watch/Fail); grade stays NULL
             #   quick_mode=False -> A/B/C/F grade as before; triage_result stays NULL

@@ -69,6 +69,26 @@
     {% if max_temp %}
     <dt>Temperature (test)</dt><dd>max {{ max_temp }}°C &middot; avg {{ avg_temp }}°C</dd>
     {% endif %}
+    {% if latest.throughput_mean_mbps is not none %}
+    <dt>Burn-in throughput</dt>
+    <dd>
+      mean {{ "%.0f"|format(latest.throughput_mean_mbps) }} MB/s
+      {%- if latest.throughput_p5_mbps is not none and latest.throughput_p95_mbps is not none %}
+        &middot; p5 {{ "%.0f"|format(latest.throughput_p5_mbps) }} / p95 {{ "%.0f"|format(latest.throughput_p95_mbps) }}
+      {%- endif %}
+      {%- if latest.throughput_pass_means %}
+      <div class="throughput-passes" title="Mean write throughput (MB/s) per badblocks pass. Hover for values.">
+        {%- set max_pass = latest.throughput_pass_means|max -%}
+        {%- for pass_mean in latest.throughput_pass_means %}
+        <span class="throughput-bar"
+              style="height: {{ (pass_mean / max_pass * 40)|round(1) }}px"
+              title="Pass {{ loop.index }}: {{ '%.0f'|format(pass_mean) }} MB/s"></span>
+        {%- endfor %}
+      </div>
+      <div class="muted small">per-pass means across {{ latest.throughput_pass_means|length }} pass{{ 'es' if latest.throughput_pass_means|length != 1 else '' }}</div>
+      {%- endif %}
+    </dd>
+    {% endif %}
   </dl>
 </section>
 

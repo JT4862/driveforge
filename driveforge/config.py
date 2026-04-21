@@ -60,6 +60,32 @@ class GradingConfig(BaseModel):
     thermal_excursion_c: int | None = 60  # None = disable
     power_on_hours_drift_tolerance_h: int = 1
 
+    # v0.5.6+ throughput-consistency grading during badblocks.
+    # Deliberately self-referential (drive vs itself, not drive vs
+    # benchmark table) — benchmark tables go stale the moment new
+    # SKUs ship. See driveforge/core/throughput.py for the design
+    # rationale.
+    #
+    # within_pass_variance_ratio:
+    #   If p5 of write throughput during any pass is below this fraction
+    #   of the pass mean, the drive had significant slowdowns mid-pass
+    #   (classic signal of sectors being recovered via internal ECC
+    #   retry). Demotes one tier: A → B, B → C, C → F.
+    #   Default 0.25 = "p5 must be at least 25% of the mean."
+    #
+    # pass_to_pass_degradation_ratio:
+    #   If pass N mean drops below this fraction of pass 2 mean (pass 1
+    #   is skipped to avoid false-firing on SLC-cache exhaustion in
+    #   consumer SSDs), the drive actively degraded during burn-in.
+    #   F-tier.
+    #   Default 0.70 = "last pass must hold at least 70% of pass-2's
+    #   speed."
+    #
+    # None on either disables that specific rule while keeping the
+    # other active.
+    within_pass_variance_ratio: float | None = 0.25
+    pass_to_pass_degradation_ratio: float | None = 0.70
+
 
 class DaemonConfig(BaseModel):
     host: str = "0.0.0.0"

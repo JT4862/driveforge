@@ -737,6 +737,7 @@ def _cert_label_data_for(request: Request, state, drive, run):
         badblocks_errors=badblocks,
         fail_reason=fail_reason,
         remapped_during_run=remapped,
+        throughput_mean_mbps=run.throughput_mean_mbps,
     )
 
 

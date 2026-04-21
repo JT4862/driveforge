@@ -103,6 +103,20 @@ class TestRun(Base):
     #   watch — post_pending>0 AND no climb
     #   fail  — pending or reallocated climbed during the run
     triage_result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # v0.5.6+ throughput grading during badblocks. Populated from
+    # diskstats samples collected by the orchestrator's throughput
+    # sampler while the drive is in the badblocks phase. NULL on:
+    #   - quick-pass runs (no badblocks)
+    #   - legacy pre-v0.5.6 rows
+    #   - runs that failed before entering badblocks
+    #   - hosts where diskstats isn't available for this device
+    # Per-pass means stored in throughput_pass_means as a JSON array
+    # (length equals number of passes completed before pipeline ended;
+    # typically 8 for a clean run, fewer if aborted mid-burn-in).
+    throughput_mean_mbps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    throughput_p5_mbps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    throughput_p95_mbps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    throughput_pass_means: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)  # last N lines of phase output
     # Phase name at which this run was interrupted by a drive-pull (udev

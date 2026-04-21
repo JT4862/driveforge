@@ -50,6 +50,13 @@ class TestRunOut(BaseModel):
     pre_reallocated_sectors: int | None = None
     pre_current_pending_sector: int | None = None
     remapped_during_run: int | None = None
+    # Throughput stats (v0.5.6+). NULL for quick-pass, legacy, and
+    # diskstats-failed runs. per_pass_means is ordered by pass index
+    # (length = number of passes completed; typically 8 for a clean run).
+    throughput_mean_mbps: float | None = None
+    throughput_p5_mbps: float | None = None
+    throughput_p95_mbps: float | None = None
+    throughput_pass_means: list[float] | None = None
     report_url: str | None
     quick_mode: bool = False
     error_message: str | None = None
@@ -309,6 +316,10 @@ def _test_run_to_out(r: m.TestRun) -> TestRunOut:
         pre_reallocated_sectors=r.pre_reallocated_sectors,
         pre_current_pending_sector=r.pre_current_pending_sector,
         remapped_during_run=remapped,
+        throughput_mean_mbps=r.throughput_mean_mbps,
+        throughput_p5_mbps=r.throughput_p5_mbps,
+        throughput_p95_mbps=r.throughput_p95_mbps,
+        throughput_pass_means=list(r.throughput_pass_means) if r.throughput_pass_means else None,
         report_url=r.report_url,
         quick_mode=bool(r.quick_mode),
         error_message=r.error_message,
