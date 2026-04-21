@@ -941,23 +941,52 @@ class Orchestrator:
                 pc = self.state.settings.printer
                 if pc.model and getattr(pc, "auto_print", True):
                     from driveforge.core import printer as printer_mod
-                    self._log(drive.serial, "auto-print: early-phase F → printing fail sticker")
+                    self._log(drive.serial, "auto-print: early-phase F → scheduling fail sticker print")
+                    # v0.6.6+: fire-and-forget via the drive-command
+                    # executor. Pre-v0.6.6 this ran synchronously from
+                    # _record_failure, which is called from the async
+                    # _run_drive except block — a sync call in that
+                    # context blocks the event loop for the full USB
+                    # print dispatch (20-30s per label, longer if USB
+                    # queue is backed up). With multiple F drives in
+                    # a batch, the event loop stalled, dashboard went
+                    # unresponsive, pipeline progress stopped. Moving
+                    # the print to the drive executor plus a done-
+                    # callback to log the result is the correct
+                    # pattern.
                     try:
-                        # Run synchronously here — _record_failure is
-                        # already called from a sync context (it's not
-                        # an async def). The print itself is a few-sec
-                        # subprocess call; acceptable to block briefly
-                        # in the post-failure path.
-                        ok, msg = printer_mod.auto_print_cert_for_run(
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        # No running loop — shouldn't happen from
+                        # _run_drive's async except block, but
+                        # defensive anyway. Fall back to skip-print;
+                        # operator can reprint manually.
+                        logger.warning(
+                            "auto-print: no running event loop in _record_failure "
+                            "for %s; skipping auto-print", drive.serial,
+                        )
+                        return
+                    serial = drive.serial  # capture for callback closure
+                    future = loop.run_in_executor(
+                        self.state.drive_command_executor,
+                        functools.partial(
+                            printer_mod.auto_print_cert_for_run,
                             self.state, drive, run,
-                        )
-                        self._log(drive.serial, f"auto-print: {msg}")
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "auto-print on early-phase F raised for %s — "
-                            "grade stands; operator can reprint manually",
-                            drive.serial,
-                        )
+                        ),
+                    )
+
+                    def _on_print_done(fut, _serial=serial):
+                        try:
+                            ok, msg = fut.result()
+                            self._log(_serial, f"auto-print: {msg}")
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception(
+                                "auto-print on early-phase F raised for %s",
+                                _serial,
+                            )
+                            self._log(_serial, f"auto-print: crashed ({exc})")
+
+                    future.add_done_callback(_on_print_done)
 
 
     async def _execute_pipeline(
@@ -1104,8 +1133,18 @@ class Orchestrator:
             session.commit()
 
     async def _capture_smart(self, run_id: int, drive: Drive, *, kind: str) -> smart.SmartSnapshot:
+        # v0.6.6+: offload the blocking smartctl subprocess to the
+        # drive-command executor instead of running it synchronously
+        # in the event loop. A smartctl that goes D-state (drive
+        # unresponsive) previously blocked the entire daemon event
+        # loop — all pipelines stalled, dashboard unresponsive.
+        loop = asyncio.get_event_loop()
         try:
-            snap = smart.snapshot(drive.device_path)
+            snap = await loop.run_in_executor(
+                self.state.drive_command_executor,
+                smart.snapshot,
+                drive.device_path,
+            )
         except Exception as exc:  # noqa: BLE001
             raise PipelineFailure(f"smart_{kind}", f"smartctl failed: {exc}") from exc
         with self.state.session_factory() as session:
@@ -1241,7 +1280,15 @@ class Orchestrator:
         # time-based bar from the drive's own estimate (hdparm -I) or a
         # capacity heuristic. Caps at 99% so the bar never claims done until
         # the blocking call actually returns.
-        estimate = erase.estimate_erase_seconds(drive)
+        # v0.6.6+: estimate_erase_seconds runs `hdparm -I` which is a
+        # subprocess call. Usually fast (<1s) but can block if the
+        # drive or HBA is misbehaving — offload to the drive executor
+        # so a slow drive can't block the event loop here.
+        estimate = await loop.run_in_executor(
+            self.state.drive_command_executor,
+            erase.estimate_erase_seconds,
+            drive,
+        )
         if estimate:
             mins = estimate / 60
             self._log(
@@ -1595,15 +1642,33 @@ class Orchestrator:
         except asyncio.CancelledError:
             return
 
+        # v0.6.6+: capture the event loop once; reuse across ticks.
+        # run_in_executor offloads smartctl + ipmitool subprocess calls
+        # to the drive-command executor. Pre-v0.6.6 these ran
+        # synchronously inside the sampler coroutine, and when smartctl
+        # went D-state (drive unresponsive) the event loop was blocked
+        # for the duration — every pipeline and every HTTP request
+        # stalled. The "dashboard locks up when a drive misbehaves"
+        # class of symptoms JT saw on his R720 on 2026-04-21 traced
+        # here.
+        loop = asyncio.get_event_loop()
         while True:
             try:
                 phase = self.state.active_phase.get(drive.serial, "unknown")
-                temp = self._sample_drive_temp_quietly(drive)
-                self._record_telemetry(
-                    run_id,
-                    drive.serial,
-                    phase=phase,
-                    drive_temp_c=temp,
+                temp = await loop.run_in_executor(
+                    self.state.drive_command_executor,
+                    self._sample_drive_temp_quietly,
+                    drive,
+                )
+                await loop.run_in_executor(
+                    self.state.drive_command_executor,
+                    functools.partial(
+                        self._record_telemetry,
+                        run_id,
+                        drive.serial,
+                        phase=phase,
+                        drive_temp_c=temp,
+                    ),
                 )
             except asyncio.CancelledError:
                 # Propagate \u2014 the finally block in _execute_pipeline
