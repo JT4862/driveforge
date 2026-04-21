@@ -151,6 +151,24 @@ class DaemonState:
         )
     )
 
+    # v0.6.9+: latest udev-health snapshot refreshed by the daemon's
+    # `_udev_health_loop`. Starts as None until the first probe fires
+    # (~30s after boot). Exposed to templates via the `udev_health`
+    # Jinja global so base.html can render a dashboard banner + the
+    # "Restart udev" button when the pipeline stalls. None = "haven't
+    # checked yet", not "stalled" — the banner only renders when
+    # `udev_health.needs_operator_action` is True.
+    udev_health: "object | None" = None  # UdevHealth | None; string-annotated to avoid circular import
+
+    # v0.6.9+: SSDs that refuse SECURITY ERASE UNIT on both SAT +
+    # hdparm paths (the libata-freeze signature from v0.6.3). Populated
+    # by the orchestrator when an SSD hits the freeze pattern;
+    # rendered by the drive-detail remediation panel so the operator
+    # sees a structured checklist of bypass paths instead of a wall
+    # of decoded-error prose. Keyed by drive serial.  See
+    # driveforge.core.frozen_remediation.
+    frozen_remediation: dict[str, "object"] = field(default_factory=dict)
+
     def refresh_bay_plan(self) -> enclosures.BayPlan:
         """Re-discover enclosures + capabilities. Called on daemon start
         and on udev add/remove events."""

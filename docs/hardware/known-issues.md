@@ -147,21 +147,58 @@ the payload renders correctly in n8n's webhook node.
 
 ## Watch list (one-time observations)
 
-### Hung `hdparm -B254` D-state from earlier code paths
+### Hung `hdparm -B254` D-state during secure_erase (fixed v0.6.9)
 
-Observed once on the R720 during the first 8-drive batch on
-2026-04-19: two `hdparm -B254 /dev/sde` processes stuck in
-uninterruptible D-state for ~2 hours.
+**First observed** on the R720 during the 2026-04-19 8-drive batch:
+two `hdparm -B254 /dev/sde` processes stuck in uninterruptible
+D-state for hours. Initially assumed to be stale subprocesses from
+an earlier orchestrator code path and filed as a watch-list item.
 
-`hdparm -B254` was used by an earlier orchestrator code path to
-disable APM (Advanced Power Management) before badblocks. That
-code path is no longer active — current pipelines don't issue
-`hdparm -B*`.
+**Reproduced** on the R720 v0.6.6 on 2026-04-21: during an active
+SECURITY ERASE UNIT on sdf (WDC WD1000CHTZ), two `hdparm -B254
+/dev/sdf` processes appeared alongside the legitimate `sg_raw`
+erase. Both had PPID=1 (reparented to init after their udev-worker
+parent exited) — the telltale sign of a udev-RUN helper.
 
-**Status:** unclear if reproducible. Don't act on it unless it
-reappears with current code. Most likely a stale subprocess from
-an aborted upgrade-mid-batch scenario that the orchestrator's
-later cleanup didn't catch.
+**Root cause** (not a DriveForge code bug): Debian's stock
+`/lib/udev/rules.d/85-hdparm.rules` fires `/lib/udev/hdparm` on every
+`ACTION=="add"` event for sd[a-z] devices. That helper runs
+`/usr/lib/pm-utils/power.d/95hdparm-apm`, which issues `hdparm -B<N>`
+to set APM per the hdparm-functions defaults — even with an empty
+`/etc/hdparm.conf`. On a drive mid-SECURITY-ERASE-UNIT, the drive
+refuses APM commands (it's busy doing the erase), so the `hdparm
+-B254` subprocess goes D-state waiting on a response it will never
+receive. Udev re-enumeration transitions during the erase can fire
+the rule multiple times, stacking D-state subprocesses on the same
+drive.
+
+Combined with the daemon's own `sg_raw` + `smartctl` against the
+same drive, the mpt2sas HBA's SG queue fills and
+`kworker/*+fw_event_mpt2sas*` goes D-state processing events it
+can no longer drain. At that point, newly-inserted drives on the
+same HBA never get `/dev` nodes — the discovery pipeline is
+wedged until the D-state pileup clears (either by drive pull or
+by the original erase finishing).
+
+**Fix (v0.6.9):** `install.sh` symlinks
+`/etc/udev/rules.d/85-hdparm.rules` to `/dev/null`. Files in
+`/etc/udev/rules.d` take precedence over same-named files in
+`/lib/udev/rules.d`, and a `/dev/null` symlink is the standard
+Debian idiom for shadowing a vendor-shipped rule. DriveForge
+manages drive power state explicitly per pipeline phase and has
+no use for Debian's boot-time APM helper.
+
+**Existing installs** get the mask the next time the in-app
+"Install update" path runs (which re-invokes install.sh). To
+mitigate immediately without waiting for the update, run:
+
+```
+sudo ln -sf /dev/null /etc/udev/rules.d/85-hdparm.rules
+sudo udevadm control --reload-rules
+```
+
+**Status:** fixed v0.6.9. Leaving this entry in place as
+background / post-mortem for operators on older releases.
 
 ## Reporting hardware-specific issues
 

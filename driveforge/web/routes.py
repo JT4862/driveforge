@@ -459,6 +459,10 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             "avg_temp": avg_temp,
             "suggested_use": SUGGESTED_USE.get(latest.grade) if latest and latest.grade else None,
             "label_roll": state.settings.printer.label_roll or "DK-1209",
+            # v0.6.9+ frozen-SSD remediation state. None when this drive
+            # isn't currently flagged as frozen; populated when the
+            # orchestrator registered it after a libata-freeze pattern.
+            "frozen_remediation_state": state.frozen_remediation.get(serial),
         },
     )
 
@@ -637,6 +641,111 @@ async def promote_to_full_web(serial: str, request: Request) -> RedirectResponse
     except Exception:  # noqa: BLE001
         logger.exception("promote-to-full failed for %s", serial)
     return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/drives/{serial}/frozen/retry")
+async def frozen_remediation_retry(serial: str, request: Request) -> RedirectResponse:
+    """v0.6.9+: operator clicked "I tried something, retest" in the
+    frozen-SSD remediation panel. Marks the entry as retried (the
+    orchestrator will bump retry_count + promote status on the NEXT
+    failed run) and triggers a fresh pipeline on the current physical
+    device.
+
+    Does not clear the remediation entry — that happens automatically
+    when the next pipeline either succeeds (via `_finalize_run`'s
+    clear call) or fails with the freeze signature again (which will
+    re-register via `register_freeze`'s retry-bump branch).
+
+    If the drive is no longer present (pulled between panel view and
+    click), we fall through to the dashboard quietly. The next
+    insertion will re-fire the pipeline via normal hotplug.
+    """
+    from driveforge.core import drive as drive_mod
+    from driveforge.core import frozen_remediation
+
+    state = get_state()
+    orch = request.app.state.orchestrator
+    frozen_remediation.mark_retried(state.frozen_remediation, serial)
+
+    drives = {d.serial: d for d in drive_mod.discover()}
+    match = drives.get(serial)
+    if match is None:
+        return RedirectResponse(url=f"/drives/{serial}?frozen=retry-queued", status_code=303)
+    try:
+        await orch.start_batch(
+            [match],
+            source="operator-retry after frozen-SSD remediation",
+            quick=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("frozen-remediation retry failed for %s", serial)
+        return RedirectResponse(
+            url=f"/drives/{serial}?frozen=retry-failed",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=f"/drives/{serial}?frozen=retry-started",
+        status_code=303,
+    )
+
+
+@router.post("/drives/{serial}/frozen/mark-unrecoverable")
+async def frozen_remediation_mark_unrecoverable(
+    serial: str, request: Request
+) -> RedirectResponse:
+    """v0.6.9+: operator clicked "Mark as unrecoverable" in the
+    frozen-SSD remediation panel. Stamps an explicit F grade on the
+    latest TestRun for this serial (with a `fail_reason` explaining
+    the origin) so that auto-enroll's F-is-sticky logic skips this
+    drive on future inserts.
+
+    Clears the in-memory remediation entry in the same call — the F
+    grade is the persistent marker going forward, the remediation
+    panel's job is done.
+
+    If there is NO latest TestRun for this serial (operator marked
+    an enrolled-but-never-tested drive), create a minimal TestRun
+    with grade=F + phase="frozen_unrecoverable" so the DB carries
+    the sticky marker. Phase value is a v0.6.9+ addition; older
+    reports UI tolerates unknown phase strings.
+    """
+    from datetime import UTC, datetime
+    from driveforge.core import frozen_remediation
+
+    state = get_state()
+    with state.session_factory() as session:
+        last_run = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.drive_serial == serial)
+            .order_by(m.TestRun.completed_at.desc().nulls_last())
+            .first()
+        )
+        error_msg = (
+            "frozen by libata, no remediation worked — marked "
+            "unrecoverable by operator"
+        )
+        if last_run is None:
+            new_run = m.TestRun(
+                drive_serial=serial,
+                started_at=datetime.now(UTC),
+                completed_at=datetime.now(UTC),
+                phase="frozen_unrecoverable",
+                grade="F",
+                error_message=error_msg,
+            )
+            session.add(new_run)
+        else:
+            last_run.grade = "F"
+            last_run.phase = "frozen_unrecoverable"
+            last_run.completed_at = last_run.completed_at or datetime.now(UTC)
+            last_run.error_message = error_msg
+        session.commit()
+
+    frozen_remediation.clear(state.frozen_remediation, serial)
+    return RedirectResponse(
+        url=f"/drives/{serial}?frozen=marked-unrecoverable",
+        status_code=303,
+    )
 
 
 @router.post("/drives/{serial}/dismiss-promote-prompt")
@@ -1070,6 +1179,53 @@ async def install_update(request: Request) -> RedirectResponse:
             status_code=303,
         )
     return RedirectResponse(url="/settings?install_started=1", status_code=303)
+
+
+@router.post("/settings/restart-udev")
+async def restart_udev(request: Request) -> RedirectResponse:
+    """v0.6.9+: trigger a polkit-authorized systemd-udevd restart via
+    `driveforge-udev-restart.service`. Wired to the "Restart udev"
+    button that appears in base.html when
+    `udev_health.needs_operator_action` is True.
+
+    Unlike `install-update`, this one is SAFE to fire with active
+    pipelines. Restarting systemd-udevd doesn't touch already-mounted
+    filesystems or in-flight drive subprocesses — those are owned by
+    the daemon, not by udev workers. The restart just gives udev a
+    fresh worker pool that can process NEW hotplug events. Operators
+    can click the button whenever they notice drives not enumerating.
+
+    After the restart (fires async via `systemctl start --no-block`)
+    the daemon's `_udev_health_loop` will re-probe on its next tick,
+    catch the recovery, and the banner will disappear. No manual
+    state clearing needed.
+
+    Source page comes back via Referer so the redirect lands the
+    operator where they clicked from (dashboard, Settings, etc).
+    """
+    from urllib.parse import quote
+    from driveforge.core import udev_health as udev_health_mod
+
+    ok, message = udev_health_mod.trigger_udev_restart()
+    back = request.headers.get("Referer", "/")
+    # Avoid referer-based open-redirect: only redirect to same-origin
+    # paths. Anything external → home.
+    if not back.startswith("/"):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(back)
+            host = request.url.hostname or ""
+            back = parsed.path or "/" if parsed.hostname in (host, "", None) else "/"
+        except Exception:  # noqa: BLE001
+            back = "/"
+
+    sep = "&" if "?" in back else "?"
+    if ok:
+        return RedirectResponse(url=f"{back}{sep}udev_restart=ok", status_code=303)
+    return RedirectResponse(
+        url=f"{back}{sep}udev_restart_error=" + quote(message),
+        status_code=303,
+    )
 
 
 @router.get("/_partials/update-log", response_class=HTMLResponse)

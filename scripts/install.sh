@@ -153,6 +153,39 @@ EOF
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger --subsystem-match=usb --attr-match=idVendor=04f9 2>/dev/null || true
 
+# v0.6.9+: mask Debian's stock /lib/udev/rules.d/85-hdparm.rules.
+#
+# Debian's `hdparm` package ships a udev rule that fires
+# /lib/udev/hdparm on every ACTION=="add" for sd[a-z] block devices.
+# That helper runs /usr/lib/pm-utils/power.d/95hdparm-apm which issues
+# `hdparm -B<N>` per the hdparm-functions defaults — even when
+# /etc/hdparm.conf has no per-drive overrides.
+#
+# On a DriveForge appliance that's a hostile interaction: when the
+# target drive is mid-SECURITY-ERASE-UNIT it cannot answer APM
+# commands, so the `hdparm -B254` issued by the Debian rule goes
+# D-state waiting on a response the drive will never give. Udev
+# re-enumeration transitions during an erase can fire the rule
+# repeatedly, stacking multiple D-state `hdparm -B254` processes on
+# the same drive. Combined with the daemon's own `sg_raw` + `smartctl`
+# against the same drive, the HBA's SG queue fills and the
+# `kworker/*+fw_event_mpt2sas*` kthread goes D-state processing
+# events it can no longer drain — at which point NEW drive insertions
+# on the same HBA never get `/dev` nodes (observed on R720 v0.6.6
+# with an active WDC WD1000CHTZ secure_erase, 2026-04-21).
+#
+# Fix: symlink /etc/udev/rules.d/85-hdparm.rules to /dev/null. Udev
+# reads files in /etc/udev/rules.d with the same name as files in
+# /lib/udev/rules.d AT HIGHER PRIORITY; a /dev/null symlink at that
+# path is the standard Debian idiom for "disable this vendor-shipped
+# rule." DriveForge never relies on boot-time APM/spindown anyway;
+# it manages drives explicitly per pipeline phase.
+if [[ ! -L /etc/udev/rules.d/85-hdparm.rules ]]; then
+  ln -sf /dev/null /etc/udev/rules.d/85-hdparm.rules
+  ok "masked Debian hdparm udev rule (prevents hdparm -B254 pileup during secure_erase)"
+fi
+udevadm control --reload-rules 2>/dev/null || true
+
 # `ledmon` ships with a systemd daemon that auto-starts and polls for
 # RAID rebuild events to drive LEDs. DriveForge calls `ledctl` directly
 # on state transitions (pass/fail/blinker), so the daemon is redundant
@@ -226,6 +259,11 @@ install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/syst
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-issue.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-update.service" /etc/systemd/system/
+# v0.6.9+: on-demand systemd-udevd restart unit. Paired with the
+# polkit rule installed below; triggered by the dashboard's
+# "Restart udev" button when the udev-health detector reports
+# the pipeline is stalled. See driveforge/core/udev_health.py.
+install -m 0644 "$(dirname "$0")/../systemd/driveforge-udev-restart.service" /etc/systemd/system/
 install -m 0755 "$(dirname "$0")/../scripts/driveforge-update-issue.sh" /usr/local/sbin/driveforge-update-issue
 install -m 0755 "$(dirname "$0")/../scripts/driveforge-update" /usr/local/sbin/driveforge-update
 
@@ -253,6 +291,13 @@ if [[ -d /etc/polkit-1/rules.d ]]; then
   install -m 0644 "$(dirname "$0")/../config/driveforge-update.polkit-rules" \
     /etc/polkit-1/rules.d/50-driveforge-update.rules
   ok "polkit rule installed (allows daemon → start update unit only)"
+  # v0.6.9+: second polkit rule for the udev-restart helper unit.
+  # Narrowly scoped to StartUnit on driveforge-udev-restart.service
+  # for the daemon user. See config/driveforge-udev-restart.polkit-rules
+  # for the scope + reasoning.
+  install -m 0644 "$(dirname "$0")/../config/driveforge-udev-restart.polkit-rules" \
+    /etc/polkit-1/rules.d/51-driveforge-udev-restart.rules
+  ok "polkit rule installed (allows daemon → start udev-restart unit only)"
   # polkit re-reads rules on file change via inotify, so no explicit
   # reload is required. systemctl --user daemon-reload is NOT what
   # reloads polkit rules.

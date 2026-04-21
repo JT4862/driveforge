@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from driveforge.core.process import run
+from driveforge.core.process import run, run_async
 
 
 class SmartAttribute(BaseModel):
@@ -147,9 +147,46 @@ def snapshot(device: str, *, timeout: float = SMARTCTL_INFO_TIMEOUT) -> SmartSna
 
     Raises `subprocess.TimeoutExpired` if smartctl hangs past `timeout` — the
     caller should treat that as drive-dead rather than waiting forever.
+
+    Sync variant — used by CLI entrypoints, tests, and non-async callers.
+    From an async context, prefer `snapshot_async` (v0.6.9+) to avoid
+    burning a drive-command-executor thread per call.
     """
     result = run(["smartctl", "--json", "--all", device], timeout=timeout)
     # smartctl returns non-zero for minor warnings we still want to parse
+    if not result.stdout:
+        raise RuntimeError(f"smartctl returned no output for {device}: {result.stderr}")
+    return parse(result.stdout, device=device)
+
+
+async def snapshot_async(
+    device: str,
+    *,
+    timeout: float = SMARTCTL_INFO_TIMEOUT,
+) -> SmartSnapshot:
+    """Async variant of `snapshot` (v0.6.9+).
+
+    Spawns smartctl via `asyncio.create_subprocess_exec` instead of
+    burning a thread in the drive-command executor. Preferred from
+    async code paths (orchestrator, telemetry sampler, auto-print).
+
+    Semantics match `snapshot`:
+      - Raises `asyncio.TimeoutError` on hang past `timeout`. Callers
+        that previously caught `subprocess.TimeoutExpired` need to
+        widen the except (both are raised by run_async's timeout
+        path — TimeoutError from asyncio.wait_for, TimeoutExpired
+        never from this code path).
+      - Returns a `SmartSnapshot` on success (even on non-zero rc —
+        smartctl reports warnings that way).
+      - Raises `RuntimeError` on empty stdout.
+
+    Parse is pure-Python and fast, so it runs inline on the event
+    loop thread; no need to offload.
+    """
+    result = await run_async(
+        ["smartctl", "--json", "--all", device],
+        timeout=timeout,
+    )
     if not result.stdout:
         raise RuntimeError(f"smartctl returned no output for {device}: {result.stderr}")
     return parse(result.stdout, device=device)

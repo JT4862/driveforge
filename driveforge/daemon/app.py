@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 
 from driveforge import config as cfg
 from driveforge.core import diskstats, drive as drive_mod
+from driveforge.core import udev_health as udev_health_mod
 from driveforge.core import updates as updates_mod
 from driveforge.core.hotplug import EventKind, Monitor as HotplugMonitor
 from driveforge.daemon.api import router as api_router
@@ -48,6 +49,15 @@ IO_RATE_POLL_INTERVAL_SEC = 3.0
 # hour-long wait on a freshly-restarted daemon.
 UPDATE_CHECK_INTERVAL_SEC = 3600
 UPDATE_CHECK_INITIAL_DELAY_SEC = 30
+
+# v0.6.9+: cadence for the udev-pipeline health probe. Purely local
+# (no network, no DB), cheap (sub-second when healthy), so we can run
+# it every 60 s without worrying about cost. The detector is polling-
+# based — there's no inotify/netlink signal for "udev queue is stuck"
+# — so a shorter interval just means operators see the warning
+# sooner when the failure mode hits.
+UDEV_HEALTH_INTERVAL_SEC = 60
+UDEV_HEALTH_INITIAL_DELAY_SEC = 15
 
 
 def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
@@ -537,6 +547,45 @@ async def _update_check_loop(state: DaemonState) -> None:
             raise
 
 
+async def _udev_health_loop(state: DaemonState) -> None:
+    """Background task (v0.6.9+): probe udev-pipeline health every
+    `UDEV_HEALTH_INTERVAL_SEC` and cache the latest snapshot on
+    `state.udev_health`. The dashboard banner reads that cached
+    snapshot via the `udev_health` Jinja global and renders the
+    "Restart udev" button when `needs_operator_action` is True.
+
+    The probe (driveforge.core.udev_health.check) shells out to
+    `udevadm settle` + reads /proc and /sys. All blocking I/O; goes
+    through the dedicated drive-command executor so a slow /proc read
+    on a loaded box can't wedge the event loop. Cheap otherwise — a
+    healthy probe returns in <100ms.
+
+    Swallows any exception so the loop never crashes the daemon. A
+    one-off probe failure shows up as "udev health: check failed" in
+    the log; next tick retries cleanly.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        await asyncio.sleep(UDEV_HEALTH_INITIAL_DELAY_SEC)
+    except asyncio.CancelledError:
+        raise
+    while True:
+        try:
+            health = await loop.run_in_executor(
+                state.drive_command_executor,
+                udev_health_mod.check,
+            )
+            state.udev_health = health
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning("udev-health probe failed; will retry next tick", exc_info=True)
+        try:
+            await asyncio.sleep(UDEV_HEALTH_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
+
+
 def make_app(settings: cfg.Settings) -> FastAPI:
     state = DaemonState.boot(settings)
     set_state(state)
@@ -550,6 +599,10 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         # Available" pill. Runs for the daemon's entire lifetime;
         # cancelled in the shutdown block below.
         update_check_task = asyncio.create_task(_update_check_loop(state))
+        # v0.6.9+: per-minute udev-pipeline health probe. Cached on
+        # state.udev_health; dashboard reads it via the Jinja global
+        # below and renders the "Restart udev" banner when stalled.
+        udev_health_task = asyncio.create_task(_udev_health_loop(state))
         # One-shot: for drives already present at startup, upsert them into
         # the DB and restore their post-run blinker based on last grade.
         # Covers the "daemon restarted while a previously-tested drive was
@@ -582,7 +635,7 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             settings.dev_mode,
         )
         yield
-        for task in (io_task, hotplug_task, update_check_task):
+        for task in (io_task, hotplug_task, update_check_task, udev_health_task):
             task.cancel()
             try:
                 await task
@@ -635,6 +688,10 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     # so each render picks up the freshest result the background loop has
     # seen. Returns UpdateInfo | None; templates should null-check first.
     web_templates.env.globals["cached_update"] = updates_mod.cached
+    # v0.6.9+: expose udev-pipeline health to every template. Returns
+    # UdevHealth | None; base.html null-checks and only renders the
+    # banner when `udev_health.needs_operator_action` is True.
+    web_templates.env.globals["udev_health"] = lambda: state.udev_health
     # v0.6.3+: known-flaky-drive advisory lookup. Templates can call
     # `drive_advisory(model)` on any drive card / detail page; returns a
     # string when the model is on the known-flaky list, None otherwise.
