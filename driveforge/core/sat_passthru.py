@@ -112,10 +112,21 @@ def _build_atapt16_cdb(
         byte2 = 0x06
         count_lsb = 0x01  # 1 × 512-byte block
     else:
-        # Non-data: protocol field already says "no transfer". Set ck_cond
-        # so the HBA returns sense data on completion — lets us tell a
-        # successful SECURITY ERASE PREPARE from a silent failure.
-        byte2 = 0x20
+        # Non-data command — all fields zero. In particular, CK_COND must
+        # be 0: with CK_COND=1 the SAT layer returns SCSI CHECK CONDITION
+        # even on a successful ATA command (with sense key RECOVERED_ERROR
+        # carrying the ATA Status Return descriptor), which `sg_raw`
+        # surfaces as a non-zero exit code. Our caller interprets sg_raw
+        # non-zero as a command failure — producing spurious "ERASE
+        # PREPARE failed" errors on drives where the command actually
+        # succeeded (observed on WDC WD1000CHTZ / R720 on 2026-04-21).
+        #
+        # With CK_COND=0 the SAT layer still returns CHECK CONDITION on
+        # actual ATA errors (ERR bit in status set, device fault, etc.),
+        # so error-path diagnostics are unaffected. We just stop getting
+        # the "CHECK CONDITION means success, trust me" gotcha on the
+        # happy path. Fixed in v0.4.3.
+        byte2 = 0x00
         count_lsb = 0x00
     return [
         ATA_PT_16,
