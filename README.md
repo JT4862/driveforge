@@ -18,6 +18,10 @@ burned-in, graded, cert-labeled drives come out — ready for the homelab.
 
 ## Docs
 
+- **📖 [Operator documentation site](https://jt4862.github.io/driveforge/)** —
+  the user manual: installation, dashboard tour, auto-enroll modes,
+  hardware compatibility, REST API. Scaffolded in v0.3.1; full
+  content lands in v0.4.0. Source under [`docs/`](docs/).
 - **[INSTALL.md](INSTALL.md)** — getting DriveForge onto your hardware
   (ISO path + manual Debian path)
 - **[UPDATE.md](UPDATE.md)** — keeping it current once installed (four

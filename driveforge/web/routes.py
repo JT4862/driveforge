@@ -849,6 +849,8 @@ def settings_page(request: Request) -> HTMLResponse:
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
     hostname_error = request.query_params.get("hostname_error")
+    install_error = request.query_params.get("install_error")
+    install_started = request.query_params.get("install_started") == "1"
     from driveforge.core import hostname as hostname_mod
     from driveforge.core import telemetry
     from driveforge.core import updates as updates_mod
@@ -874,6 +876,8 @@ def settings_page(request: Request) -> HTMLResponse:
             "chassis_temps": chassis_temps,
             "current_hostname": hostname_mod.current_hostname() or "driveforge",
             "hostname_error": hostname_error,
+            "install_error": install_error,
+            "install_started": install_started,
         },
     )
 
@@ -897,6 +901,91 @@ async def save_hostname(request: Request) -> RedirectResponse:
             status_code=303,
         )
     return RedirectResponse(url="/settings?saved=hostname", status_code=303)
+
+
+@router.post("/settings/install-update")
+async def install_update(request: Request) -> RedirectResponse:
+    """One-click in-app update — fires `sudo systemctl start
+    driveforge-update.service`, which git-pulls + reruns install.sh +
+    restarts the daemon.
+
+    Refusal preconditions checked here (the underlying primitive in
+    `updates.trigger_in_app_update()` doesn't enforce them):
+
+      - No drive currently in `state.active_phase`. The daemon restart
+        at the end of install.sh would orphan any in-flight pipeline,
+        and we lose the test-run state. Operator must wait or abort
+        the active drives first.
+      - No drive currently in `state.recovery_serials`. Same reason —
+        recovery dispatches a fresh pipeline that would also be killed.
+
+    Surfaces refusals via `?install_error=...` so the Settings page
+    can render a clear banner instead of silently no-op'ing.
+    """
+    from urllib.parse import quote
+    from driveforge.core import updates as updates_mod
+
+    state = get_state()
+    if state.active_phase:
+        active_n = len(state.active_phase)
+        return RedirectResponse(
+            url=(
+                "/settings?install_error="
+                + quote(
+                    f"{active_n} drive(s) currently under test — wait for them to "
+                    f"finish or abort them, then try again. Updating now would "
+                    f"interrupt their pipelines."
+                )
+            ),
+            status_code=303,
+        )
+    if state.recovery_serials:
+        return RedirectResponse(
+            url=(
+                "/settings?install_error="
+                + quote(
+                    "Drive recovery in progress — wait for it to complete before updating."
+                )
+            ),
+            status_code=303,
+        )
+    ok, message = updates_mod.trigger_in_app_update()
+    if not ok:
+        return RedirectResponse(
+            url="/settings?install_error=" + quote(message),
+            status_code=303,
+        )
+    return RedirectResponse(url="/settings?install_started=1", status_code=303)
+
+
+@router.get("/_partials/update-log", response_class=HTMLResponse)
+def update_log_partial(request: Request) -> HTMLResponse:
+    """HTMX-polled live tail of /var/log/driveforge-update.log + the
+    systemd unit's current activity state. Drives the live progress
+    panel that appears after clicking Install update.
+
+    The HTMX wrapper polls every 2 s while the unit is `active` /
+    `activating` and stops polling once we observe `inactive` or
+    `failed` — at which point the daemon may also be mid-restart, so
+    the page-level reconnect logic takes over.
+    """
+    from driveforge.core import updates as updates_mod
+
+    log = updates_mod.update_log_tail(max_lines=400)
+    state = updates_mod.update_service_state()
+    # `inactive` after a successful run; the next render of /settings
+    # will show the new version in the footer if the daemon restarted
+    # cleanly.
+    is_running = state in ("active", "activating")
+    return templates.TemplateResponse(
+        request,
+        "_update_log.html",
+        {
+            "log": log,
+            "service_state": state,
+            "is_running": is_running,
+        },
+    )
 
 
 @router.post("/settings/check-updates")

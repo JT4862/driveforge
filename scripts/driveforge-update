@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# DriveForge in-place update runner. Invoked by the daemon via
+# `sudo systemctl start driveforge-update.service` (the only command
+# the unprivileged daemon user is allowed to sudo, per
+# /etc/sudoers.d/driveforge-update).
+#
+# What it does:
+#   1. Locate the source tree (/opt/driveforge-src for ISO installs,
+#      ~driveforge/driveforge-src for the README clone-and-run flow).
+#   2. git fetch + git pull --ff-only on main. Refuses on a divergent
+#      branch — operator made local changes; manual intervention needed.
+#   3. Run scripts/install.sh which reinstalls deps + rebuilds the
+#      Python venv + restarts driveforge-daemon.service.
+#
+# Output:
+#   Everything goes to /var/log/driveforge-update.log via the systemd
+#   unit's StandardOutput=append: directive, so the dashboard can tail
+#   it live for the operator.
+#
+# Exit codes:
+#   0 = update completed (daemon restart pending — caller's pollers
+#       will lose connectivity briefly while systemd cycles the unit).
+#   non-zero = something failed; log file has the detail.
+
+set -uo pipefail
+
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "✗ $*"; exit 1; }
+
+log "========================================"
+log "DriveForge in-place update starting"
+log "========================================"
+
+# Find the source tree. ISO installs land at /opt/driveforge-src per
+# the preseed late_command. Manual installs typically clone to
+# ~driveforge/driveforge-src. We probe both.
+SRC=""
+for candidate in /opt/driveforge-src /home/driveforge/driveforge-src; do
+  if [[ -d "$candidate/.git" ]]; then
+    SRC="$candidate"
+    break
+  fi
+done
+[[ -n "$SRC" ]] || die "no driveforge source tree found at /opt/driveforge-src or /home/driveforge/driveforge-src"
+
+log "source tree: $SRC"
+cd "$SRC" || die "could not cd to $SRC"
+
+# Refuse to update on a non-main branch or with local modifications —
+# operator clearly customized the install; we don't want to clobber
+# their work silently.
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [[ "$CURRENT_BRANCH" != "main" ]]; then
+  die "current branch is '$CURRENT_BRANCH', not 'main' — manual update required"
+fi
+if ! git diff-index --quiet HEAD --; then
+  die "uncommitted local changes in $SRC — manual update required"
+fi
+
+log "fetching latest from origin..."
+git fetch --tags origin main 2>&1 || die "git fetch failed"
+
+# Compare local HEAD to origin/main. If we're already at the tip,
+# no-op gracefully — pressing the Install button on an already-
+# up-to-date box shouldn't error, just confirm.
+LOCAL_HEAD=$(git rev-parse HEAD)
+REMOTE_HEAD=$(git rev-parse origin/main)
+if [[ "$LOCAL_HEAD" == "$REMOTE_HEAD" ]]; then
+  log "already at origin/main ($LOCAL_HEAD); nothing to do"
+  log "✓ update no-op (already current)"
+  exit 0
+fi
+
+log "local : $LOCAL_HEAD"
+log "remote: $REMOTE_HEAD"
+log "fast-forward merging origin/main..."
+git merge --ff-only origin/main 2>&1 || die "fast-forward merge failed (history diverged?)"
+
+log "running scripts/install.sh..."
+# install.sh restarts the daemon at its end, so this script's parent
+# process — driveforge-update.service, started by the daemon over its
+# own sudoers rule — completes after the restart. From the operator's
+# point of view: log streaming pauses for ~10-15 sec, then the
+# dashboard reconnects under the new version.
+./scripts/install.sh 2>&1 || die "install.sh failed (see output above)"
+
+log "✓ update complete; daemon restart pending"
+exit 0

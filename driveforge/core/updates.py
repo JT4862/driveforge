@@ -183,6 +183,104 @@ def update_command() -> str:
     return "cd /home/driveforge/driveforge-src && sudo git pull && sudo ./scripts/install.sh"
 
 
+UPDATE_LOG_PATH = "/var/log/driveforge-update.log"
+UPDATE_SERVICE = "driveforge-update.service"
+
+
+def trigger_in_app_update() -> tuple[bool, str]:
+    """Fire `sudo systemctl start driveforge-update.service` to kick off
+    a self-update. Returns (ok, message).
+
+    The unit's ExecStart runs `/usr/local/sbin/driveforge-update`, which
+    git-pulls + reruns install.sh + restarts driveforge-daemon. The
+    daemon's HTTP listener disappears for ~10-15 sec while that restart
+    happens — the dashboard UI handles reconnect.
+
+    Refusal cases are checked by the caller (HTTP route), not here —
+    this function is the bare "fire the systemd unit" primitive. Caller
+    must verify no in-flight pipeline first, since the daemon restart
+    will kill any active drive's pipeline task.
+    """
+    import shutil
+    import subprocess
+
+    # systemctl path varies (some distros: /usr/bin, others: /bin). Use
+    # the resolver so a PATH-trimmed systemd-managed environment finds it.
+    systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
+    sudo = shutil.which("sudo") or "/usr/bin/sudo"
+    argv = [sudo, "-n", systemctl, "start", UPDATE_SERVICE]
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return (False, f"failed to invoke {' '.join(argv)}: {exc}")
+    if proc.returncode != 0:
+        # Most common cause: sudoers rule missing or mis-installed.
+        # Surface stderr verbatim so the operator sees the real reason.
+        detail = (proc.stderr or proc.stdout or "").strip() or "non-zero exit"
+        return (
+            False,
+            f"systemctl start {UPDATE_SERVICE} failed (rc={proc.returncode}): {detail}",
+        )
+    return (True, f"{UPDATE_SERVICE} started; live log streaming below.")
+
+
+def update_log_tail(*, max_lines: int = 200) -> str:
+    """Return the last `max_lines` of /var/log/driveforge-update.log.
+
+    Empty string if the log doesn't exist (no update has ever been
+    triggered on this host). Empty string also if the daemon can't read
+    it — surface that as "no log available" in the UI rather than
+    erroring, since a missing log is a failure mode the operator can
+    investigate at the shell.
+    """
+    from collections import deque
+    from pathlib import Path
+
+    p = Path(UPDATE_LOG_PATH)
+    if not p.exists():
+        return ""
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            tail = deque(f, maxlen=max_lines)
+        return "".join(tail)
+    except OSError:
+        return ""
+
+
+def update_service_state() -> str:
+    """Return the current systemd activity state of driveforge-update.service.
+
+    One of: "active" (running), "activating" (starting), "inactive"
+    (idle, last run completed cleanly), "failed" (last run errored),
+    "unknown" (systemctl unavailable or unit not installed). The UI
+    uses this to decide whether to keep polling the live log or stop.
+    """
+    import shutil
+    import subprocess
+
+    systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
+    try:
+        proc = subprocess.run(
+            [systemctl, "is-active", UPDATE_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return "unknown"
+    # `is-active` exits 0 for active, non-zero otherwise but still prints
+    # the textual state on stdout. Use stdout, not exit code.
+    state = (proc.stdout or "").strip().lower()
+    if state in {"active", "activating", "inactive", "failed", "deactivating"}:
+        return state
+    return "unknown"
+
+
 def ssh_update_command() -> str:
     """One-liner that SSHes into this server and runs the update inline.
 

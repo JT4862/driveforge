@@ -1,0 +1,29 @@
+# GitHub Pages config for the DriveForge documentation site.
+#
+# Theme: jekyll-theme-cayman is one of the built-in GitHub Pages themes
+# — clean, two-column, syntax-highlights code blocks. Doesn't require
+# a Gemfile or any local Jekyll setup; GitHub Pages knows it natively.
+# If we ever want a richer theme (just-the-docs has search + sidebar
+# nav) we can swap by editing this one line. For the v0.3.1 scaffold,
+# defaults are fine.
+title: DriveForge
+description: >-
+  In-house enterprise drive refurbishment pipeline.
+  SMART → secure-erase → burn-in → long self-test → grade → cert label.
+theme: jekyll-theme-cayman
+
+# Hide the auto-include of the README at the docs landing page —
+# index.md is our intentional entry point.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Don't try to render these as Jekyll pages — they're tracked in the
+# repo for other reasons.
+exclude:
+  - logo*.png
+  - logo*.svg
+  - screenshots/
+  - logo-*.png

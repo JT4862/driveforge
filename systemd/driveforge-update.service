@@ -1,0 +1,30 @@
+[Unit]
+Description=DriveForge in-place self-update
+Documentation=file:///usr/local/sbin/driveforge-update
+# We pull from GitHub during the update, so the network must be up.
+After=network-online.target
+Wants=network-online.target
+# Don't try to update while the daemon is mid-restart for some other reason.
+After=driveforge-daemon.service
+
+[Service]
+# oneshot — fire it and let it run to completion (the install.sh at the
+# end restarts driveforge-daemon.service explicitly, which is the only
+# state change the operator cares about). Output goes to a file the
+# dashboard tails live; systemd journal also keeps a copy.
+Type=oneshot
+ExecStart=/usr/local/sbin/driveforge-update
+StandardOutput=append:/var/log/driveforge-update.log
+StandardError=append:/var/log/driveforge-update.log
+# RemainAfterExit=no so a successful run leaves the unit in "inactive"
+# state — operator can re-trigger immediately on the next click without
+# needing to systemctl reset-failed.
+RemainAfterExit=no
+# Updates can take a few minutes on slow links (apt-get update + pip
+# install + restart). Generous timeout so a slow GitHub or slow apt
+# mirror doesn't kill the run mid-flight.
+TimeoutStartSec=20min
+
+[Install]
+# Not WantedBy anything — this unit is invoked on-demand by the daemon
+# via sudo, never auto-started at boot.

@@ -222,21 +222,62 @@
     {% endif %}
   </dl>
 
+  {% if install_error %}
+  <div class="banner warn-banner" style="margin-top: 14px;">
+    &#9888; <strong>Update could not start:</strong> {{ install_error }}
+  </div>
+  {% endif %}
+
   {% if update_info and update_info.update_available %}
   <div class="banner ok-banner" style="margin-top: 14px;">
     <strong>Update {{ update_info.latest_version }} is available.</strong>
-    We don't auto-install from the web UI for security reasons. Two
-    copy-paste options depending on whether you're already shelled in:
-    <div class="update-cmd-block">
-      <div class="update-cmd-label">Not shelled in &mdash; run from your local terminal:</div>
-      <pre class="log-tail">{{ ssh_update_command }}</pre>
-      <div class="update-cmd-label">Already shelled in to the DriveForge host:</div>
-      <pre class="log-tail">{{ update_command }}</pre>
+    {# Primary action: one-click in-app install (v0.3.1+). The button
+       fires sudo systemctl start driveforge-update.service via the
+       /settings/install-update endpoint, which is preconditioned on
+       no drives being under test. #}
+    <form method="post" action="/settings/install-update"
+          style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
+      <button type="submit" class="btn primary"
+              onclick="return confirm('Install update {{ update_info.latest_version }} now? This will:\n\n  • git-pull origin/main in the source tree\n  • re-run scripts/install.sh\n  • restart driveforge-daemon (10-15 sec dashboard outage)\n\nAny drive currently under test would have its pipeline interrupted; the daemon refuses to start an update while drives are active.\n\nProceed?');">
+        Install update now
+      </button>
+      <span class="muted small">
+        Restarts the daemon &mdash; the dashboard will reconnect automatically.
+      </span>
+    </form>
+    <details class="update-cmd-details" style="margin-top: 12px;">
+      <summary class="muted small">Or update manually via SSH instead</summary>
+      <div class="update-cmd-block" style="margin-top: 10px;">
+        <div class="update-cmd-label">Not shelled in &mdash; run from your local terminal:</div>
+        <pre class="log-tail">{{ ssh_update_command }}</pre>
+        <div class="update-cmd-label">Already shelled in to the DriveForge host:</div>
+        <pre class="log-tail">{{ update_command }}</pre>
+      </div>
+      <p class="muted small" style="margin-top: 6px;">
+        Default SSH password for the preseeded <code>forge</code> account is
+        <code>driveforge</code>. Change it after first login via <code>passwd</code>.
+      </p>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if install_started %}
+  {# Live install-log panel — appears as soon as the operator clicks
+     Install update. The partial polls /var/log/driveforge-update.log
+     every 2 s via HTMX while driveforge-update.service is active.
+     `restart-watch` data-attr is read by the page-level JS at the
+     bottom which switches into reconnect mode once the daemon poll
+     starts 502'ing. #}
+  <div class="install-progress" style="margin-top: 14px;" data-restart-watch="1">
+    <h3 style="margin-top: 0;">Update in progress</h3>
+    <div hx-get="/_partials/update-log"
+         hx-trigger="load, every 2s"
+         hx-swap="outerHTML">
+      <p class="muted small">Loading update log&hellip;</p>
     </div>
-    <p class="muted small" style="margin-top: 6px;">
-      Default SSH password for the preseeded <code>forge</code> account is
-      <code>driveforge</code>. Change it after first login via <code>passwd</code>.
-    </p>
+    <div id="reconnect-overlay" style="display: none;" class="banner warn-banner">
+      &#9203; Daemon is restarting&hellip; reconnecting automatically.
+    </div>
   </div>
   {% endif %}
 
@@ -250,6 +291,53 @@
     <button type="submit" class="btn">Check for updates</button>
   </form>
 </section>
+
+{% if install_started %}
+{# Reconnect logic: once the daemon restart kicks in (toward the end
+   of install.sh), the live-log poller will start hitting 502s. We
+   poll the lightweight /api/health endpoint instead — when it
+   responds 200 again, the new daemon is up and we reload the
+   Settings page so the footer shows the new version. #}
+<script>
+(function () {
+  const watch = document.querySelector('[data-restart-watch]');
+  if (!watch) return;
+  const overlay = document.getElementById('reconnect-overlay');
+  let sawDown = false;
+  let attempts = 0;
+  const MAX_ATTEMPTS = 90;  // 90 × 2 s = 3 minutes max wait
+  async function probe() {
+    attempts += 1;
+    try {
+      const resp = await fetch('/api/health', {cache: 'no-store'});
+      if (resp.ok) {
+        if (sawDown) {
+          // Daemon went down and came back — reload to pick up the
+          // new version in the footer + clear the install_started
+          // query param so we don't re-show the panel.
+          window.location.assign('/settings?saved=updates');
+          return;
+        }
+      } else {
+        sawDown = true;
+        if (overlay) overlay.style.display = 'block';
+      }
+    } catch (_e) {
+      sawDown = true;
+      if (overlay) overlay.style.display = 'block';
+    }
+    if (attempts < MAX_ATTEMPTS) {
+      setTimeout(probe, 2000);
+    } else if (overlay) {
+      overlay.innerHTML =
+        '&#9888; Daemon hasn\'t come back after 3 minutes. ' +
+        'Check <code>systemctl status driveforge-daemon</code> on the host.';
+    }
+  }
+  setTimeout(probe, 2000);
+})();
+</script>
+{% endif %}
 
 <form class="panel" method="post" action="/settings/daemon">
   <div class="panel-head">
