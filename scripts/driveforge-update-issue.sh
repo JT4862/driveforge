@@ -22,8 +22,21 @@ set -uo pipefail
 # still print something useful even on weird network configs. Each
 # step is `|| echo ""` so a non-zero from the upstream tool can't
 # propagate into the surrounding shell state.
-PRIMARY_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1); exit}' || echo "")
-PRIMARY_IP=${PRIMARY_IP:-$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")}
+#
+# Retry loop (added v0.4.1): on R720 + Broadcom NICs, systemd's
+# network-online.target sometimes fires a beat BEFORE DHCP actually
+# completes. Without this loop the banner generated at boot shows
+# "<no-ip>" even though DHCP succeeds a second later. Retry up to
+# ~30 seconds so the banner reflects the real address.
+PRIMARY_IP=""
+for attempt in $(seq 1 30); do
+  PRIMARY_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") print $(i+1); exit}' || echo "")
+  PRIMARY_IP=${PRIMARY_IP:-$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")}
+  if [[ -n "$PRIMARY_IP" ]]; then
+    break
+  fi
+  sleep 1
+done
 PRIMARY_IP=${PRIMARY_IP:-<no-ip>}
 
 # getty(8) honors a set of backslash escapes in /etc/issue — we use:
