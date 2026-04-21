@@ -608,10 +608,45 @@ def _public_report_url(request: Request, state, serial: str) -> str:
 
 
 def _cert_label_data_for(request: Request, state, drive, run):
-    """Build CertLabelData for a given drive + run. Shared by preview + print."""
+    """Build CertLabelData for a given drive + run. Shared by preview +
+    print. v0.5.2+ populates the enriched fields (reallocated count,
+    pending sectors, badblocks errors, primary fail reason for F
+    drives) so the label can render the operator-facing detail the
+    sticker now shows.
+
+    `run.rules` is the pydantic-serialized list of grading rules —
+    safe to pass to `primary_fail_reason` even for non-F drives; it
+    returns None when no rule with forces_grade=F fired.
+    """
     # Lazy import — the printer module pulls in qrcode + pillow which aren't
     # always available in the macOS dev environment.
     from driveforge.core import printer as printer_mod
+
+    # badblocks errors aren't stored on TestRun directly — they live
+    # in the grading rule output. Pull from rules if present; None
+    # otherwise. Rules format is [{"name": ..., "passed": ...,
+    # "detail": "badblocks found errors: read=3 write=0 compare=0"},
+    # ...]. For pass runs, the rule passed and detail reads
+    # "badblocks reported no errors" — we parse both.
+    badblocks: tuple[int, int, int] | None = None
+    for rule in (run.rules or []):
+        if rule.get("name") == "badblocks_clean":
+            import re as _re
+            m = _re.search(
+                r"read=(\d+)\s+write=(\d+)\s+compare=(\d+)",
+                rule.get("detail", ""),
+            )
+            if m:
+                badblocks = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            elif rule.get("passed"):
+                # pass-tier rule without parseable detail → 0/0/0
+                badblocks = (0, 0, 0)
+            break
+
+    # Primary fail reason — None for pass tiers. Caller of the label
+    # renderer doesn't need to check; the renderer treats missing
+    # reason as "generic failed grading" text.
+    fail_reason = printer_mod.primary_fail_reason(run.rules or [])
 
     return printer_mod.CertLabelData(
         model=drive.model,
@@ -622,6 +657,10 @@ def _cert_label_data_for(request: Request, state, drive, run):
         power_on_hours=run.power_on_hours_at_test or 0,
         report_url=_public_report_url(request, state, drive.serial),
         quick_mode=bool(run.quick_mode),
+        reallocated_sectors=run.reallocated_sectors,
+        current_pending_sector=run.current_pending_sector,
+        badblocks_errors=badblocks,
+        fail_reason=fail_reason,
     )
 
 
@@ -724,19 +763,26 @@ def print_batch_labels(request: Request, batch_id: str) -> RedirectResponse:
         batch = session.get(m.Batch, batch_id)
         if batch is None:
             raise HTTPException(status_code=404, detail="batch not found")
-        # Only print labels for runs whose grade is a real pass-tier
-        # verdict (A/B/C). Skip:
+        # Print labels for every run that reached a real verdict —
+        # A/B/C (pass tiers) AND F (drive-fail). The F sticker is
+        # what lets the operator identify the bad drive in the scrap
+        # pile; not printing it was a v0.5.1 bug, corrected here.
+        #
+        # Skip:
         #   - incomplete runs (completed_at NULL)
         #   - aborted runs (grade NULL)
-        #   - drive-fail runs ("F") — label prints in the F sticker path,
-        #     not the batch-print-all flow; they're scrapped, not certified
-        #   - pipeline-error runs ("error") — no verdict reached; nothing to certify
-        #   - legacy "fail" (pre-v0.5.1 rows) — same
+        #   - pipeline-error runs ("error") — no verdict reached; the
+        #     drive's actual health is unknown, there's nothing to
+        #     certify OR to scrap. Printing a sticker for these would
+        #     mislead the operator.
+        #   - legacy "fail" (pre-v0.5.1 rows) — can't retroactively
+        #     tell if it was real or pipeline-error; operator should
+        #     retest for a real verdict.
         runs = (
             session.query(m.TestRun)
             .filter_by(batch_id=batch_id)
             .filter(m.TestRun.completed_at.isnot(None))
-            .filter(m.TestRun.grade.in_(("A", "B", "C")))
+            .filter(m.TestRun.grade.in_(("A", "B", "C", "F")))
             .all()
         )
         printed = 0
@@ -797,11 +843,12 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
                 "report_url": r.report_url,
                 "error_message": r.error_message,
                 "quick_mode": bool(r.quick_mode),
-                # Only A/B/C drives are printable. Graded-F drives
-                # get their own sticker-print path (v0.5.1+); pipeline
-                # errors produce no certification artifact.
+                # Printable: A/B/C (cert) + F (bad-drive sticker).
+                # Corrected v0.5.2 — v0.5.1 erroneously excluded F
+                # from the printable set, contradicting the design
+                # intent of "F prints, ERR doesn't."
                 "printable": bool(
-                    r.completed_at and r.grade in ("A", "B", "C")
+                    r.completed_at and r.grade in ("A", "B", "C", "F")
                 ),
             }
             for r in runs
