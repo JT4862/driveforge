@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "driveforge"
-version = "0.5.2"
+version = "0.5.3"
 description = "In-house enterprise drive refurbishment pipeline"
 readme = "README.md"
 license = { file = "LICENSE" }
