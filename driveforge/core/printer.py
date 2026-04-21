@@ -407,26 +407,139 @@ def save_label_png(img: Image.Image, path: Path) -> None:
     img.save(path, "PNG")
 
 
-def print_label(img: Image.Image, *, model: str, backend: str = "file", identifier: str | None = None) -> bool:
+# Brother's USB vendor ID — every QL-series printer identifies as this.
+# Used by discover_usb_printer() to auto-detect the attached printer so
+# operators don't need to know the USB PID to fill in
+# `backend_identifier` manually. v0.6.1+.
+_BROTHER_USB_VID = 0x04F9
+
+# DriveForge-roll-name → brother_ql-label-identifier. brother_ql uses a
+# "{width}" ID for continuous rolls and "{width}x{length}" for die-cut
+# rolls; the printer validates the raster's label ID against the
+# physical label loaded and refuses the job if they disagree. v0.6.0
+# hardcoded "62" (continuous 62mm) regardless of the saved roll, so
+# any die-cut label attempt hit "wrong roll type" at the printer. v0.6.1
+# adds the explicit mapping so the raster matches whatever the
+# operator picked in Settings.
+_BROTHER_QL_LABEL_IDS: dict[str, str] = {
+    "DK-1201": "29x90",      # 29mm x 90mm die-cut
+    "DK-1208": "39x90",      # 38mm x 90mm die-cut (brother_ql calls it 39mm — backing included)
+    "DK-1209": "62x29",      # 62mm x 29mm die-cut — the default DriveForge cert label
+    "DK-1221": "23x23",      # 23mm x 23mm die-cut square
+    "DK-22205": "62",        # 62mm continuous
+    "DK-22210": "29",        # 29mm continuous
+    "DK-22223": "50",        # 50mm continuous
+}
+# Default when the operator picks a roll we don't have mapped, or leaves
+# the roll field blank. Continuous 62mm works on most Brother QL units
+# even without a physical roll match — the printer treats it as a
+# generic paper warning rather than a hard refusal for many firmwares.
+_DEFAULT_BROTHER_QL_LABEL_ID = "62"
+
+
+def _brother_ql_label_id(roll: str | None) -> str:
+    """Return the brother_ql label identifier matching a DriveForge roll
+    name. Falls back to continuous 62mm for unknown / unmapped roll
+    values so a new DK-*** SKU added to the Settings dropdown without
+    a corresponding entry here degrades to "try 62mm" rather than
+    crashing the print flow."""
+    if not roll:
+        return _DEFAULT_BROTHER_QL_LABEL_ID
+    return _BROTHER_QL_LABEL_IDS.get(roll, _DEFAULT_BROTHER_QL_LABEL_ID)
+
+
+def discover_usb_printer() -> str | None:
+    """Scan connected USB devices for a Brother QL printer and return
+    a brother_ql-format identifier string like ``usb://0x04f9:0x209d``.
+
+    Returns None if:
+      - pyusb isn't installed (dev laptop without the optional dep)
+      - No Brother USB device is present (printer unplugged)
+      - The scan fails for any reason (permissions, etc.)
+
+    Pre-v0.6.1 the operator had to paste this identifier into the
+    ``backend_identifier`` field manually, but the Settings UI didn't
+    expose that field at all — so the saved config sat at
+    ``backend_identifier: null`` and brother_ql's pyusb backend blew
+    up trying to parse the empty string as hex. This helper removes
+    that configuration dance entirely: `usb` connection with no saved
+    identifier means "find me the first Brother printer on the bus."
+
+    If multiple Brother printers are connected, the first one found
+    wins. In practice that's a non-issue (nobody has two QL printers
+    on one DriveForge host). A future release could expose a picker
+    if it matters.
+    """
+    try:
+        import usb.core  # type: ignore[import-not-found]
+    except ImportError:
+        logger.debug("pyusb not available; USB printer discovery disabled")
+        return None
+    try:
+        dev = usb.core.find(idVendor=_BROTHER_USB_VID)
+    except Exception:  # noqa: BLE001
+        logger.exception("USB discovery failed")
+        return None
+    if dev is None:
+        return None
+    # brother_ql expects both VID and PID in lowercase hex with the
+    # `0x` prefix, colon-separated, prefixed with `usb://`.
+    return f"usb://0x{_BROTHER_USB_VID:04x}:0x{dev.idProduct:04x}"
+
+
+def print_label(
+    img: Image.Image,
+    *,
+    model: str,
+    backend: str = "file",
+    identifier: str | None = None,
+    roll: str | None = None,
+) -> tuple[bool, str]:
     """Print a label. `backend=file` dumps raster output to disk (dev mode).
 
-    In production with a real printer: backend='pyusb' + identifier like
-    'usb://0x04f9:0x209c'. See brother_ql docs.
+    Returns ``(ok, message)``. On success, ``message`` is a short
+    human-readable status; on failure, it's the reason suitable for
+    surfacing to the operator in a Settings banner. Pre-v0.6.1 this
+    returned a bare bool — the string form carries the specific
+    failure reason (unknown printer model, pyusb discovery failed,
+    wrong-roll rejection from the printer, etc.) through to the UI
+    without spilling a raw 500 traceback.
+
+    ``roll`` (v0.6.1+) is the DriveForge roll name (e.g. ``DK-1209``)
+    and gets translated to brother_ql's label identifier via
+    ``_brother_ql_label_id``. Pre-v0.6.1 the brother_ql label was
+    hardcoded to ``"62"`` (continuous 62mm) so every die-cut print
+    attempt hit "wrong roll type" at the physical printer.
+
+    In production with a real printer: ``backend='pyusb'`` + a
+    discovered USB identifier (see ``discover_usb_printer``). If
+    ``identifier`` is falsy and ``backend='pyusb'``, auto-discover
+    rather than passing an empty string to brother_ql (which would
+    hit ``invalid literal for int() with base 16: ''`` deep in pyusb).
     """
     try:
         from brother_ql.backends.helpers import send  # type: ignore[import-untyped]
         from brother_ql.conversion import convert  # type: ignore[import-untyped]
+        from brother_ql.exceptions import BrotherQLUnknownModel  # type: ignore[import-untyped]
         from brother_ql.raster import BrotherQLRaster  # type: ignore[import-untyped]
     except ImportError:
         logger.warning("brother_ql not installed; label printing disabled")
-        return False
+        return (False, "brother_ql not installed")
 
-    qlr = BrotherQLRaster(model)
+    try:
+        qlr = BrotherQLRaster(model)
+    except BrotherQLUnknownModel:
+        logger.error("unknown Brother QL model %r in printer config", model)
+        return (
+            False,
+            f"unknown printer model {model!r} — pick a valid model in Settings → Printer",
+        )
     qlr.exception_on_warning = True
+    label_id = _brother_ql_label_id(roll)
     instructions = convert(
         qlr=qlr,
         images=[img],
-        label="62",
+        label=label_id,
         rotate="auto",
         threshold=70.0,
         dither=False,
@@ -449,18 +562,62 @@ def print_label(img: Image.Image, *, model: str, backend: str = "file", identifi
             "label dev-preview written: %s (%d bytes raster) + %s (PNG)",
             target_bin, len(instructions), target_png,
         )
-        return True
+        return (True, f"dev-preview written to {target_png}")
+    # v0.6.1+: auto-discover the USB identifier when the operator picked
+    # `usb` in Settings but hasn't (can't — no UI field) filled in a
+    # backend_identifier. Without this, pyusb's backend hits
+    # `invalid literal for int() with base 16: ''` on the empty string.
+    effective_identifier = identifier
+    if backend == "pyusb" and not effective_identifier:
+        effective_identifier = discover_usb_printer()
+        if not effective_identifier:
+            return (
+                False,
+                "no Brother USB printer detected — check the cable and `lsusb`",
+            )
+        logger.info("auto-discovered USB printer at %s", effective_identifier)
     try:
         send(
             instructions=instructions,
-            printer_identifier=identifier or "",
+            printer_identifier=effective_identifier or "",
             backend_identifier=backend,
             blocking=True,
         )
-        return True
+        return (True, "label dispatched to printer")
     except Exception as exc:  # noqa: BLE001
         logger.error("label print failed: %s", exc)
-        return False
+        return (False, f"printer dispatch failed: {exc}")
+
+
+def render_test_label(*, roll: str = "DK-1209") -> Image.Image:
+    """Render a sentinel label for the Settings → Printer Test Print
+    button. Uses the same ``render_label`` pipeline as real cert labels
+    so layout regressions are caught before they hit a drive run —
+    but with a dummy CertLabelData payload (sentinel serial, grade A,
+    stand-in POH, QR pointing at the DriveForge repo). v0.6.1+.
+
+    Purpose: lets the operator verify the printer is configured and
+    the USB/network/Bluetooth backend is working without having to
+    wait for a completed drive run. Also serves as the mechanism for
+    v1.0's "Brother QL hardware test" validation gate.
+    """
+    data = CertLabelData(
+        model="TEST DRIVE",
+        serial="TEST-PRINT",
+        capacity_tb=1.0,
+        grade="A",
+        tested_date=date.today(),
+        power_on_hours=12345,
+        report_url="https://github.com/JT4862/driveforge",
+        quick_mode=False,
+        reallocated_sectors=0,
+        current_pending_sector=0,
+        badblocks_errors=(0, 0, 0),
+        fail_reason=None,
+        remapped_during_run=0,
+        throughput_mean_mbps=180.0,
+    )
+    return render_label(data, roll=roll)
 
 
 def render_to_bytes(img: Image.Image) -> bytes:
