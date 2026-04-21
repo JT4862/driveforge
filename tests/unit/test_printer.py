@@ -279,3 +279,100 @@ def test_format_health_line_drops_badblocks_when_tight() -> None:
 
 def test_format_health_line_returns_none_when_all_unknown() -> None:
     assert _format_health_line(None, None, None) is None
+
+
+# ---------------------------------------------------------------- v0.5.5 healing line
+
+
+def test_render_pass_label_includes_remapped_line_when_delta_positive() -> None:
+    """v0.5.5: pass-tier labels print a "Remapped N during burn-in" line
+    when the drive actually healed sectors during our pipeline. Verified
+    by rendering the label and checking the text was drawn \u2014 we can't
+    OCR the image easily, so instead we exercise the label via a shim
+    that captures draw calls."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(remapped_during_run=3))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert any("Remapped 3" in s for s in captured_strings), (
+        "pass-tier label with positive remapped_during_run must render "
+        f"the 'Remapped N' line; got drawn strings: {captured_strings}"
+    )
+    assert any("during burn-in" in s for s in captured_strings)
+
+
+def test_render_pass_label_omits_remapped_line_when_delta_zero() -> None:
+    """Zero-delta runs (typical, healthy drive) stay silent \u2014 no
+    'Remapped 0 during burn-in' pseudo-line."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(remapped_during_run=0))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert not any("Remapped" in s for s in captured_strings), (
+        f"zero-delta label must not mention remapping; got: {captured_strings}"
+    )
+
+
+def test_render_pass_label_omits_remapped_line_on_legacy_none() -> None:
+    """Pre-v0.5.5 runs have no pre-snapshot \u2014 remapped_during_run=None.
+    Label must render without the Remapped line in that case."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(remapped_during_run=None))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert not any("Remapped" in s for s in captured_strings)
+
+
+def test_render_quick_mode_label_uses_quick_pass_wording() -> None:
+    """Quick-pass runs that somehow still print a label (future use)
+    should say 'during quick pass' instead of 'during burn-in'."""
+    from PIL import ImageDraw
+
+    captured_strings: list[str] = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def _capture_text(self, xy, text, *args, **kwargs):
+        captured_strings.append(text)
+        return original_text(self, xy, text, *args, **kwargs)
+
+    ImageDraw.ImageDraw.text = _capture_text
+    try:
+        render_label(_sample(remapped_during_run=2, quick_mode=True))
+    finally:
+        ImageDraw.ImageDraw.text = original_text
+
+    assert any("during quick pass" in s for s in captured_strings)
+    assert not any("during burn-in" in s for s in captured_strings)

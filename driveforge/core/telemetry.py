@@ -1,8 +1,15 @@
 """Telemetry collection: per-drive temp + chassis power.
 
-Called on a ~30s cadence from the orchestrator during active test runs.
-Samples are appended to the `telemetry_sample` table, consumed by the
-charts in the web UI and the grading thermal-excursion rule.
+Low-level helpers — reading chassis power via IPMI DCMI, and reading
+chassis temperatures via ipmitool sdr. Pure I/O; no scheduling.
+
+The actual sampling cadence lives in the orchestrator's
+`_telemetry_sampler_loop` (v0.5.5+) which spawns one sampler task per
+active pipeline run and invokes these helpers at
+`settings.daemon.telemetry_sample_interval_s` intervals (default 30 s).
+Pre-v0.5.5 this file's docstring claimed a "~30s cadence" but no
+periodic caller existed — _record_telemetry was only invoked at SMART
+phase boundaries, producing 2-sample charts on multi-hour runs.
 """
 
 from __future__ import annotations

@@ -69,6 +69,12 @@ class CertLabelData:
     current_pending_sector: int | None = None
     badblocks_errors: tuple[int, int, int] | None = None
     fail_reason: str | None = None
+    # v0.5.5+ healing-delta field. post_reallocated - pre_reallocated,
+    # computed by the caller from the TestRun snapshots. The render
+    # path prints a "Remapped N during burn-in" line on pass-tier
+    # labels when this value is > 0 and falsy otherwise, so old rows
+    # (None) and drives that didn't heal anything (0) both stay quiet.
+    remapped_during_run: int | None = None
 
 
 def primary_fail_reason(rules: list[dict]) -> str | None:
@@ -325,6 +331,14 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
         )
         if health_line:
             lines.append(health_line)
+
+        # v0.5.5+ healing line \u2014 only printed when the drive actually
+        # remapped sectors during our pipeline. Silent on zero-delta and
+        # missing-pre-snapshot runs; those labels already have enough
+        # information without a "0 healed" pseudo-line.
+        if data.remapped_during_run and data.remapped_during_run > 0:
+            suffix = "during quick pass" if data.quick_mode else "during burn-in"
+            lines.append(f"Remapped {data.remapped_during_run} {suffix}")
 
         wipe_line = (
             "Wipe: NIST 800-88 Purge*"

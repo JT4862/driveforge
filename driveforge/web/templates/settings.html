@@ -355,6 +355,35 @@
   <p class="muted small">
     Host or port changes require a daemon restart.
   </p>
+
+  <label class="field">
+    <span>Quick-pass fail action (v0.5.5+)</span>
+    <select name="quick_pass_fail_action">
+      <option value="badge_only" {% if settings.daemon.quick_pass_fail_action == "badge_only" %}selected{% endif %}>Badge only (default) &mdash; just show the Fail triage badge</option>
+      <option value="prompt" {% if settings.daemon.quick_pass_fail_action == "prompt" %}selected{% endif %}>Prompt &mdash; ask me before running the full pipeline</option>
+      <option value="auto_promote" {% if settings.daemon.quick_pass_fail_action == "auto_promote" %}selected{% endif %}>Auto-promote &mdash; run the full pipeline automatically</option>
+    </select>
+  </label>
+  <p class="muted small">
+    What to do when a quick-pass run finishes with a <strong>Fail</strong>
+    triage verdict (drive deteriorated during the scan). Conservative
+    default keeps escalation in the operator's hands; <em>auto-promote</em>
+    is useful for unattended-rack batching if you trust the triage result.
+  </p>
+
+  <label class="field">
+    <span>Telemetry sample interval (seconds)</span>
+    <input type="number" name="telemetry_sample_interval_s"
+           value="{{ settings.daemon.telemetry_sample_interval_s }}"
+           min="5" max="600">
+  </label>
+  <p class="muted small">
+    How often to sample per-drive temperature and chassis power during
+    active pipeline runs. Pre-v0.5.5 samples only landed at SMART phase
+    boundaries (twice per run); 30s gives enough resolution to see the
+    warm-up curve during badblocks without hammering smartctl.
+  </p>
+
   <div class="form-actions">
     <button type="submit" class="btn primary">Save daemon</button>
   </div>

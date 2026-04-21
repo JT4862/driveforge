@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from driveforge.core import badblocks, blinker, erase, grading, process, smart, telemetry, timing, webhook
 from driveforge.core import drive as drive_mod
+from driveforge.core import triage as triage_mod
 from driveforge.core.drive import Drive, Transport
 from driveforge.daemon.state import DaemonState
 from driveforge.db import models as m
@@ -837,6 +838,40 @@ class Orchestrator:
             session.refresh(test_run)
             run_id = test_run.id
 
+        # v0.5.5+ \u2014 start the periodic telemetry sampler for this run.
+        # Runs until the pipeline finishes (or crashes), at which point
+        # the finally block below cancels it. Pre-v0.5.5 telemetry was
+        # only captured at the two SMART-snapshot phase boundaries,
+        # producing sparse 2-sample charts on multi-hour runs.
+        sampler_task = asyncio.create_task(
+            self._telemetry_sampler_loop(run_id, drive),
+            name=f"telemetry-sampler:{drive.serial}",
+        )
+
+        try:
+            await self._execute_pipeline_inner(
+                batch_id=batch_id,
+                drive=drive,
+                quick=quick,
+                run_id=run_id,
+            )
+        finally:
+            sampler_task.cancel()
+            try:
+                await sampler_task
+            except (asyncio.CancelledError, Exception):
+                # Expected on cancel. A real sampler error should have
+                # been logged inside the loop; don't let cleanup raise.
+                pass
+
+    async def _execute_pipeline_inner(
+        self,
+        *,
+        batch_id: str,
+        drive: Drive,
+        quick: bool,
+        run_id: int,
+    ) -> None:
         dev_mode = self.state.settings.dev_mode
 
         # Phase 1: pre-SMART
@@ -898,6 +933,11 @@ class Orchestrator:
             max_temperature_c=max_temp,
         )
         await self._finalize_run(run_id, drive, post_snap, result)
+        # v0.5.5+ quick-pass fail action: prompt the operator or auto-promote
+        # to a full pipeline run. Evaluated after finalize so the triage
+        # verdict is committed to the DB first.
+        if quick:
+            self._maybe_handle_quick_pass_fail(run_id, drive)
         await self._advance(run_id, "done", drive)
         self.state.active_percent[drive.serial] = 100.0
 
@@ -936,6 +976,17 @@ class Orchestrator:
                     payload=snap.model_dump(mode="json"),
                 )
             )
+            # v0.5.5 — denormalize the sector counters onto the run row so
+            # the dashboard + API can report the healing delta without
+            # having to join and parse the SmartSnapshot JSON payload.
+            # Post-SMART values land in the legacy reallocated_sectors /
+            # current_pending_sector columns via _finalize_run; here we
+            # only populate the pre-SMART side.
+            if kind == "pre":
+                run = session.get(m.TestRun, run_id)
+                if run is not None:
+                    run.pre_reallocated_sectors = snap.reallocated_sectors
+                    run.pre_current_pending_sector = snap.current_pending_sector
             session.commit()
         self._record_telemetry(
             run_id,
@@ -1173,6 +1224,133 @@ class Orchestrator:
         self._log(serial, f"badblocks complete: errors={errs[0]}/{errs[1]}/{errs[2]}")
         return errs
 
+    def _maybe_handle_quick_pass_fail(self, run_id: int, drive: Drive) -> None:
+        """v0.5.5+ \u2014 act on a quick-pass triage=fail verdict per the
+        operator's `settings.daemon.quick_pass_fail_action` preference.
+
+        Three modes:
+          badge_only  \u2014 no-op here; the dashboard already surfaces the
+                        triage-fail badge. Default.
+          prompt      \u2014 add serial to state.promote_prompts so the
+                        dashboard card renders a "Run full pipeline?"
+                        banner with Yes / Dismiss actions.
+          auto_promote \u2014 schedule a full-pipeline start_batch on this
+                         same drive after a short delay (to let the
+                         current run's cleanup finish).
+
+        Called from _execute_pipeline immediately after _finalize_run,
+        only when quick=True. Reads the persisted triage_result so the
+        verdict is authoritative (not a function argument that could
+        drift out of sync).
+        """
+        action = (self.state.settings.daemon.quick_pass_fail_action or "badge_only").lower()
+        if action not in ("prompt", "auto_promote"):
+            return
+        with self.state.session_factory() as session:
+            run = session.get(m.TestRun, run_id)
+            if run is None or not run.quick_mode or run.triage_result != "fail":
+                return
+
+        if action == "prompt":
+            self.state.promote_prompts.add(drive.serial)
+            logger.info(
+                "quick-pass triage=fail for %s \u2014 prompt mode; awaiting operator decision",
+                drive.serial,
+            )
+            return
+
+        # auto_promote
+        async def _promote():
+            # Brief delay so the current run's finally block pops this
+            # drive from active_phase / _tasks before start_batch tries
+            # to register it.
+            await asyncio.sleep(1.0)
+            try:
+                await self.start_batch(
+                    [drive],
+                    source="auto-promote after quick-pass triage=fail",
+                    quick=False,
+                )
+                logger.info(
+                    "quick-pass triage=fail for %s \u2014 auto-promoted to full pipeline",
+                    drive.serial,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "auto-promote to full pipeline failed for %s after quick-pass triage=fail",
+                    drive.serial,
+                )
+        asyncio.create_task(_promote())
+
+    async def _telemetry_sampler_loop(self, run_id: int, drive: Drive) -> None:
+        """Periodic telemetry sampler for one active pipeline run.
+
+        Emits a TelemetrySample row every
+        `settings.daemon.telemetry_sample_interval_s` seconds until
+        cancelled by `_execute_pipeline`'s finally block. Captures
+        chassis power (cheap — one ipmitool call) and drive
+        temperature (via a lightweight smartctl read).
+
+        Prior to v0.5.5 telemetry was only written at SMART-snapshot
+        phase boundaries (pre and post), producing 2-sample charts on
+        multi-hour runs. This loop fills in the gaps so the telemetry
+        charts actually tell a story \u2014 warm-up curve during erase,
+        thermal plateau during badblocks, spikes during self-tests.
+        """
+        interval = self.state.settings.daemon.telemetry_sample_interval_s
+        # Defensive bound so a misconfigured 0 or negative value doesn't
+        # turn this into a tight busy-loop.
+        interval = max(5, int(interval or 30))
+
+        # A brief pre-sleep so we don't race the pre-SMART phase's own
+        # telemetry write \u2014 no need to sample at t=0 and t=0.01.
+        try:
+            await asyncio.sleep(min(interval, 10))
+        except asyncio.CancelledError:
+            return
+
+        while True:
+            try:
+                phase = self.state.active_phase.get(drive.serial, "unknown")
+                temp = self._sample_drive_temp_quietly(drive)
+                self._record_telemetry(
+                    run_id,
+                    drive.serial,
+                    phase=phase,
+                    drive_temp_c=temp,
+                )
+            except asyncio.CancelledError:
+                # Propagate \u2014 the finally block in _execute_pipeline
+                # is waiting for us to exit.
+                raise
+            except Exception:  # noqa: BLE001
+                # A transient smartctl / ipmitool hiccup must NOT kill
+                # the sampler. Log once per tick and keep going.
+                logger.exception(
+                    "telemetry sampler tick failed for %s (run_id=%s); continuing",
+                    drive.serial,
+                    run_id,
+                )
+
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+
+    def _sample_drive_temp_quietly(self, drive: Drive) -> int | None:
+        """Fetch current drive temperature for a telemetry tick.
+
+        Falls back to None on smartctl errors / timeouts \u2014 telemetry is
+        best-effort, a temperature gap is a smaller sin than crashing
+        the sampler. Heavy smartctl reads are acceptable at 30 s
+        cadence; badblocks' own I/O cost dwarfs a periodic SMART query.
+        """
+        try:
+            snap = smart.snapshot(drive.device_path, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            return None
+        return snap.temperature_c
+
     def _record_telemetry(
         self,
         run_id: int,
@@ -1219,7 +1397,6 @@ class Orchestrator:
             if run is None:
                 return
             run.completed_at = datetime.now(UTC)
-            run.grade = result.grade.value
             run.power_on_hours_at_test = post_snap.power_on_hours
             run.reallocated_sectors = post_snap.reallocated_sectors
             run.current_pending_sector = post_snap.current_pending_sector
@@ -1227,6 +1404,28 @@ class Orchestrator:
             run.smart_status_passed = post_snap.smart_status_passed
             run.rules = [rule.model_dump() for rule in result.rules]
             run.report_url = f"/reports/{drive.serial}"
+            # v0.5.5 — verdict depends on pipeline mode:
+            #   quick_mode=True  -> triage verdict (Clean/Watch/Fail); grade stays NULL
+            #   quick_mode=False -> A/B/C/F grade as before; triage_result stays NULL
+            # Rationale: quick pass skips badblocks + long self-test, so it
+            # can't honestly award a certification grade. Triage is the
+            # honest verdict for a fast check.
+            if run.quick_mode:
+                triage = triage_mod.triage_quick_pass(
+                    pre_pending=run.pre_current_pending_sector,
+                    post_pending=post_snap.current_pending_sector,
+                    pre_reallocated=run.pre_reallocated_sectors,
+                    post_reallocated=post_snap.reallocated_sectors,
+                )
+                run.triage_result = triage.verdict.value
+                run.grade = None
+                self._log(
+                    drive.serial,
+                    f"quick-pass triage: {triage.verdict.value} \u2014 {triage.summary}",
+                )
+            else:
+                run.grade = result.grade.value
+                run.triage_result = None
             session.commit()
 
     async def _on_batch_complete(self, batch_id: str, drive_serials: list[str]) -> None:

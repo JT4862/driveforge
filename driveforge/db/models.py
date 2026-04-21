@@ -79,14 +79,30 @@ class TestRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     grade: Mapped[str | None] = mapped_column(String(8), nullable=True)
     power_on_hours_at_test: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # End-of-test ("post") SMART counters. Populated at the post-SMART
+    # phase. The v0.5.5 pre_* columns below carry the matching start-of-test
+    # snapshot so the delta (post - pre) tells the "healing" story — how
+    # many pending sectors the drive remapped during our pipeline.
     reallocated_sectors: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_pending_sector: Mapped[int | None] = mapped_column(Integer, nullable=True)
     offline_uncorrectable: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Start-of-test snapshot (v0.5.5+). Captured at the pre-SMART phase.
+    # NULL on runs that predate v0.5.5 — downstream code treats absent
+    # pre-snapshot as "no delta available" rather than as a zero baseline.
+    pre_reallocated_sectors: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pre_current_pending_sector: Mapped[int | None] = mapped_column(Integer, nullable=True)
     smart_status_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     rules: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)  # grading rationale
     report_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     label_printed: Mapped[bool] = mapped_column(Boolean, default=False)
     quick_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Quick-pass triage verdict (v0.5.5+). "clean" | "watch" | "fail".
+    # Populated only when quick_mode=True. For full-pipeline runs the
+    # grade column carries the verdict instead; triage_result stays NULL.
+    #   clean — post_pending=0 AND no climb during run
+    #   watch — post_pending>0 AND no climb
+    #   fail  — pending or reallocated climbed during the run
+    triage_result: Mapped[str | None] = mapped_column(String(16), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)  # last N lines of phase output
     # Phase name at which this run was interrupted by a drive-pull (udev

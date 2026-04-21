@@ -87,6 +87,15 @@ class DaemonState:
     # at a glance which drives are "I'm retrying after a pull" vs.
     # "normal test run".
     recovery_serials: set[str] = field(default_factory=set)
+    # v0.5.5+ — Serials of drives whose last quick-pass triaged as Fail
+    # and whose operator has opted into the "prompt" mode via
+    # settings.daemon.quick_pass_fail_action. The dashboard renders a
+    # banner on these cards offering to run a full pipeline; operator
+    # clicks Yes (triggers start_batch + removes from set) or Dismiss
+    # (just removes). Not persisted \u2014 a daemon restart clears the set,
+    # which is acceptable: the triage badge on the drive row still
+    # surfaces the state, and operators can re-trigger via New Batch.
+    promote_prompts: set[str] = field(default_factory=set)
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)

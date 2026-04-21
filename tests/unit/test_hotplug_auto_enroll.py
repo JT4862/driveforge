@@ -463,6 +463,62 @@ async def test_auto_enroll_skipped_for_legacy_fail_grade(tmp_path, monkeypatch) 
     )
 
 
+def _seed_quick_pass_triage(state: DaemonState, drive: Drive, *, triage: str) -> None:
+    """Completed quick-pass run with a triage verdict (v0.5.5+). grade is
+    NULL — quick-pass doesn't award a certification grade."""
+    now = datetime.now(UTC)
+    with state.session_factory() as session:
+        session.add(
+            m.Drive(
+                serial=drive.serial,
+                model=drive.model,
+                manufacturer=drive.manufacturer,
+                capacity_bytes=drive.capacity_bytes,
+                transport=drive.transport.value,
+            )
+        )
+        session.add(
+            m.TestRun(
+                drive_serial=drive.serial,
+                phase="done",
+                started_at=now - timedelta(minutes=5),
+                completed_at=now - timedelta(minutes=3),
+                grade=None,
+                triage_result=triage,
+                quick_mode=True,
+            )
+        )
+        session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("triage", ["clean", "watch", "fail"])
+async def test_auto_enroll_skips_after_any_quick_pass_triage(
+    tmp_path, monkeypatch, triage
+) -> None:
+    """v0.5.5+: a completed quick-pass carries a triage verdict instead of
+    a grade. All three triage outcomes (clean/watch/fail) are deliberate
+    verdicts about the drive and must NOT auto-re-enroll on re-insert.
+
+    Operator re-tests manually via New Batch, or via the dashboard
+    prompt / auto-promote flow controlled by
+    settings.daemon.quick_pass_fail_action."""
+    settings = _make_settings(tmp_path, auto_enroll_mode="quick")
+    state = DaemonState.boot(settings)
+    orch = Orchestrator(state)
+    drive = _make_drive()
+    _seed_quick_pass_triage(state, drive, triage=triage)
+
+    monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
+
+    spy = _SpyOrch(orch)
+    await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
+
+    assert spy.start_batch_calls == [], (
+        f"quick-pass triage={triage} must be sticky \u2014 auto-enroll should not fire"
+    )
+
+
 @pytest.mark.asyncio
 async def test_auto_enroll_swallows_batch_rejected(tmp_path, monkeypatch) -> None:
     """If start_batch raises BatchRejected (unexpected double-book race),

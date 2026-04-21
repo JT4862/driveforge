@@ -451,6 +451,49 @@ table tr:hover { background: rgba(255,255,255,0.02); }
    carry grade="fail". Maps to the same red as F so the existing UI
    elements that reference grade-fail still render correctly. */
 .grade-fail { background: rgba(248,81,73,0.18); color: var(--grade-fail); }
+/* v0.5.5+ triage badges for quick-pass runs. Visually distinct from the
+   cert-grade (A/B/C/F) badges so operators can tell at a glance which
+   kind of verdict a drive has: a full-pipeline grade vs a quick-pass
+   triage. Clean = green (ship-able), Watch = amber (recommend full
+   pipeline), Fail = red (drive deteriorated under observation). */
+.triage-clean { background: rgba(63,185,80,0.14); color: var(--grade-a); border: 1px solid rgba(63,185,80,0.3); }
+.triage-watch { background: rgba(210,153,34,0.18); color: var(--grade-c); border: 1px solid rgba(210,153,34,0.35); }
+.triage-fail { background: rgba(248,81,73,0.18); color: var(--grade-fail); border: 1px solid rgba(248,81,73,0.3); }
+/* v0.5.5+ healing-delta pill. Rendered next to pass-tier grades when
+   the drive remapped 1+ pending sectors into its spare pool during
+   the test run \u2014 visual cue that the pipeline didn't just measure
+   the drive, it healed it. */
+.remapped-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--mono);
+  background: rgba(63,185,80,0.12);
+  color: var(--grade-a);
+  border: 1px solid rgba(63,185,80,0.25);
+  margin-left: 4px;
+  letter-spacing: 0.3px;
+}
+.remapped-inline { color: var(--grade-a); font-weight: 500; }
+.bay-card .watch-text { color: #e8a73c; font-weight: 600; font-style: normal; }
+/* v0.5.5+ quick-pass fail prompt banner. Rendered on the card when
+   settings.daemon.quick_pass_fail_action="prompt" AND the drive's
+   latest quick pass triaged as Fail. Ambered styling to match the
+   "needs attention" nature of the recommendation. */
+.bay-card .promote-prompt {
+  padding: 8px 12px;
+  background: rgba(210,153,34,0.1);
+  border-top: 1px solid rgba(210,153,34,0.3);
+  border-bottom: 1px solid rgba(210,153,34,0.3);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bay-card .promote-prompt-text { color: #e8a73c; font-weight: 500; }
+.bay-card .promote-prompt-actions { display: flex; gap: 6px; }
+.bay-card .promote-prompt-actions form { margin: 0; }
 .grade-xl { font-size: 48px; padding: 14px 28px; border-radius: 10px; }
 
 .breakdown { display: flex; gap: 8px; justify-self: end; }

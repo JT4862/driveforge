@@ -12,7 +12,7 @@
 #}
 {% macro drive_card(card) -%}
 {% if card.state == "installed" %}
-<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
+<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.last_triage %} triaged triaged-{{ card.last_triage }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">
@@ -46,18 +46,40 @@
         <div class="fail-detail" title="{{ card.last_error }}">{{ card.last_error }}</div>
         {% endif %}
       {% elif card.last_grade %}
-        <div class="phase last-test">Grade {{ card.last_grade|upper }} &middot; tested {{ card.last_tested.strftime('%Y-%m-%d') }}</div>
+        <div class="phase last-test">
+          Grade {{ card.last_grade|upper }} &middot; tested {{ card.last_tested.strftime('%Y-%m-%d') }}
+          {%- if card.remapped_during_run and card.remapped_during_run > 0 %}
+            &middot; <span class="remapped-inline" title="Pending sectors that were remapped to the drive's spare pool during our pipeline">healed {{ card.remapped_during_run }}</span>
+          {%- endif %}
+        </div>
+      {% elif card.last_triage == "clean" %}
+        {# v0.5.5+ quick-pass verdict: drive passed triage with no pending
+           sectors and no counter movement. No cert (quick pass can't
+           certify), but ship-able at operator's discretion. #}
+        <div class="phase last-test">Quick pass: Clean &middot; {{ card.last_tested.strftime('%Y-%m-%d') }}</div>
+      {% elif card.last_triage == "watch" %}
+        {# Pending sectors present but stable. Operator should run full
+           pipeline before trusting the drive. #}
+        <div class="phase last-test watch-text">&#9888; Quick pass: Watch &middot; {{ card.last_tested.strftime('%Y-%m-%d') }} &middot; run full pipeline</div>
+      {% elif card.last_triage == "fail" %}
+        {# Counters climbed during the quick pass itself — active
+           deterioration. Full pipeline strongly recommended, or
+           decommission if the drive is borderline already. #}
+        <div class="phase last-test fail-text">&#9587; Quick pass: Fail &middot; {{ card.last_tested.strftime('%Y-%m-%d') }} &middot; drive deteriorated during scan</div>
       {% else %}
         <div class="phase idle">idle &middot; never tested</div>
       {% endif %}
     </div>
   </a>
-  {% if card.last_grade %}
+  {% if card.last_grade or card.last_triage %}
   <div class="bay-badges">
     {% if card.last_grade in ("A", "B", "C") %}
       {# Pass-tier: cert PDF exists, link to it. #}
       <a class="report-link" href="/reports/{{ card.serial }}" title="View cert report">📄</a>
       <span class="grade grade-{{ card.last_grade }} grade-corner"{% if card.last_quick %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ card.last_grade|upper }}{% if card.last_quick %}<sup class="provisional">*</sup>{% endif %}</span>
+      {%- if card.remapped_during_run and card.remapped_during_run > 0 %}
+      <span class="remapped-badge" title="{{ card.remapped_during_run }} pending sector{{ 's' if card.remapped_during_run != 1 else '' }} remapped to the drive's spare pool during this test run. See drive detail for before/after counts.">+{{ card.remapped_during_run }} remapped</span>
+      {%- endif %}
     {% elif card.last_grade == "F" %}
       {# Drive-fail: badge is red "F", cert PDF exists explaining why. #}
       <a class="report-link" href="/reports/{{ card.serial }}" title="View fail report">📄</a>
@@ -65,10 +87,43 @@
     {% elif card.last_grade == "error" %}
       {# Pipeline error: no cert (nothing to certify); badge is amber "ERR". #}
       <span class="grade grade-error grade-corner" title="Pipeline errored mid-run — retry to determine real drive health">ERR</span>
-    {% else %}
+    {% elif card.last_grade == "fail" %}
       {# Legacy "fail" — grey neutral badge, no cert link. #}
       <span class="grade grade-legacy grade-corner" title="Legacy fail (pre-v0.5.1 vocabulary) — re-test for real verdict">legacy</span>
+    {% elif card.last_triage == "clean" %}
+      {# v0.5.5+ quick-pass Clean — no cert, just the green triage badge. #}
+      <span class="grade triage-clean grade-corner" title="Quick-pass triage: no pending sectors, no counter movement. Ship at operator discretion — not a full certification.">Clean</span>
+    {% elif card.last_triage == "watch" %}
+      <span class="grade triage-watch grade-corner" title="Quick-pass triage: pending sectors present. Recommend running the full pipeline before trusting this drive.">Watch</span>
+    {% elif card.last_triage == "fail" %}
+      <span class="grade triage-fail grade-corner" title="Quick-pass triage: drive deteriorated during the scan. Do not ship.">Fail</span>
     {% endif %}
+  </div>
+  {% endif %}
+  {% if card.promote_prompt %}
+  {# v0.5.5+ quick-pass triage=fail prompt banner. Shown when the operator
+     has opted into settings.daemon.quick_pass_fail_action="prompt" and
+     this drive's latest quick pass triaged as Fail. Two actions: promote
+     (starts a full pipeline) or dismiss (just removes the banner; the
+     triage-fail badge stays on the card). #}
+  <div class="promote-prompt">
+    <div class="promote-prompt-text">
+      &#9888; Drive deteriorated during quick pass. Run full pipeline?
+    </div>
+    <div class="promote-prompt-actions">
+      <form method="post" action="/drives/{{ card.serial }}/promote-to-full" class="inline">
+        <button class="btn btn-small primary" type="submit"
+                title="Start a full-pipeline batch on this drive. The full pipeline's badblocks + long self-test may be able to determine whether the drive is recoverable.">
+          Yes, run full pipeline
+        </button>
+      </form>
+      <form method="post" action="/drives/{{ card.serial }}/dismiss-promote-prompt" class="inline">
+        <button class="btn btn-small" type="submit"
+                title="Hide this banner. The triage-fail badge stays — you can still run a full pipeline manually via New Batch.">
+          Dismiss
+        </button>
+      </form>
+    </div>
   </div>
   {% endif %}
   {# Ident button: toggle LED strobe so the operator can physically find
