@@ -90,6 +90,14 @@ class DaemonState:
     # Post-pipeline "safe to pull" activity-LED blinkers, keyed by serial.
     # Populated when a run completes, cancelled on drive pull / abort / new batch.
     done_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)
+    # Operator-triggered identify blinkers, keyed by serial. Stored
+    # separately from done_blinkers so the dashboard can toggle the
+    # Ident button per-drive without losing the pass/fail LED pattern
+    # that was running before identify took over (restored when
+    # identify exits). Click Ident → add entry. Click Stop → cancel +
+    # remove. Auto-removes on task exit (5-minute deadline, drive
+    # pull, or natural cancellation).
+    identify_blinkers: dict[str, asyncio.Task] = field(default_factory=dict)
 
     # Cached enclosure discovery. Refreshed on boot + udev events. Kept for
     # internal LED targeting (sg_ses needs the slot's element_index) and as

@@ -46,6 +46,24 @@
     {% endif %}
   </div>
   {% endif %}
+  {# Ident button: toggle LED strobe so the operator can physically find
+     the drive in the rack. On SES-capable chassis, also lights the blue
+     locate LED via ledctl. Auto-stops after 5 min; click again to stop
+     sooner. Sibling of <a>, like the Abort button on active cards, so we
+     don't nest interactive elements. #}
+  <form method="post" action="/drives/{{ card.serial }}/identify" class="ident-form">
+    {% if card.identifying %}
+      <button class="btn btn-small ident-stop" type="submit"
+              title="Stop the LED strobe and restore the drive's normal LED pattern.">
+        Stop
+      </button>
+    {% else %}
+      <button class="btn btn-small ident-start" type="submit"
+              title="Blink this drive's LED for up to 5 minutes to locate it in the rack. Click again to stop sooner.">
+        Ident
+      </button>
+    {% endif %}
+  </form>
 </div>
 {% else %}
 <div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}{% if card.recovery_mode %} recovery-mode{% endif %}">

@@ -157,6 +157,85 @@ class Orchestrator:
         if task is not None and not task.done():
             task.cancel()
 
+    def _cancel_identify(self, serial: str) -> None:
+        """Stop an in-flight identify blinker for this drive, if any."""
+        task = self.state.identify_blinkers.pop(serial, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def is_identifying(self, serial: str) -> bool:
+        """True if an identify blinker is currently running for this serial.
+        Used by the dashboard to toggle the button label between 'Ident'
+        and 'Stop'."""
+        task = self.state.identify_blinkers.get(serial)
+        return task is not None and not task.done()
+
+    async def identify_drive(self, drive: Drive) -> tuple[bool, str]:
+        """Start the LED strobe so the operator can physically locate this
+        drive in the rack. Safe to call on already-identifying drives —
+        the previous identify is cancelled first.
+
+        Refuses if the drive is currently running a pipeline: identify I/O
+        would fight with real test I/O for the same block device, and the
+        active pipeline is already blinking the drive anyway.
+
+        Returns (ok, message). The Settings/dashboard handler surfaces
+        the message to the user on refusal.
+
+        When identify exits (deadline, drive pull, or explicit Stop click),
+        restore the previous pass/fail LED pattern via
+        `restore_blinker_for_drive` so the bay's "safe to pull" heartbeat
+        isn't lost just because someone clicked Ident and walked away.
+        """
+        serial = drive.serial
+        if serial in self.state.active_phase:
+            return (
+                False,
+                "Drive is currently under test; its activity LED is already lit by the pipeline.",
+            )
+        # Cancel any existing identify + cancel the pre-existing done-blinker
+        # (we'll restore it when identify exits).
+        self._cancel_identify(serial)
+        self._cancel_blinker(serial)
+
+        drive_for_restore = drive  # captured for the finally path
+
+        async def _wrapped() -> None:
+            try:
+                await blinker.blink_identify(drive.device_path)
+            finally:
+                # Self-cleanup so a naturally-exiting identify (deadline hit,
+                # drive pulled, user clicked Stop) doesn't leak its entry.
+                self.state.identify_blinkers.pop(serial, None)
+                # Restore whatever done-blinker pattern this drive would
+                # naturally have (pass/fail from its last completed run,
+                # or nothing for never-tested drives). Best-effort — a
+                # transient failure must not propagate out of the finally.
+                try:
+                    self.restore_blinker_for_drive(drive_for_restore)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "identify: failed to restore done-blinker for %s", serial,
+                    )
+
+        task = asyncio.create_task(_wrapped())
+        self.state.identify_blinkers[serial] = task
+        logger.info(
+            "identify blinker started for %s (%s)", serial, drive.device_path,
+        )
+        return (True, "Identifying drive — LED will blink rapidly for up to 5 minutes.")
+
+    def stop_identify(self, serial: str) -> bool:
+        """Cancel a running identify blinker. Returns True if one was
+        actually running. The task's finally block restores the prior
+        pass/fail LED pattern automatically."""
+        task = self.state.identify_blinkers.get(serial)
+        if task is None or task.done():
+            return False
+        self._cancel_identify(serial)
+        logger.info("identify blinker stopped for %s", serial)
+        return True
+
     def restore_blinker_for_drive(self, drive: Drive) -> None:
         """If this freshly-discovered drive has a completed run with a
         clear verdict, spawn the matching post-run blinker.
@@ -654,13 +733,24 @@ class Orchestrator:
     def _looks_like_pull(self, drive: Drive) -> bool:
         """Did this drive leave the bus while the pipeline was running?
 
-        Two signals, either one authoritative:
-          - `state.interrupted_serials` was set by the hotplug remove
-            handler (normal case: udev fired the event + carried a serial).
-          - The device file is gone on disk — covers the cases where the
-            udev remove event hasn't arrived yet or carried no serial.
-            This runs on the failure path after the subprocess already
-            returned, so the kernel has had time to remove /dev/sdX.
+        Ordered signals (first-match wins):
+          1. `state.interrupted_serials` was set by the hotplug remove
+             handler (normal case: udev fired the event + carried a serial).
+          2. Rediscovery finds the drive's SERIAL under any current
+             device path. Modern Debian kernels will re-enumerate a
+             drive (new /dev/sdX letter) after certain errors — the
+             NX-3200's LSI SAS2308 does this on `CONFIG_IDE_TASK_IOCTL`
+             hdparm failures in particular. Serial-based rediscovery
+             correctly classifies that as "drive still present, bus
+             glitched" rather than a pull. If the serial is still
+             discoverable, return False authoritatively. Added v0.2.9;
+             before that, a bus glitch would leave a TestRun stuck in
+             `interrupted_at_phase="secure_erase"` forever because no
+             hotplug ADD event ever fires without a real pull.
+          3. Fallback: the exact device_path we were using is gone on
+             disk AND rediscovery didn't confirm the serial either way
+             (discovery errored, returned empty, etc.). Safer to assume
+             gone than to close a stale run as a permanent Fail.
 
         Returning True means "don't close the run as failed; mark for
         recovery on re-insert." Returning False means "legitimate
@@ -669,6 +759,23 @@ class Orchestrator:
         import os
         if drive.serial in self.state.interrupted_serials:
             return True
+        # Serial-based rediscovery is authoritative when it succeeds.
+        try:
+            present = drive_mod.discover()
+        except Exception:  # noqa: BLE001
+            present = None
+        if present is not None:
+            if any(d.serial == drive.serial for d in present):
+                # Drive is still present (possibly under a different
+                # device letter after kernel re-enumeration). This is
+                # NOT a pull — let the caller close the run as Fail.
+                return False
+            # Discovery succeeded AND the serial wasn't in the results.
+            # That's a stronger "gone" signal than just device_path
+            # missing, because it means lsblk has fully settled and
+            # the drive really isn't there.
+            return True
+        # Discovery errored. Fall back to the device-path check.
         try:
             return not os.path.exists(drive.device_path)
         except OSError:

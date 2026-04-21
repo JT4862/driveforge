@@ -229,6 +229,10 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         completed_at is not None
         and (_time.monotonic() - completed_at) < 3.5
     )
+    # Is the operator currently identifying this drive via the LED strobe?
+    # The template uses this to flip the Ident button label → Stop.
+    orch = getattr(state, "orchestrator", None)
+    identifying = bool(orch and orch.is_identifying(drive.serial))
     return {
         "state": "installed",
         "key": drive.serial,
@@ -244,6 +248,7 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "last_error": last_error,
         "drive_age_label": drive_age_label,
         "just_completed": just_completed,
+        "identifying": identifying,
     }
 
 
@@ -512,6 +517,37 @@ async def abort_all_web(request: Request) -> RedirectResponse:
     """
     orch = request.app.state.orchestrator
     await orch.abort_all()
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/drives/{serial}/identify")
+async def identify_drive_web(serial: str, request: Request) -> RedirectResponse:
+    """Toggle the identify-LED strobe for a present drive.
+
+    Click once: 5-minute rapid-flash ident so the operator can find the
+    drive in the rack. Click again while it's running: stop the strobe
+    and restore whatever pass/fail LED pattern was showing before.
+
+    Refuses cleanly if the drive is currently under test (the pipeline
+    is already lighting the activity LED) or if the drive is no longer
+    physically present.
+    """
+    orch = request.app.state.orchestrator
+    state = get_state()
+    # Toggle semantics — if an identify is already running, Stop it.
+    if orch.is_identifying(serial):
+        orch.stop_identify(serial)
+        return RedirectResponse(url="/", status_code=303)
+    # Otherwise, start one. Re-discover so we have a fresh device_path
+    # (kernel letters drift across hotplug/reboot; DB doesn't persist them).
+    discovered = {d.serial: d for d in drive_mod.discover()}
+    drive = discovered.get(serial)
+    if drive is None:
+        # Drive was pulled between dashboard render and click — nothing
+        # to identify. Silently return to dashboard; the card will
+        # disappear on the next refresh.
+        return RedirectResponse(url="/", status_code=303)
+    await orch.identify_drive(drive)
     return RedirectResponse(url="/", status_code=303)
 
 

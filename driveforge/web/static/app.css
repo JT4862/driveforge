@@ -166,6 +166,43 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
   pointer-events: auto;  /* keep hover-tooltip but not the click */
 }
 
+/* Per-card Ident button — bottom-right of installed cards. Mirrors
+   .abort-form placement (top-right on active cards) so the two never
+   overlap. Bottom corner rather than top-right because the top-right
+   on installed cards is already occupied by the grade badge for
+   previously-tested drives. */
+.ident-form { position: absolute; bottom: 10px; right: 10px; z-index: 2; margin: 0; }
+.ident-form .btn-small { font-size: 11px; padding: 3px 10px; line-height: 1.3; }
+/* Ident (start) — blue locate-LED coded. Blue tint with a subtle pulse
+   to hint at the "blinking" behavior without actually blinking the
+   button itself (annoying at rest). */
+.ident-form .ident-start {
+  background: rgba(88,166,255,0.15);
+  border-color: rgba(88,166,255,0.45);
+  color: #79b8ff;
+}
+.ident-form .ident-start:hover {
+  background: rgba(88,166,255,0.25);
+  border-color: rgba(88,166,255,0.75);
+}
+/* Stop — warm color so an operator scanning the rack back UI sees
+   immediately that ident is currently active on a card. Pulses gently
+   to reinforce the "something is running right now" signal. */
+.ident-form .ident-stop {
+  background: rgba(210,153,34,0.22);
+  border-color: rgba(210,153,34,0.6);
+  color: var(--warn);
+  animation: ident-active-pulse 1.4s ease-in-out infinite;
+}
+.ident-form .ident-stop:hover {
+  background: rgba(210,153,34,0.35);
+  border-color: rgba(210,153,34,0.85);
+}
+@keyframes ident-active-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(210,153,34,0.6); }
+  50%      { opacity: 0.82; box-shadow: 0 0 8px 2px rgba(210,153,34,0.4); }
+}
+
 /* Phase-colored active bay cards — left border + progress bar color */
 .bay-card.active { border-left: 3px solid var(--accent); }
 .bay-card.active.phase-info { border-left-color: var(--accent); }
