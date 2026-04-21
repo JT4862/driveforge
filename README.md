@@ -8,6 +8,14 @@ grading, and certification rig. Pulled enterprise drives go in;
 SMART-validated, secure-erased, burned-in, graded, cert-labeled drives
 come out — ready for the homelab.
 
+The pipeline mirrors the same process commercial refurbishers run —
+per-drive SMART evaluation, sector-level scanning, NIST 800-88 secure
+erase, 8-pass burn-in, objective grading, and a documented cert report
+with a printable sticker — packaged as open source so you can run it
+on drives from any source (Facebook Marketplace, eBay, pulled lab gear,
+a friend's retired NAS) and independently verify the claim before you
+trust a drive with your data.
+
 - **Status**: pre-alpha, in active development
 - **License**: [MIT](LICENSE)
 - **Latest release**: [GitHub Releases](https://github.com/JT4862/driveforge/releases/latest)
