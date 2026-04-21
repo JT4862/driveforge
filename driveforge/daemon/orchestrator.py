@@ -1637,6 +1637,52 @@ class Orchestrator:
                 run.triage_result = None
             session.commit()
 
+            # v0.6.4+: auto-print the cert label now that the run is
+            # finalized + graded. Only fires on full pipelines (not
+            # quick-pass triage — triage verdicts don't produce a
+            # cert) and only when a printer is configured with
+            # auto_print enabled (Settings → Printer toggle).
+            #
+            # Print failures do NOT fail the run: the drive's grade
+            # stands, only the sticker didn't come out. Operator can
+            # click Print Label manually once they fix the printer
+            # issue. Print status goes to the drive's log so the
+            # dashboard shows why the sticker didn't print.
+            if run.grade and not run.quick_mode:
+                pc = self.state.settings.printer
+                if pc.model and getattr(pc, "auto_print", True):
+                    from driveforge.core import printer as printer_mod
+                    self.state.active_sublabel[drive.serial] = "printing cert label..."
+                    self._log(drive.serial, "auto-print: printing cert label")
+                    loop = asyncio.get_event_loop()
+                    try:
+                        ok, msg = await loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                printer_mod.auto_print_cert_for_run,
+                                self.state, drive, run,
+                            ),
+                        )
+                        self._log(drive.serial, f"auto-print: {msg}")
+                        if not ok:
+                            logger.warning(
+                                "auto-print failed for %s: %s",
+                                drive.serial, msg,
+                            )
+                    except Exception:  # noqa: BLE001
+                        # Defensive: never let a print bug fail the
+                        # finalize path. Log + continue.
+                        logger.exception(
+                            "auto-print raised unexpectedly for %s — "
+                            "drive's grade stands; operator can reprint manually",
+                            drive.serial,
+                        )
+                        self._log(
+                            drive.serial,
+                            "auto-print: crashed unexpectedly (see daemon log); "
+                            "grade unchanged, click Print Label to retry",
+                        )
+
     async def _on_batch_complete(self, batch_id: str, drive_serials: list[str]) -> None:
         """Wait for every per-drive task, then finalize batch + fire webhook."""
         tasks = [self._tasks[s] for s in drive_serials if s in self._tasks]

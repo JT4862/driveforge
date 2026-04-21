@@ -589,6 +589,141 @@ def print_label(
         return (False, f"printer dispatch failed: {exc}")
 
 
+def build_cert_label_data_from_run(drive, run, *, report_url: str) -> CertLabelData:
+    """Build CertLabelData for a completed pipeline run.
+
+    Shared by the Settings/drive-detail print path (which gets its
+    report_url from the incoming HTTP request) and the v0.6.4+
+    auto-print path (which synthesizes the URL from daemon settings
+    because no request object exists at pipeline finalization).
+
+    `run.rules` is the pydantic-serialized grading rules list; it's
+    parsed here for badblocks error counts and the primary fail
+    reason (for F-tier drives). Caller provides `report_url` so the
+    QR code on the sticker resolves to the full report page.
+    """
+    # badblocks errors live in the grading rule output, not directly on
+    # TestRun. Parse them out when the `badblocks_clean` rule is present.
+    badblocks: tuple[int, int, int] | None = None
+    for rule in (run.rules or []):
+        if rule.get("name") == "badblocks_clean":
+            import re as _re
+            m = _re.search(
+                r"read=(\d+)\s+write=(\d+)\s+compare=(\d+)",
+                rule.get("detail", ""),
+            )
+            if m:
+                badblocks = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            elif rule.get("passed"):
+                badblocks = (0, 0, 0)
+            break
+
+    fail_reason = primary_fail_reason(run.rules or [])
+
+    # v0.5.5+ healing delta. Only meaningful when both pre and post
+    # snapshots are present (pre is NULL on legacy pre-v0.5.5 rows).
+    remapped = None
+    if (
+        run.reallocated_sectors is not None
+        and run.pre_reallocated_sectors is not None
+    ):
+        remapped = run.reallocated_sectors - run.pre_reallocated_sectors
+
+    from datetime import UTC, datetime
+    return CertLabelData(
+        model=drive.model,
+        serial=drive.serial,
+        capacity_tb=round(drive.capacity_bytes / 1_000_000_000_000, 2),
+        grade=run.grade or "—",
+        tested_date=(run.completed_at or run.started_at or datetime.now(UTC)).date(),
+        power_on_hours=run.power_on_hours_at_test or 0,
+        report_url=report_url,
+        quick_mode=bool(run.quick_mode),
+        reallocated_sectors=run.reallocated_sectors,
+        current_pending_sector=run.current_pending_sector,
+        badblocks_errors=badblocks,
+        fail_reason=fail_reason,
+        remapped_during_run=remapped,
+        throughput_mean_mbps=run.throughput_mean_mbps,
+    )
+
+
+# DriveForge-connection → brother_ql backend-id. Duplicated here rather
+# than reaching into web/routes.py so core/ stays free of web deps.
+_BROTHER_QL_BACKENDS = {
+    "usb": "pyusb",
+    "network": "network",
+    "bluetooth": "bluetooth",
+    "file": "file",
+}
+
+
+def auto_print_cert_for_run(state, drive, run) -> tuple[bool, str]:
+    """Render + print a completed run's cert label without an HTTP
+    request. v0.6.4+, called from `orchestrator._finalize_run` when
+    the drive has a grade AND a printer is configured AND the
+    operator has enabled `printer.auto_print`.
+
+    Returns `(ok, message)`. On success the message is a short status
+    ("printed cert label for <serial>"). On failure the message
+    carries the specific reason (no printer configured, render failed,
+    dispatch failed) for surfacing in the drive card log — but the
+    orchestrator does NOT fail the run over a print error: the drive's
+    grade stands, only the sticker didn't print, and operator can
+    click Print Label manually once the printer issue is fixed.
+
+    Synthesizes the QR-code report URL from the daemon's configured
+    tunnel hostname (preferred, resolves externally) or from the
+    daemon's bind host+port (internal only — operators' phones on
+    the same LAN can still scan it).
+    """
+    pc = state.settings.printer
+    if not pc.model:
+        return (False, "auto-print skipped: no printer configured")
+    if not getattr(pc, "auto_print", True):
+        # auto_print toggle is off — not a failure, just not an attempt.
+        return (False, "auto-print disabled in Settings")
+
+    # Build the QR URL. Prefer the tunnel hostname so the sticker's QR
+    # resolves from anywhere; fall back to LAN-only URL using the
+    # daemon's bind config. The bind host might be 0.0.0.0 (any), in
+    # which case we use the box's hostname (via avahi .local suffix)
+    # since operators probably reach the dashboard that way too.
+    tun = state.settings.integrations.cloudflare_tunnel_hostname
+    if tun:
+        if not tun.startswith(("http://", "https://")):
+            tun = f"https://{tun}"
+        report_url = f"{tun.rstrip('/')}/reports/{drive.serial}"
+    else:
+        host = state.settings.daemon.host
+        port = state.settings.daemon.port
+        if host in ("0.0.0.0", "::", "*", ""):
+            # Guess a reachable name. `hostname -s` + .local is the
+            # mDNS path every DriveForge install advertises on.
+            import socket
+            host = f"{socket.gethostname()}.local"
+        report_url = f"http://{host}:{port}/reports/{drive.serial}"
+
+    try:
+        data = build_cert_label_data_from_run(drive, run, report_url=report_url)
+        img = render_label(data, roll=pc.label_roll or "DK-1209")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto-print: label render failed for %s", drive.serial)
+        return (False, f"auto-print render failed: {exc}")
+
+    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
+    ok, print_msg = print_label(
+        img,
+        model=pc.model,
+        backend=backend,
+        identifier=pc.backend_identifier,
+        roll=pc.label_roll,
+    )
+    if not ok:
+        return (False, f"auto-print dispatch failed: {print_msg}")
+    return (True, f"auto-printed cert label for {drive.serial}")
+
+
 def render_test_label(*, roll: str = "DK-1209") -> Image.Image:
     """Render a sentinel label for the Settings → Printer Test Print
     button. Uses the same ``render_label`` pipeline as real cert labels
