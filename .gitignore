@@ -32,6 +32,11 @@ htmlcov/
 /reports/
 /pending-labels/
 /config/local.yaml
+# Dev-mode state dir — created by `driveforge-daemon --dev --fixtures ...`
+# and by scripts/capture-screenshots.py. Disposable; regenerated on every
+# invocation. Don't commit the SQLite DB, seeded fixtures, or runtime
+# paths.
+/.driveforge-dev/
 
 # Secrets (never commit)
 .env
