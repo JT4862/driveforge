@@ -31,6 +31,50 @@ from driveforge.db import models as m
 
 logger = logging.getLogger(__name__)
 
+
+def _classify_failure_grade(phase: str, detail: str) -> str | None:
+    """v0.6.5+ classification helper. Return the right grade for a
+    pipeline failure — used by `_record_failure` to decide between
+    "error" (transient/pipeline, retry-on-reinsert) and "F"
+    (drive-verdict fail, sticky + sticker).
+
+    Returns `None` when phase indicates an abort (never tested;
+    grade stays NULL). Otherwise "F" for drive-verdict failures,
+    "error" for everything else.
+
+    Rules — drive-verdict signals (→ "F"):
+      - Phase is short_test or long_test: SMART self-test is the
+        drive reporting on its own health. Failing this IS the
+        drive's verdict.
+      - Detail mentions "device fault" or "drive hardware is
+        likely failing": DF bit set, internal failure.
+      - Detail mentions "uncorrectable" or "media error(s)" or
+        "physically failing": UNC/BBK bits set, drive can't read
+        its own sectors.
+
+    Everything else (including both-paths-abort on secure_erase —
+    likely a libata-timing freeze, may be transient) → "error".
+
+    Module-level (not a method) so test code can import + call it
+    directly without needing an Orchestrator instance.
+    """
+    if phase == "aborted":
+        return None
+    if phase in ("short_test", "long_test"):
+        # SMART self-test reported failure — drive's own verdict.
+        return "F"
+    lower = (detail or "").lower()
+    f_signals = (
+        "device fault",
+        "drive hardware is likely failing",
+        "uncorrectable",
+        "media error",
+        "physically failing",
+    )
+    if any(sig in lower for sig in f_signals):
+        return "F"
+    return "error"
+
 # Upper bound on drives running concurrent pipelines. Drives past this
 # limit still get asyncio tasks spawned, but they block on _semaphore
 # until a slot frees up — and while blocked they're NOT in state.active_phase,
@@ -567,7 +611,7 @@ class Orchestrator:
             )
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
-                None,
+                self.state.drive_command_executor,
                 erase._sas_secure_erase,
                 drive.device_path,
             )
@@ -598,7 +642,9 @@ class Orchestrator:
             loop = asyncio.get_event_loop()
             try:
                 await loop.run_in_executor(
-                    None, erase.ensure_clean_security_state, drive,
+                    self.state.drive_command_executor,
+                    erase.ensure_clean_security_state,
+                    drive,
                 )
             except erase.EraseError as exc:
                 # v0.6.3: Case B — drive might be mid-erase. Try the
@@ -625,7 +671,7 @@ class Orchestrator:
                     )
 
                 completed = await loop.run_in_executor(
-                    None,
+                    self.state.drive_command_executor,
                     functools.partial(
                         erase.wait_for_prior_erase_completion,
                         drive,
@@ -829,31 +875,42 @@ class Orchestrator:
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
         """Close an open TestRun with a non-success verdict.
 
-        Three distinct outcomes encoded here via `grade`:
+        Four distinct outcomes encoded via `grade`:
 
           - aborted (user cancelled mid-pipeline):
               phase="aborted", grade=NULL
               Re-insert triggers auto-enroll. Drive was never graded.
 
-          - pipeline error (code/infra broke: SAT error, timeout,
-            subprocess crash, preflight refusal, etc.):
+          - pipeline error (code/infra broke, transient drive
+            refusal that might clear, SAT+hdparm ABRT on what
+            looks like a libata-timing freeze, subprocess crash,
+            etc.):
               phase="failed", grade="error"
               Re-insert triggers auto-retest — the error may have been
               transient. Drive's health is unknown; no cert, no label.
 
-          - drive-health fail (grading rules determined the drive is
-            bad — not reached from this function; written by
-            `_finalize_run` via `result.grade.value` which is "F"):
+          - drive-verdict fail from grading rules:
               phase="failed", grade="F"
-              Sticky — auto-enroll skips. Cert + label print. Drive
-              is definitively bad.
+              Written by `_finalize_run` when grading rules return
+              Grade.FAIL. Sticky — auto-enroll skips.
 
-        Vocabulary added in v0.5.1 — pre-0.5.1 wrote grade="fail" for
-        BOTH pipeline errors AND drive-health fails, making them
-        indistinguishable at the DB + UI layer. See the v0.5.1 release
-        notes for migration notes on legacy rows.
+          - drive-verdict fail from early phase (v0.6.5+): the DRIVE
+            itself reported failure (SMART short/long self-test
+            failed, device-fault bit set during erase, UNC media
+            during erase). Written from THIS function when the
+            classifier picks "F" based on phase + decoded error
+            nature. Sticky — auto-enroll skips. Auto-prints a fail
+            sticker (same as _finalize_run path) so the operator has
+            physical evidence of the F verdict.
+
+        Vocabulary added in v0.5.1; early-phase F classification
+        added in v0.6.5. Pre-v0.6.5 graded ALL non-abort failures
+        as "error", which meant a drive that failed its own SMART
+        self-test would auto-re-trigger on every reinsert instead
+        of staying sticky F.
         """
         self._log(drive.serial, f"✗ {phase}: {detail}")
+        grade = _classify_failure_grade(phase, detail)
         with self.state.session_factory() as session:
             run = (
                 session.query(m.TestRun)
@@ -863,18 +920,45 @@ class Orchestrator:
             )
             if run is None:
                 return
-            is_abort = phase == "aborted"
-            run.phase = "aborted" if is_abort else "failed"
+            run.phase = "aborted" if grade is None else "failed"
             run.completed_at = datetime.now(UTC)
-            # Encode the distinction:
-            #   abort   → grade=NULL  (treated as "never tested")
-            #   error   → grade="error" (code broke; drive state unknown)
-            # The "F" verdict (drive is really bad) is written elsewhere,
-            # by _finalize_run when grading rules return Grade.FAIL.
-            run.grade = None if is_abort else "error"
+            run.grade = grade
             run.error_message = f"[{phase}] {detail}"[:4000]
             run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
             session.commit()
+
+            # v0.6.5+: auto-print on early-phase F. v0.6.4 only auto-printed
+            # from _finalize_run, so drives that failed early (short test,
+            # secure_erase with drive-verdict failure) got no physical
+            # sticker even when they were definitively F. Print now so the
+            # operator has a sticker on the physical drive reflecting the
+            # F verdict.
+            #
+            # Failures graded "error" don't print — they might be transient
+            # and re-trigger on reinsert; a sticker saying "FAIL" on a
+            # drive that might actually be fine is worse than no sticker.
+            if grade == "F":
+                pc = self.state.settings.printer
+                if pc.model and getattr(pc, "auto_print", True):
+                    from driveforge.core import printer as printer_mod
+                    self._log(drive.serial, "auto-print: early-phase F → printing fail sticker")
+                    try:
+                        # Run synchronously here — _record_failure is
+                        # already called from a sync context (it's not
+                        # an async def). The print itself is a few-sec
+                        # subprocess call; acceptable to block briefly
+                        # in the post-failure path.
+                        ok, msg = printer_mod.auto_print_cert_for_run(
+                            self.state, drive, run,
+                        )
+                        self._log(drive.serial, f"auto-print: {msg}")
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "auto-print on early-phase F raised for %s — "
+                            "grade stands; operator can reprint manually",
+                            drive.serial,
+                        )
+
 
     async def _execute_pipeline(
         self, batch_id: str, drive: Drive, *, quick: bool
@@ -1087,7 +1171,7 @@ class Orchestrator:
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(poll_sec)
             try:
-                status = await loop.run_in_executor(None, smart.self_test_status, drive.device_path)
+                status = await loop.run_in_executor(self.state.drive_command_executor, smart.self_test_status, drive.device_path)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("self-test status poll failed for %s: %s", drive.serial, exc)
                 continue
@@ -1130,7 +1214,9 @@ class Orchestrator:
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(
-                None, erase.ensure_clean_security_state, drive
+                self.state.drive_command_executor,
+                erase.ensure_clean_security_state,
+                drive,
             )
         except erase.EraseError as exc:
             # Surface the preflight error as a pipeline failure with a
@@ -1219,7 +1305,7 @@ class Orchestrator:
         try:
             await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self.state.drive_command_executor,
                     functools.partial(erase.secure_erase, drive, on_status=_erase_status),
                 ),
                 timeout=outer_timeout_s,
@@ -1657,7 +1743,7 @@ class Orchestrator:
                     loop = asyncio.get_event_loop()
                     try:
                         ok, msg = await loop.run_in_executor(
-                            None,
+                            self.state.drive_command_executor,
                             functools.partial(
                                 printer_mod.auto_print_cert_for_run,
                                 self.state, drive, run,

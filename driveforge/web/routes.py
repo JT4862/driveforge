@@ -288,8 +288,14 @@ def _drive_view(state, session) -> dict:
     discovered = {d.serial: d for d in drive_mod.discover()}
 
     # Active section: preserve orchestrator insertion order (dict iteration).
+    # v0.6.5+: snapshot the keys into a list before iterating — orchestrator
+    # tasks mutate active_phase as drives transition between pipeline phases,
+    # and under high concurrency (8+ drives rapid-fire) a live iteration
+    # races with the write and raises "dictionary changed size during
+    # iteration", 500'ing the dashboard request. list() takes the snapshot
+    # atomically under the GIL.
     active_cards: list[dict] = []
-    for serial in state.active_phase.keys():
+    for serial in list(state.active_phase):
         card = _active_card(state, session, serial)
         if card is not None:
             active_cards.append(card)
