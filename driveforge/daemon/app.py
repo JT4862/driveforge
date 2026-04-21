@@ -583,6 +583,11 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     # so each render picks up the freshest result the background loop has
     # seen. Returns UpdateInfo | None; templates should null-check first.
     web_templates.env.globals["cached_update"] = updates_mod.cached
+    # v0.6.3+: known-flaky-drive advisory lookup. Templates can call
+    # `drive_advisory(model)` on any drive card / detail page; returns a
+    # string when the model is on the known-flaky list, None otherwise.
+    from driveforge.core import drive_advisory
+    web_templates.env.globals["drive_advisory"] = drive_advisory.advisory_for
     return app
 
 

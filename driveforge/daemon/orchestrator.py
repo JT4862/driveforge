@@ -14,6 +14,7 @@ event loop for the other drives or the HTTP API.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import subprocess
 import traceback
@@ -580,9 +581,15 @@ class Orchestrator:
             # logic in one place means future edits don't drift between
             # recovery and pre-flight. The preflight primitive raises
             # EraseError on unrecoverable states (frozen, unknown
-            # password) with user-facing messages; we re-raise those as
-            # RuntimeError so the recovery caller's except block handles
-            # them the same way it handles SAS recovery failures.
+            # password) with user-facing messages.
+            #
+            # v0.6.3+ Case B handling: if preflight raises because the
+            # drive refuses unlock, the drive might be autonomously
+            # erasing (firmware resumed the ERASE UNIT after power-on
+            # and will not respond to security commands until the
+            # internal erase finishes — hours for HDDs). We detect
+            # that pattern and wait for the drive to return to CLEAN
+            # state rather than failing the recovery outright.
             self._log(
                 serial,
                 "recovery: running shared preflight to clean security state "
@@ -594,7 +601,52 @@ class Orchestrator:
                     None, erase.ensure_clean_security_state, drive,
                 )
             except erase.EraseError as exc:
-                raise RuntimeError(str(exc)) from exc
+                # v0.6.3: Case B — drive might be mid-erase. Try the
+                # wait pattern before giving up. The drive's own
+                # estimate informs how long we're willing to wait.
+                self._log(
+                    serial,
+                    f"recovery: preflight couldn't unlock ({exc}) — "
+                    f"drive may be autonomously completing a prior "
+                    f"secure_erase. Entering wait pattern."
+                )
+                self.state.active_sublabel[serial] = (
+                    "Waiting for prior secure-erase to complete (drive locked, "
+                    "self-erasing)"
+                )
+
+                def _wait_status(elapsed_s: float, state) -> None:
+                    # Runs in the executor thread. Dict assignment is
+                    # thread-safe in CPython; good enough for a sublabel.
+                    mins = elapsed_s / 60
+                    self.state.active_sublabel[serial] = (
+                        f"Waiting for prior secure-erase to complete · "
+                        f"{mins:.0f} min elapsed · state={state.value}"
+                    )
+
+                completed = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        erase.wait_for_prior_erase_completion,
+                        drive,
+                        poll_interval_s=60,
+                        max_wait_s=12 * 3600,
+                        progress_callback=_wait_status,
+                    ),
+                )
+                if not completed:
+                    raise RuntimeError(
+                        f"Drive did not return to a usable state within 12 h. "
+                        f"Either the prior erase is taking longer than expected "
+                        f"or the drive is genuinely unresponsive. Underlying "
+                        f"preflight error: {exc}"
+                    ) from exc
+                self._log(
+                    serial,
+                    "recovery: prior secure_erase completed; drive is CLEAN; "
+                    "fresh pipeline will proceed",
+                )
+                return
             self._log(serial, "recovery: drive is in CLEAN security state; fresh pipeline will re-erase")
             return
 
@@ -1058,6 +1110,16 @@ class Orchestrator:
             raise PipelineFailure("secure_erase", "refusing to erase USB-transport drive")
         serial = drive.serial
 
+        # v0.6.3+: advisory-print for known-flaky drive families. ST3000DM001
+        # et al — surface the heads-up in the drive log before any erase
+        # machinery touches the drive, so operators understand why the
+        # pipeline might hit the hdparm fallback path or take longer than
+        # expected. Informational; doesn't change any behavior.
+        from driveforge.core import drive_advisory
+        advisory = drive_advisory.advisory_for(drive.model)
+        if advisory:
+            self._log(serial, f"advisory: {advisory}")
+
         # v0.5.0 pre-flight: ensure the drive is in a clean security state
         # before we start. Self-heals drives still enabled/locked from a
         # previous interrupted run; raises a clear user-facing EraseError
@@ -1127,10 +1189,65 @@ class Orchestrator:
         # still quotes the legacy full-overwrite duration. Without an
         # explicit completion log it looks like the phase was skipped.
         erase_start = loop.time()
+
+        # v0.6.3+: callback the erase layer uses to report progress
+        # (SAT starting, SAT aborted → hdparm fallback, hdparm erasing,
+        # etc.). Runs on the executor thread; dict-assign to
+        # `active_sublabel` is thread-safe enough in CPython for UI
+        # sublabels. Also feeds the per-drive rolling log tail so the
+        # drive detail page shows the fallback narrative.
+        def _erase_status(msg: str) -> None:
+            self.state.active_sublabel[serial] = msg
+            # _log is not strictly thread-safe (it may be mutating a
+            # list while the main thread reads it), but list.append is
+            # atomic enough under GIL for this use case. Worst case:
+            # the dashboard misses one log line on a race, which is fine.
+            self._log(serial, f"secure_erase: {msg}")
+
+        # v0.6.3+: asyncio-side wall-clock outer timeout. Belt-and-
+        # suspenders over sg_raw's own `-t` timeout and subprocess.run's
+        # timeout. The cascade-hang we saw on the R720 (2026-04-21) had
+        # the inner timeouts nominally correct, but D-state sg_raw
+        # processes couldn't be killed by SIGKILL — which meant
+        # subprocess.run itself hung trying to wait() on the dead child.
+        # This outer timeout bypasses that: asyncio.wait_for cancels the
+        # awaiting coroutine and we proceed, even if the executor thread
+        # stays stuck behind. One leaked thread is far better than a
+        # wedged orchestrator.
+        inner_estimate = estimate or 7200
+        outer_timeout_s = int(inner_estimate * 2) + 600
         try:
-            await loop.run_in_executor(None, erase.secure_erase, drive)
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    functools.partial(erase.secure_erase, drive, on_status=_erase_status),
+                ),
+                timeout=outer_timeout_s,
+            )
+        except asyncio.TimeoutError as exc:
+            # Outer deadline tripped. Inner timeouts should have fired
+            # before this — if we're here, either sg_raw/hdparm is
+            # D-state-stuck or the estimate was dramatically wrong.
+            # Either way, don't keep waiting; raise and let the
+            # failure path handle it.
+            raise PipelineFailure(
+                "secure_erase",
+                f"wall-clock outer timeout ({outer_timeout_s // 60} min) — "
+                f"drive may be D-state-stuck on secure_erase. Pull and "
+                f"reseat the drive to release the HBA.",
+            ) from exc
         except erase.EraseError as exc:
-            raise PipelineFailure("secure_erase", str(exc)) from exc
+            # v0.6.3+: decode the raw SAT/hdparm error into operator-
+            # facing cause + next-step text. The decoder falls through
+            # to a generic wrapper for patterns it doesn't recognize,
+            # so we always get a useful message (just less specific
+            # for novel patterns).
+            from driveforge.core import ata_errors
+            decoded = ata_errors.decode_secure_erase_error(str(exc))
+            failure_msg = f"{decoded.cause} — {decoded.next_step}"
+            self._log(serial, f"secure_erase failed: {decoded.cause}")
+            self._log(serial, f"  → {decoded.next_step}")
+            raise PipelineFailure("secure_erase", failure_msg) from exc
         except subprocess.TimeoutExpired as exc:
             # Surface the timeout plainly instead of the old wrapped
             # "unexpected: Command '[...]' timed out after N seconds" string,

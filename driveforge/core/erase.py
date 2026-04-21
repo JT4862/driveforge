@@ -264,18 +264,25 @@ def _sata_secure_erase(
     *,
     owner: str | None = None,
     capacity_bytes: int | None = None,
+    on_status=None,
 ) -> None:
-    """SAT-passthrough secure erase for SATA drives. Replaces the
-    pre-v0.3.0 `hdparm --security-erase` call, which fails on modern
-    Debian kernels for SATA drives behind a SAS HBA with the
-    `CONFIG_IDE_TASK_IOCTL` kernel-configuration error. The SAT path
-    uses ATA-PASS-THROUGH(16) (SCSI opcode 0x85) wrapping the same
-    ATA SECURITY ERASE UNIT command, submitted via `sg_raw` →
-    `SG_IO` ioctl — which the kernel still supports universally.
+    """SAT-passthrough secure erase for SATA drives with hdparm fallback.
 
-    The drive-side operation is identical to what hdparm would have
-    done: SET PASSWORD → ERASE PREPARE → ERASE UNIT. Only the
-    transport changes."""
+    Primary path: SAT passthrough via `sg_raw` + ATA-PASS-THROUGH(16)
+    (v0.3.0+). Works on modern Debian kernels where the old hdparm
+    `HDIO_DRIVE_TASKFILE` ioctl is gone.
+
+    Fallback path (v0.6.3+): if the SAT `SECURITY ERASE UNIT`
+    command aborts (`SatPassthruError` containing "SECURITY ERASE
+    UNIT" + "Aborted"), retry via `hdparm --user-master u
+    --security-erase`. We discovered on a ST4000NM0033 on JT's R720
+    (2026-04-21) that some drives' SAT translation layer refuses our
+    CDB for ERASE UNIT specifically while happily accepting the
+    identical ATA command issued directly via hdparm. Rather than
+    grade the drive F on a transport-layer refusal, v0.6.3 retries
+    via the native-ATA hdparm path. Same password, same drive-side
+    semantics, different kernel path.
+    """
     # Timeout preference: (1) drive's own hdparm-announced estimate × 1.5 if
     # present — vendor firmware knows the drive better than our blanket
     # capacity model — (2) capacity-based fallback otherwise. hdparm -I
@@ -290,14 +297,217 @@ def _sata_secure_erase(
         timeout_s = max(3600, int(est * 1.5))
     else:
         timeout_s = capacity_timeout(capacity_bytes, passes=1)
+    def _notify(msg: str) -> None:
+        """Best-effort status callback. Runs in the executor thread on
+        the orchestrator's behalf; never raised back to the erase
+        logic even if the callback bugs out."""
+        if on_status is None:
+            return
+        try:
+            on_status(msg)
+        except Exception:  # noqa: BLE001
+            logger.exception("on_status callback raised (ignored)")
+
     try:
+        _notify("SAT passthrough secure erase starting")
         sat_passthru.sat_secure_erase(
             device, password=password, timeout_s=timeout_s, owner=owner
         )
+        _notify("SAT passthrough secure erase completed")
+        return
     except sat_passthru.SatPassthruError as exc:
-        # Re-wrap so the orchestrator's generic EraseError catch still works
-        # without needing to know about the SAT layer.
+        if _is_sat_erase_unit_abort(str(exc)):
+            logger.warning(
+                "secure_erase: SAT ERASE UNIT aborted on %s — falling back to "
+                "hdparm native-ATA path (v0.6.3+). Underlying: %s",
+                device, exc,
+            )
+            _notify(
+                "SAT ERASE UNIT aborted — falling back to hdparm native-ATA"
+            )
+            try:
+                _sata_secure_erase_hdparm(
+                    device,
+                    password=password,
+                    timeout_s=timeout_s,
+                    owner=owner,
+                    on_status=_notify,
+                )
+                logger.info(
+                    "secure_erase: hdparm fallback succeeded on %s "
+                    "(SAT path refused; hdparm accepted)",
+                    device,
+                )
+                _notify("hdparm fallback secure erase completed")
+                return
+            except EraseError as hdparm_exc:
+                # Both paths refused — this is a legitimate drive-refusal.
+                # Surface both errors so the decoder has full context.
+                raise EraseError(
+                    f"Both SAT and hdparm secure-erase refused. "
+                    f"SAT: {exc}. hdparm: {hdparm_exc}"
+                ) from hdparm_exc
+        # Non-ABRT failure from SAT — re-wrap as EraseError without
+        # fallback (hdparm wouldn't help with transport-level failures
+        # like "sg_raw returned non-zero before reaching the drive").
         raise EraseError(str(exc)) from exc
+
+
+def _is_sat_erase_unit_abort(err_text: str) -> bool:
+    """True iff the SAT passthrough error looks like an ERASE UNIT
+    ABRT — the specific case v0.6.3 hdparm-fallback handles.
+
+    We match on substrings rather than parsing the full error
+    because sg_raw's error format varies slightly across versions
+    and we'd rather err on the side of triggering the fallback
+    (hdparm failing again is cheap) than missing it (operator sees
+    F grade they shouldn't).
+    """
+    t = (err_text or "").lower()
+    if "security erase unit" not in t:
+        return False
+    return (
+        "aborted command" in t
+        or "aborted" in t
+        or "error=0x4" in t
+        or "check condition" in t
+    )
+
+
+def _sata_secure_erase_hdparm(
+    device: str,
+    *,
+    password: str,
+    timeout_s: int,
+    owner: str | None,
+    on_status=None,
+) -> None:
+    """Native-ATA secure-erase via hdparm. The v0.6.3 fallback path for
+    drives that refuse SAT passthrough ERASE UNIT.
+
+    Two-command sequence (same drive-side flow as SAT, different
+    kernel path to get there):
+      1. `hdparm --user-master u --security-set-pass PW DEVICE`
+      2. `hdparm --user-master u --security-erase PW DEVICE`
+
+    Blocks until the erase completes (hdparm's own wait) or the
+    timeout fires. `hdparm --security-erase` returns only after the
+    drive reports the erase finished; for HDDs that can be many hours.
+    Same `owner` mechanism as the SAT path so the kill-on-abort
+    machinery works consistently.
+    """
+    def _notify(msg: str) -> None:
+        if on_status is None:
+            return
+        try:
+            on_status(msg)
+        except Exception:  # noqa: BLE001
+            logger.exception("on_status callback raised (ignored)")
+
+    # Step 1: set password. If the drive's already in enabled state
+    # (because we're retrying after SAT SET PASSWORD partially worked),
+    # hdparm returns an error we can ignore — the important thing is
+    # that the password is set and known to us.
+    _notify("hdparm: setting security password")
+    set_argv = [
+        "hdparm", "--user-master", "u",
+        "--security-set-pass", password, device,
+    ]
+    r = run(set_argv, timeout=60, owner=owner)
+    if not r.ok and "already" not in (r.stderr or "").lower():
+        # Genuine failure (not just "password already set"). Log but
+        # proceed — if the password is wrong, the erase step will
+        # fail with a distinctive error that propagates up.
+        logger.warning(
+            "hdparm --security-set-pass failed on %s (rc=%d): %s",
+            device, r.returncode, (r.stderr or "").strip(),
+        )
+
+    # Step 2: the actual erase. hdparm handles SECURITY ERASE PREPARE
+    # + SECURITY ERASE UNIT internally in the right order; we don't
+    # need to split them. Blocks until the drive reports done.
+    _notify("hdparm: issuing SECURITY ERASE (blocking until drive reports done)")
+    erase_argv = [
+        "hdparm", "--user-master", "u",
+        "--security-erase", password, device,
+    ]
+    r = run(erase_argv, timeout=timeout_s + 60, owner=owner)
+    if not r.ok:
+        raise EraseError(
+            f"hdparm --security-erase failed on {device} "
+            f"(rc={r.returncode}): {(r.stderr or r.stdout or '').strip() or 'non-zero exit'}"
+        )
+
+
+def wait_for_prior_erase_completion(
+    drive: Drive,
+    *,
+    poll_interval_s: int = 60,
+    max_wait_s: int = 12 * 3600,
+    progress_callback=None,
+) -> bool:
+    """Wait for a drive's in-progress secure-erase to finish (v0.6.3+).
+
+    Use case — Case B on re-insert: if a drive was pulled mid-erase
+    and its firmware resumed the erase on power-up, the drive is
+    locked + unresponsive to unlock commands until the internal erase
+    finishes. This function polls `hdparm -I` every `poll_interval_s`
+    seconds until the drive returns to CLEAN (erase completed, password
+    auto-cleared), or `max_wait_s` elapses.
+
+    `progress_callback(elapsed_s, state)` is called on every poll so
+    the dashboard can update the drive card sub-label with elapsed
+    time + current state. Pass None to skip progress reporting
+    (e.g. tests).
+
+    Returns True if the drive became CLEAN within the deadline,
+    False if the deadline hit first. Caller decides next step —
+    typically "proceed with pipeline" on True, "grade F with
+    'erase-never-completed' reason" on False.
+
+    Note: we intentionally do NOT try to accelerate the erase or
+    interrupt it. Once a drive starts SECURITY ERASE UNIT, it
+    completes on its own schedule. The polling cadence is just to
+    detect when it's safe to proceed — there's no mechanism that
+    makes it finish faster.
+    """
+    import time
+
+    start = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed > max_wait_s:
+            logger.warning(
+                "wait_for_prior_erase_completion: %s (%s) did not complete "
+                "within %d s deadline; giving up",
+                drive.device_path, drive.serial, max_wait_s,
+            )
+            return False
+        state = _probe_sata_security_state(drive.device_path)
+        if progress_callback is not None:
+            try:
+                progress_callback(elapsed, state)
+            except Exception:  # noqa: BLE001
+                # Never let a callback bug crash the wait loop — we need
+                # to keep polling regardless of whether the UI update lands.
+                logger.exception("progress_callback raised during wait loop")
+        if state == SataSecurityState.CLEAN:
+            logger.info(
+                "wait_for_prior_erase_completion: %s (%s) returned to CLEAN "
+                "after %.0f min — erase completed",
+                drive.device_path, drive.serial, elapsed / 60,
+            )
+            return True
+        if state == SataSecurityState.UNKNOWN:
+            # hdparm -I failed — drive may have been pulled again, or the
+            # bus is having problems. Keep polling; if it stays UNKNOWN
+            # we'll eventually hit the max_wait timeout.
+            logger.debug(
+                "wait_for_prior_erase_completion: %s state=UNKNOWN at %.0f s, "
+                "continuing poll",
+                drive.device_path, elapsed,
+            )
+        time.sleep(poll_interval_s)
 
 
 def _sas_secure_erase(device: str, *, owner: str | None = None, capacity_bytes: int | None = None) -> None:
@@ -325,13 +535,21 @@ def _nvme_format(device: str, *, owner: str | None = None) -> None:
         raise EraseError(f"nvme format failed on {device}: {r.stderr}")
 
 
-def secure_erase(drive: Drive) -> None:
+def secure_erase(drive: Drive, *, on_status=None) -> None:
     """Dispatch to the right erase path based on transport.
 
     For drives classified as SAS by lsblk, re-probe via smartctl first —
     SATA drives attached to SAS HBAs show up as tran=sas in lsblk but
     actually speak ATA. sg_format (SCSI FORMAT UNIT) fails on those with
     "Illegal request"; they want hdparm instead.
+
+    `on_status` (v0.6.3+) is an optional callable that receives
+    human-readable progress messages during the erase — "SAT passthrough
+    starting", "SAT aborted, falling back to hdparm", etc. The
+    orchestrator passes a callback that updates the drive card's
+    sublabel so the operator sees which path is running live. Only the
+    SATA path currently emits status (SAS sg_format and NVMe format are
+    black-box subprocess calls with no intermediate progress signal).
     """
     effective = drive.transport
     if effective == Transport.SAS:
@@ -342,7 +560,12 @@ def secure_erase(drive: Drive) -> None:
             effective = refined
 
     if effective == Transport.SATA:
-        _sata_secure_erase(drive.device_path, owner=drive.serial, capacity_bytes=drive.capacity_bytes)
+        _sata_secure_erase(
+            drive.device_path,
+            owner=drive.serial,
+            capacity_bytes=drive.capacity_bytes,
+            on_status=on_status,
+        )
     elif effective == Transport.SAS:
         _sas_secure_erase(drive.device_path, owner=drive.serial, capacity_bytes=drive.capacity_bytes)
     elif effective == Transport.NVME:
