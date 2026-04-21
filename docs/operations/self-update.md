@@ -4,12 +4,14 @@ title: In-app self-update
 
 # In-app self-update
 
-*Available since v0.3.1.*
+*Available since v0.3.1. Authorization refactored to polkit in v0.6.0.*
 
 DriveForge can update itself in place from the dashboard. **Settings →
 About / Updates → Install update now**. One click, live log streaming
 during install, automatic dashboard reconnect after the daemon
-restart. No SSH required.
+restart. No SSH required. v0.6.0+ also shows you the **release notes
+BEFORE you commit to the update**, so you see what's changing rather
+than finding out after the restart.
 
 ## How it works
 
@@ -19,13 +21,21 @@ restart. No SSH required.
    orphan their state. The dashboard surfaces the refusal with a
    plain-English banner explaining what to wait for.
 
-2. **Daemon invokes `sudo systemctl start driveforge-update.service`.**
-   That's the only privileged command the daemon user has sudo
-   access for — see `/etc/sudoers.d/driveforge-update`. No general
-   sudo grant; if an attacker compromises the daemon, the worst
-   they can do is force a re-install from origin/main (which would
-   require also compromising the GitHub repo to inject malicious
-   code).
+2. **Daemon invokes `systemctl start driveforge-update.service`.**
+   No `sudo` in the argv (v0.6.0+). Instead, the unprivileged daemon
+   user `driveforge` is authorized to call `StartUnit` on that one
+   specific unit via a polkit rule at
+   `/etc/polkit-1/rules.d/50-driveforge-update.rules`. systemctl
+   speaks systemd's D-Bus interface under the hood; polkit
+   mediates — so the net effect is a scoped, PAM-free authorization
+   for that one action. No general elevation; if an attacker
+   compromises the daemon, the worst they can do is force a
+   re-install from origin/main (which would require also
+   compromising the GitHub repo to inject malicious code).
+
+   *Pre-v0.6.0 hosts used a sudoers rule instead. Upgrading to
+   v0.6.0 via install.sh removes the stale
+   `/etc/sudoers.d/driveforge-update` file automatically.*
 
 3. **`driveforge-update.service` runs `/usr/local/sbin/driveforge-update`,**
    which:
@@ -59,8 +69,11 @@ restart. No SSH required.
   at origin/main."
 - **Uncommitted local changes** in the source tree, or a non-main
   branch checked out. Manual `git status` + cleanup needed.
-- **sudoers rule missing** (visudo failed during install, or the
-  rule was hand-removed). Banner shows the literal `sudo` error.
+- **Polkit rule missing or mis-installed** (v0.6.0+). Banner shows
+  systemctl's stderr verbatim — typically `Failed to start
+  driveforge-update.service: Interactive authentication required.`
+  Fix: rerun `sudo scripts/install.sh` from the source tree, which
+  re-installs the rule to `/etc/polkit-1/rules.d/`.
 
 ## Manual fallback
 
@@ -69,28 +82,30 @@ The pre-v0.3.1 copy-paste commands are still available — click
 expand them. Useful if the in-app flow is broken and you need to
 update the box that fixes it.
 
-## What's NOT done in v0.3.1
+## Still not done
 
 - **No partial / per-component updates.** It's all or nothing —
   full git pull + full install.sh.
 - **No rollback button.** If an update breaks something, you SSH in
   and `cd /opt/driveforge-src && git checkout <prev-tag> &&
   sudo ./scripts/install.sh`.
-- **No release-notes preview** before installing. The Updates panel
-  shows what version is available and links to the GitHub release;
-  click through to read notes before clicking Install.
 - **No staged rollouts** across multiple boxes. Each box updates
-  independently when its operator clicks the button.
+  independently when its operator clicks the button (or sees the
+  navbar's green "Update Available" pill — added in v0.6.0).
 
 ## Security model
 
-- The sudoers rule grants ONLY `systemctl start
-  driveforge-update.service`. Not `systemctl restart`, not
-  `systemctl stop`, not any other unit. Audit it any time with
-  `cat /etc/sudoers.d/driveforge-update`.
+- The polkit rule (v0.6.0+) grants ONLY
+  `action.id = "org.freedesktop.systemd1.manage-units"` with
+  `action.lookup("unit") == "driveforge-update.service"` AND
+  `action.lookup("verb") == "start"` for `subject.user == "driveforge"`.
+  Every other unit, every other verb, every other user falls
+  through and hits the default polkit policy (interactive auth
+  required). Audit the rule any time with
+  `cat /etc/polkit-1/rules.d/50-driveforge-update.rules`.
 - The dashboard has no auth. Anyone on your LAN with network
   access to port 8080 can hit Install. Treat your LAN
-  appropriately. (TLS + auth are a future feature; not in v0.3.1.)
+  appropriately. (TLS + auth are a future feature.)
 - DriveForge pulls from `https://github.com/JT4862/driveforge.git`.
   HTTPS guarantees the bytes match what's on GitHub at fetch
   time; we don't currently verify commit signatures locally

@@ -997,6 +997,7 @@ def settings_page(request: Request) -> HTMLResponse:
     chassis_power = telemetry.read_chassis_power() if state.capabilities.chassis_power else None
     chassis_temps = telemetry.read_chassis_temperatures() if state.capabilities.chassis_temperature else {}
 
+    cached_update_info = updates_mod.cached()
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -1004,7 +1005,14 @@ def settings_page(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "saved_panel": saved,
             "restart_required": restart == "1",
-            "update_info": updates_mod.cached(),
+            "update_info": cached_update_info,
+            # v0.6.0+: release-notes-before-Install preview. Rendered
+            # server-side from the cached markdown body so the template
+            # can drop it straight into a `|safe` block without any
+            # client-side markdown parser. Returns None when there's
+            # nothing to render (no cache, or body is empty) — template
+            # hides the preview card entirely in that case.
+            "update_notes_html": updates_mod.render_release_notes_html(cached_update_info),
             "update_command": updates_mod.update_command(),
             "ssh_update_command": updates_mod.ssh_update_command(),
             "current_version": updates_mod.CURRENT_VERSION,
@@ -1042,9 +1050,9 @@ async def save_hostname(request: Request) -> RedirectResponse:
 
 @router.post("/settings/install-update")
 async def install_update(request: Request) -> RedirectResponse:
-    """One-click in-app update — fires `sudo systemctl start
-    driveforge-update.service`, which git-pulls + reruns install.sh +
-    restarts the daemon.
+    """One-click in-app update — fires `systemctl start
+    driveforge-update.service` (polkit-authorized as of v0.6.0; no
+    sudo), which git-pulls + reruns install.sh + restarts the daemon.
 
     Refusal preconditions checked here (the underlying primitive in
     `updates.trigger_in_app_update()` doesn't enforce them):

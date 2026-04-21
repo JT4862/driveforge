@@ -41,19 +41,18 @@ LogsDirectory=driveforge
 #     ADMIN + NET_BIND_SERVICE ambient caps. That's the load-bearing
 #     restriction; it's what prevents a compromised daemon from
 #     doing arbitrary kernel things.
-#   - Bounding set defaults to "all" (systemd's default when
-#     CapabilityBoundingSet is unset), so sudo (setuid-root) can
-#     elevate normally when the daemon invokes it for the one
-#     whitelisted action (`sudo systemctl start driveforge-update`
-#     per /etc/sudoers.d/driveforge-update).
-#   - NoNewPrivileges=false preserves the setuid-sudo path.
-#
-# Trade-off unchanged from v0.4.2 — an attacker who compromises the
-# daemon could exec any setuid-root binary and elevate. The alternative
-# is replacing sudo with a polkit-mediated D-Bus call to systemd's
-# StartUnit method, which is a real refactor queued for v0.6.0 or
-# later. For a homelab tool with no network auth in the first place,
-# the current posture is acceptable.
+#   - v0.6.0+ update path: the daemon no longer shells out via sudo.
+#     The in-app "Install update" button runs `systemctl start
+#     driveforge-update.service` without any sudo wrapper; the
+#     polkit rule at /etc/polkit-1/rules.d/50-driveforge-update.rules
+#     authorizes the daemon user's StartUnit call via systemd's
+#     D-Bus interface. No setuid path in the daemon's code anywhere.
+#   - Bounding set + NoNewPrivileges left as pre-v0.6.0 for now. A
+#     follow-up release can tighten NoNewPrivileges=true once we've
+#     audited that no daemon-spawned binary relies on setuid
+#     elevation (smartctl/hdparm/sg_format/nvme/badblocks/ipmitool/
+#     ledctl/sg_ses/systemctl are all non-setuid on Debian; rawio
+#     cap + disk-group membership covers them).
 AmbientCapabilities=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
 
 NoNewPrivileges=false

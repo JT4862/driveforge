@@ -76,9 +76,12 @@ In order:
    - `driveforge-tui.service` — TTY dashboard (optional, console-only)
    - `driveforge-issue.service` — login banner refresh
    - `driveforge-update.service` — one-click update target (v0.3.1+)
-9. **Installs the sudoers rule** at `/etc/sudoers.d/driveforge-update`
-   that grants the daemon user permission to start (and only start)
-   the update service.
+9. **Installs the polkit rule** at
+   `/etc/polkit-1/rules.d/50-driveforge-update.rules` that authorizes
+   the unprivileged daemon user to call `StartUnit` on (and only on)
+   `driveforge-update.service` via systemd's D-Bus interface. v0.6.0+
+   — replaces the pre-v0.6.0 sudoers rule, which is removed on
+   upgrade. No setuid path in the daemon's runtime.
 10. **Writes default config** to `/etc/driveforge/driveforge.yaml` and
     `/etc/driveforge/grading.yaml` (only if those files don't already
     exist — re-running install.sh preserves your customizations).
@@ -94,7 +97,7 @@ In order:
 | `/opt/driveforge/` | Python venv |
 | `/etc/driveforge/driveforge.yaml` | User-editable config (Settings UI writes here) |
 | `/etc/driveforge/grading.yaml` | Grading thresholds |
-| `/etc/sudoers.d/driveforge-update` | Sudoers rule for v0.3.1 in-app update |
+| `/etc/polkit-1/rules.d/50-driveforge-update.rules` | Polkit rule for v0.6.0+ in-app update (pre-v0.6.0 used `/etc/sudoers.d/driveforge-update`, removed on upgrade) |
 | `/etc/systemd/system/driveforge-*.service` | systemd units |
 | `/etc/modules-load.d/driveforge.conf` | Kernel modules to autoload |
 | `/var/lib/driveforge/driveforge.db` | SQLite state (drives, batches, runs, telemetry) |

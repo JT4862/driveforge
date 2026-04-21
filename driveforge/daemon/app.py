@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from driveforge import config as cfg
 from driveforge.core import diskstats, drive as drive_mod
+from driveforge.core import updates as updates_mod
 from driveforge.core.hotplug import EventKind, Monitor as HotplugMonitor
 from driveforge.daemon.api import router as api_router
 from driveforge.daemon.orchestrator import Orchestrator
@@ -37,6 +38,15 @@ STATIC_DIR = PACKAGE_ROOT / "web" / "static"
 # a stalled drive is obvious on the dashboard within one refresh cycle, and
 # long enough that rounding/quantization doesn't dominate the rate display.
 IO_RATE_POLL_INTERVAL_SEC = 3.0
+
+# Cadence for the GitHub Releases background poll (v0.6.0+). One hour fits
+# inside the unauthenticated GitHub API rate limit (60 req/hr) by a wide
+# margin and matches the in-memory cache TTL in core.updates, so the hourly
+# tick effectively just refreshes the cache for the navbar pill renderer.
+# First check fires 30 s after boot so the navbar populates without an
+# hour-long wait on a freshly-restarted daemon.
+UPDATE_CHECK_INTERVAL_SEC = 3600
+UPDATE_CHECK_INITIAL_DELAY_SEC = 30
 
 
 def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
@@ -438,6 +448,50 @@ async def _poll_io_rates(state: DaemonState) -> None:
         await asyncio.sleep(IO_RATE_POLL_INTERVAL_SEC)
 
 
+async def _update_check_loop(state: DaemonState) -> None:
+    """Background task: poll GitHub Releases once an hour and refresh
+    the `core.updates` module cache. The navbar pill renderer reads
+    that cache via `updates.cached()` to decide whether to show
+    "Update Available" — so this loop is what keeps the navbar live.
+
+    Never crashes the daemon — any network error, rate-limit, or
+    malformed-response is logged at WARNING and swallowed. The next
+    hourly tick retries cleanly. Matches the backlog's "handle API
+    failures silently" sub-scope for v0.6.0.
+
+    `check_for_updates()` is synchronous (uses `httpx.get`, not the
+    async client), so we run it in the default executor to avoid
+    blocking the event loop for the full HTTP round trip. Cheap — it's
+    one request per hour.
+    """
+    loop = asyncio.get_event_loop()
+    # Give the daemon a moment to finish booting before the first
+    # outbound HTTP — nothing correctness-critical depends on it, but
+    # piling the check onto the same 1-2s window as startup hotplug
+    # scans + DB migrations is needlessly noisy.
+    try:
+        await asyncio.sleep(UPDATE_CHECK_INITIAL_DELAY_SEC)
+    except asyncio.CancelledError:
+        raise
+    while True:
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: updates_mod.check_for_updates(force=True),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "update-check loop iteration failed; will retry next hour",
+                exc_info=True,
+            )
+        try:
+            await asyncio.sleep(UPDATE_CHECK_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
+
+
 def make_app(settings: cfg.Settings) -> FastAPI:
     state = DaemonState.boot(settings)
     set_state(state)
@@ -447,6 +501,10 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     async def lifespan(_: FastAPI):
         state.orchestrator = orch  # type: ignore[attr-defined]
         io_task = asyncio.create_task(_poll_io_rates(state))
+        # v0.6.0+: hourly GitHub Releases poll feeds the navbar "Update
+        # Available" pill. Runs for the daemon's entire lifetime;
+        # cancelled in the shutdown block below.
+        update_check_task = asyncio.create_task(_update_check_loop(state))
         # One-shot: for drives already present at startup, upsert them into
         # the DB and restore their post-run blinker based on last grade.
         # Covers the "daemon restarted while a previously-tested drive was
@@ -479,7 +537,7 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             settings.dev_mode,
         )
         yield
-        for task in (io_task, hotplug_task):
+        for task in (io_task, hotplug_task, update_check_task):
             task.cancel()
             try:
                 await task
@@ -519,6 +577,12 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     # Make __version__ available to every Jinja template (used by base.html
     # footer + the About panel) so version bumps only touch version.py.
     web_templates.env.globals["driveforge_version"] = DRIVEFORGE_VERSION
+    # v0.6.0+: expose the module-level update cache to every template so
+    # base.html can render the navbar "Update Available" pill without each
+    # route having to inject the state manually. Callable (not the value)
+    # so each render picks up the freshest result the background loop has
+    # seen. Returns UpdateInfo | None; templates should null-check first.
+    web_templates.env.globals["cached_update"] = updates_mod.cached
     return app
 
 

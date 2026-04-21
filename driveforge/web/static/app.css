@@ -41,6 +41,50 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .tab.active { background: rgba(88,166,255,0.12); color: var(--accent); }
 .tab:hover { text-decoration: none; color: var(--text); }
 
+/* v0.6.0+ navbar "Update Available" pill. Green pill-shaped link
+   pushed to the right edge of the topbar via margin-left:auto in
+   the flex row. Visible only when the hourly background update-check
+   has seen a newer tag than the running version; the dot pulses
+   gently to draw attention without being obnoxious. */
+.update-available-pill {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  border-radius: 999px;
+  background: rgba(63,185,80,0.14);
+  border: 1px solid rgba(63,185,80,0.40);
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.update-available-pill:hover {
+  background: rgba(63,185,80,0.24);
+  border-color: rgba(63,185,80,0.65);
+  text-decoration: none;
+  color: var(--ok);
+}
+.update-available-pill .update-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px rgba(63,185,80,0.30);
+  animation: updateAvailablePulse 2.2s ease-in-out infinite;
+}
+.update-available-pill .update-version {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: rgba(63,185,80,0.75);
+}
+@keyframes updateAvailablePulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(63,185,80,0.30); }
+  50%      { box-shadow: 0 0 0 4px rgba(63,185,80,0.14); }
+}
+
 .content { padding: 24px; max-width: 1280px; margin: 0; }
 .footer { display: flex; padding: 12px 18px; border-top: 1px solid var(--panel-border); color: var(--muted); font-size: 12px; }
 .footer .spacer { flex: 1; }
@@ -587,6 +631,81 @@ table tr.fail td { background: rgba(248,81,73,0.04); }
   padding: 10px 14px;
   border-radius: 6px;
   margin-bottom: 16px;
+}
+
+/* v0.6.0+ release-notes preview on Settings — the operator reads
+   what's changing BEFORE clicking Install, not after. Rendered
+   server-side from the cached GitHub release body via
+   updates.render_release_notes_html(). Sits inside the green
+   "Update available" banner; collapsible via the <summary> click. */
+.release-notes-preview {
+  background: rgba(0,0,0,0.20);
+  border: 1px solid rgba(63,185,80,0.25);
+  border-radius: 6px;
+  padding: 10px 14px;
+  color: var(--text);
+  font-size: 13px;
+}
+.release-notes-preview > summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--ok);
+  padding: 2px 0;
+}
+.release-notes-preview > summary::-webkit-details-marker { display: none; }
+.release-notes-preview > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.15s ease;
+  color: rgba(63,185,80,0.75);
+  font-size: 10px;
+  margin-right: 4px;
+}
+.release-notes-preview[open] > summary::before { transform: rotate(90deg); }
+.release-notes-preview > summary a { color: rgba(63,185,80,0.85); }
+.release-notes-body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(63,185,80,0.20);
+  line-height: 1.55;
+  color: var(--text);
+  max-height: 420px;
+  overflow-y: auto;
+}
+.release-notes-body h1,
+.release-notes-body h2,
+.release-notes-body h3 {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+}
+.release-notes-body h1 { font-size: 17px; color: var(--text); }
+.release-notes-body h2 { font-size: 15px; color: var(--teal); }
+.release-notes-body h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.release-notes-body p { margin: 6px 0 10px 0; }
+.release-notes-body ul, .release-notes-body ol { margin: 6px 0 10px 20px; padding: 0; }
+.release-notes-body li { margin: 3px 0; }
+.release-notes-body code {
+  background: rgba(0,0,0,0.35);
+  padding: 1px 5px; border-radius: 3px;
+  font-family: var(--mono); font-size: 12px;
+}
+.release-notes-body pre {
+  background: #0b0f15;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--mono); font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0;
+}
+.release-notes-body pre code { background: transparent; padding: 0; }
+.release-notes-body a { color: var(--accent); }
+.release-notes-body a:hover { text-decoration: underline; }
+.release-notes-body hr {
+  border: none;
+  border-top: 1px solid var(--panel-border);
+  margin: 14px 0;
 }
 
 /* v0.5.0 update-classification pills — distinct from the systemd

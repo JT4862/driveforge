@@ -159,6 +159,40 @@ def check_for_updates(force: bool = False) -> UpdateInfo:
     return info
 
 
+def render_release_notes_html(info: UpdateInfo | None) -> str | None:
+    """Render the GitHub release-notes markdown body into an HTML snippet
+    for the Settings-page "release notes before Install" preview (v0.6.0+).
+
+    Returns None when there's nothing to render — no cached info at all,
+    or the latest release has an empty `body`. Callers should interpret
+    None as "hide the preview block entirely" rather than rendering
+    an empty card.
+
+    The default + `fenced_code` + `tables` extensions cover everything
+    we typically put in release notes: headings, bullet lists, inline
+    code, bold/italic, links, occasional ``` blocks and pipe-tables.
+
+    **Safety note**: release notes are author-controlled — we write
+    them ourselves as part of the v*.Y.Z release flow on GitHub — so
+    we don't run a sanitizer like `bleach` on the output. If that
+    assumption ever changes (e.g. auto-generated notes ingesting
+    third-party PR content), wrap the return value in `bleach.clean()`
+    with a restricted tag allowlist before returning it.
+    """
+    if info is None or not info.release_notes:
+        return None
+    # Deferred import so the dep only loads when an update-available
+    # render actually happens — avoids a ~100 ms startup penalty on
+    # daemon boot for a feature that only matters when a new release is
+    # on the other end.
+    import markdown as md
+
+    return md.markdown(
+        info.release_notes,
+        extensions=["fenced_code", "tables"],
+    )
+
+
 def update_command() -> str:
     """The exact shell snippet to run on the host for a manual update.
 
@@ -292,8 +326,18 @@ def classify_update_state(log_text: str, service_state: str) -> tuple[str, str |
 
 
 def trigger_in_app_update() -> tuple[bool, str]:
-    """Fire `sudo systemctl start driveforge-update.service` to kick off
-    a self-update. Returns (ok, message).
+    """Fire `systemctl start driveforge-update.service` (polkit-mediated)
+    to kick off a self-update. Returns (ok, message).
+
+    **v0.6.0 architecture change**: the argv no longer starts with
+    `sudo -n`. The unprivileged `driveforge` daemon user is authorized
+    to call `StartUnit` on this one unit via the polkit rule at
+    /etc/polkit-1/rules.d/50-driveforge-update.rules. systemctl itself
+    already speaks systemd's D-Bus interface under the hood, so this
+    IS the "polkit-mediated D-Bus call" the backlog described — just
+    with systemctl as the client instead of hand-rolled Python D-Bus
+    code. Net effect for the user: no more 10-second sudo/PAM timeouts
+    on hosts where reverse-DNS is slow.
 
     The unit's ExecStart runs `/usr/local/sbin/driveforge-update`, which
     git-pulls + reruns install.sh + restarts driveforge-daemon. The
@@ -304,6 +348,13 @@ def trigger_in_app_update() -> tuple[bool, str]:
     this function is the bare "fire the systemd unit" primitive. Caller
     must verify no in-flight pipeline first, since the daemon restart
     will kill any active drive's pipeline task.
+
+    If the polkit rule is missing or malformed, systemctl exits non-zero
+    with a "Interactive authentication required" message — we surface
+    the stderr verbatim so the operator sees the real reason in the
+    Settings banner (a common failure mode on an upgrade from a pre-
+    v0.6.0 host that lost the sudoers rule but never got the polkit
+    rule for some reason, e.g. policykit-1 was deselected offline).
     """
     import shutil
     import subprocess
@@ -311,8 +362,7 @@ def trigger_in_app_update() -> tuple[bool, str]:
     # systemctl path varies (some distros: /usr/bin, others: /bin). Use
     # the resolver so a PATH-trimmed systemd-managed environment finds it.
     systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
-    sudo = shutil.which("sudo") or "/usr/bin/sudo"
-    argv = [sudo, "-n", systemctl, "start", UPDATE_SERVICE]
+    argv = [systemctl, "start", UPDATE_SERVICE]
     try:
         proc = subprocess.run(
             argv,
@@ -323,8 +373,9 @@ def trigger_in_app_update() -> tuple[bool, str]:
     except (subprocess.TimeoutExpired, OSError) as exc:
         return (False, f"failed to invoke {' '.join(argv)}: {exc}")
     if proc.returncode != 0:
-        # Most common cause: sudoers rule missing or mis-installed.
-        # Surface stderr verbatim so the operator sees the real reason.
+        # Most common cause: polkit rule missing, mis-installed, or
+        # the unit name in the rule doesn't match exactly. Surface
+        # stderr verbatim so the operator sees the real reason.
         detail = (proc.stderr or proc.stdout or "").strip() or "non-zero exit"
         return (
             False,

@@ -219,20 +219,36 @@ touch /var/log/driveforge-update.log
 chgrp driveforge /var/log/driveforge-update.log 2>/dev/null || true
 chmod 0640 /var/log/driveforge-update.log
 
-# Install the sudoers rule that grants the daemon user permission to
-# trigger driveforge-update.service. visudo --check'd before move so
-# a syntactically broken rule never lands in /etc/sudoers.d (which
-# would lock the operator out of sudo entirely on a freshly-installed
-# box).
-SUDOERS_TMP=$(mktemp)
-install -m 0440 "$(dirname "$0")/../config/driveforge-update.sudoers" "$SUDOERS_TMP"
-if visudo -c -f "$SUDOERS_TMP" >/dev/null; then
-  install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/driveforge-update
-  ok "sudoers.d/driveforge-update installed (allows daemon → start update unit only)"
+# v0.6.0+: install the polkit rule that grants the `driveforge`
+# daemon user permission to call StartUnit on driveforge-update.service
+# via systemd's D-Bus interface. Replaces the pre-v0.6.0 sudoers rule,
+# which suffered from occasional 10-second PAM/reverse-DNS timeouts.
+# See config/driveforge-update.polkit-rules for the scope + reasoning.
+#
+# Policykit-1 is installed by default on every Debian 12 netinst that
+# boots via systemd, so we can rely on /etc/polkit-1/rules.d/ existing.
+# The directory check is defensive for offline-bundle paths that
+# deselected polkit explicitly.
+if [[ -d /etc/polkit-1/rules.d ]]; then
+  install -m 0644 "$(dirname "$0")/../config/driveforge-update.polkit-rules" \
+    /etc/polkit-1/rules.d/50-driveforge-update.rules
+  ok "polkit rule installed (allows daemon → start update unit only)"
+  # polkit re-reads rules on file change via inotify, so no explicit
+  # reload is required. systemctl --user daemon-reload is NOT what
+  # reloads polkit rules.
 else
-  warn "sudoers rule failed visudo -c — skipping; in-app update will be unavailable until fixed"
+  warn "/etc/polkit-1/rules.d not found — is polkit (policykit-1) installed?"
+  warn "Skipping polkit rule install; in-app update will be unavailable until fixed"
 fi
-rm -f "$SUDOERS_TMP"
+
+# Upgrade hygiene: if an older install left the sudoers rule in place,
+# remove it. The new polkit path makes it redundant, and keeping a
+# stale sudoers rule around just muddles the audit trail for anyone
+# inspecting /etc/sudoers.d/ on an upgraded host.
+if [[ -f /etc/sudoers.d/driveforge-update ]]; then
+  rm -f /etc/sudoers.d/driveforge-update
+  ok "removed legacy /etc/sudoers.d/driveforge-update (superseded by polkit)"
+fi
 
 systemctl daemon-reload
 # Avahi usually autostarts on Debian but enable explicitly so

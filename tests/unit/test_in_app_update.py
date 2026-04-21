@@ -1,8 +1,8 @@
-"""Tests for the v0.3.1 one-click in-app update flow.
+"""Tests for the v0.3.1 one-click in-app update flow (v0.6.0 polkit-era).
 
-The update *itself* (sudo systemctl start driveforge-update.service →
+The update *itself* (systemctl start driveforge-update.service →
 git pull → install.sh → daemon restart) is fundamentally an integration
-test that needs a real Debian host with sudo + systemd. These unit
+test that needs a real Debian host with systemd + polkit. These unit
 tests cover what's testable without that:
 
   - The refusal preconditions in `POST /settings/install-update` —
@@ -14,8 +14,9 @@ tests cover what's testable without that:
   - `updates.update_service_state()` returning "unknown" cleanly when
     systemctl is missing (dev macs).
   - `trigger_in_app_update()` surfacing systemctl's stderr verbatim
-    on failure so the operator sees the real reason (typically
-    sudoers-rule misconfiguration).
+    on failure so the operator sees the real reason (typically a
+    missing/broken polkit rule on upgraded hosts — see
+    test_update_trigger_polkit.py for the v0.6.0 argv/shape tests).
 """
 
 from __future__ import annotations

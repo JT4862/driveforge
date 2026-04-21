@@ -116,8 +116,9 @@ everything else is automated.
 4. Creates the `driveforge` system user
 5. Installs systemd units (`driveforge-daemon.service`,
    `driveforge-issue.service`, `driveforge-update.service`)
-6. Sets up the `/etc/sudoers.d/driveforge-update` rule for one-click
-   updates
+6. Installs the `/etc/polkit-1/rules.d/50-driveforge-update.rules`
+   polkit rule that authorizes one-click in-app updates (v0.6.0+;
+   pre-v0.6.0 used a sudoers rule)
 7. Reboots into the installed system
 
 If any step fails, look at `/var/log/driveforge-install.log` on the

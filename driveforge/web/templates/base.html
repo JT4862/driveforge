@@ -23,6 +23,27 @@
       <a href="/history" class="tab{% if '/history' in request.url.path %} active{% endif %}" accesskey="h">History</a>
       <a href="/settings" class="tab{% if '/settings' in request.url.path %} active{% endif %}" accesskey=",">Settings</a>
     </nav>
+    {# v0.6.0+ "Update Available" navbar pill. Background task in
+       driveforge.daemon.app._update_check_loop polls the GitHub
+       Releases API hourly; the result is cached in the core.updates
+       module and exposed to every template via the cached_update
+       Jinja global (make_app). Pill links to /settings where the
+       release-notes preview + Install button live — the whole point
+       of v0.6.0's UX shift is that the operator reads release notes
+       BEFORE committing to the update, not after. Silent when the
+       cache is empty, update-check has never succeeded, or the
+       running daemon is already on the latest tag. #}
+    {% set __upd = cached_update() %}
+    {% if __upd and __upd.update_available %}
+    <a href="/settings"
+       class="update-available-pill"
+       title="DriveForge {{ __upd.latest_version }} is available. Click to view release notes and install."
+       accesskey="u">
+      <span class="update-dot" aria-hidden="true"></span>
+      Update Available
+      <span class="update-version">{{ __upd.latest_version }}</span>
+    </a>
+    {% endif %}
   </header>
   {% endblock %}
   <main class="content">

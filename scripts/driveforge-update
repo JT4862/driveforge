@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # DriveForge in-place update runner. Invoked by the daemon via
-# `sudo systemctl start driveforge-update.service` (the only command
-# the unprivileged daemon user is allowed to sudo, per
-# /etc/sudoers.d/driveforge-update).
+# `systemctl start driveforge-update.service` — v0.6.0+ uses a polkit
+# rule (/etc/polkit-1/rules.d/50-driveforge-update.rules) to authorize
+# the daemon user's StartUnit call; no sudo in the path. Pre-v0.6.0
+# used /etc/sudoers.d/driveforge-update, which install.sh removes on
+# upgrade to avoid a stale rule muddling the audit trail.
 #
 # What it does:
 #   1. Locate the source tree (/opt/driveforge-src for ISO installs,

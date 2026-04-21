@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "driveforge"
-version = "0.5.6"
+version = "0.6.0"
 description = "In-house enterprise drive refurbishment pipeline"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -42,6 +42,10 @@ dependencies = [
   "rich>=13.7",
   "textual>=0.60",
   "brother-ql>=0.9.4",
+  # v0.6.0+ — render the GitHub release-notes markdown body into HTML
+  # for the in-app "release notes before Install" preview on
+  # Settings. Pure-Python, no C extensions; standalone.
+  "markdown>=3.5",
 ]
 
 [project.optional-dependencies]
