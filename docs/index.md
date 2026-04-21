@@ -11,11 +11,11 @@ badblocks burn-in (or skips it for a "quick" verdict), runs a SMART
 long self-test, grades the result A/B/C/Fail, and prints a cert
 label. Commercial-refurbisher workflow at homelab scale.
 
-This documentation is **scaffolded as of v0.3.1** — the page tree is
-in place, but most pages are short stubs that say "this will cover
-…". Detailed content lands in **v0.4.0** (the documentation
-release). Until then, [`BUILD.md`](https://github.com/JT4862/driveforge/blob/main/BUILD.md)
-is the canonical project plan and architectural reference.
+**Full operator documentation as of v0.4.0.** Every page in the tree
+below has detailed content. For the architectural / design plan, see
+[`BUILD.md`](https://github.com/JT4862/driveforge/blob/main/BUILD.md)
+in the repo root — that's still the canonical place for "why is the
+system designed this way?" decisions.
 
 ## Where to start
 
