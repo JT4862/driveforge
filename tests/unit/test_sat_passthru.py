@@ -61,19 +61,47 @@ def test_cdb_for_security_erase_unit_data_out() -> None:
 
 def test_cdb_for_security_erase_prepare_non_data() -> None:
     """SECURITY ERASE PREPARE (0xF3) carries no data — protocol=3
-    (Non-data), count=0, byte 2 sets ck_cond so we get sense back."""
+    (Non-data), count=0, byte 2 = 0x00 (CK_COND=0).
+
+    CK_COND must be 0 on non-data commands: with CK_COND=1 the SAT
+    layer returns CHECK CONDITION even on success (sense key
+    RECOVERED_ERROR carrying the ATA Status Return), which sg_raw
+    surfaces as non-zero and our caller treats as failure. v0.4.3
+    fix — see the docstring in `_build_atapt16_cdb` for detail."""
     cdb = sat_passthru._build_atapt16_cdb(
         ata_cmd=sat_passthru.ATA_SECURITY_ERASE_PREPARE,
         protocol=sat_passthru.ATA_PROTO_NON_DATA,
         has_data=False,
     )
     expected = [
-        0x85, 0x06, 0x20, 0x00, 0x00,
+        0x85, 0x06, 0x00, 0x00, 0x00,
         0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x40, 0xF3, 0x00,
     ]
     assert cdb == expected, f"got {[hex(b) for b in cdb]}"
+
+
+def test_non_data_cdb_has_ck_cond_cleared() -> None:
+    """Regression for v0.4.3. Non-data SAT passthrough commands MUST
+    have CK_COND=0 (bit 5 of CDB byte 2). With CK_COND=1 the SAT layer
+    returns CHECK CONDITION on success — sense key RECOVERED_ERROR
+    carrying the ATA Status Return descriptor — which sg_raw reports
+    as non-zero exit, and our caller treats as failure. Observed in
+    the wild on WDC WD1000CHTZ behind an LSI 9207-8i as spurious
+    'SECURITY ERASE PREPARE failed' with status=0x50 (DRDY+DSC set,
+    ERR clear — i.e. the command actually succeeded)."""
+    cdb = sat_passthru._build_atapt16_cdb(
+        ata_cmd=sat_passthru.ATA_SECURITY_ERASE_PREPARE,
+        protocol=sat_passthru.ATA_PROTO_NON_DATA,
+        has_data=False,
+    )
+    # Byte 2 bit 5 = CK_COND. Must be 0.
+    assert (cdb[2] & 0x20) == 0, (
+        f"CK_COND bit set on non-data CDB (byte 2 = {cdb[2]:#04x}) — "
+        "SAT will return CHECK CONDITION on success and sg_raw will "
+        "report the command as failed"
+    )
 
 
 def test_cdb_for_security_set_password_data_out() -> None:
