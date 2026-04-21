@@ -14,27 +14,47 @@ WorkingDirectory=/var/lib/driveforge
 StateDirectory=driveforge
 LogsDirectory=driveforge
 
-# Drive access — the daemon needs privileged access to block devices for
-# SMART reads, secure-erase, and badblocks. Keep the blast radius contained
-# as much as systemd allows.
+# Drive access — the daemon needs privileged access to block devices
+# for SMART reads, secure-erase, and badblocks. AmbientCapabilities
+# grants these to the daemon process itself; it runs as the
+# unprivileged `driveforge` user with just these three caps rather
+# than as root.
 #
-# CAP_SETUID + CAP_SETGID are in the bounding set (NOT ambient) so that
-# the v0.3.1 in-app self-update can sudo into systemctl. Sudo is setuid-
-# root and needs to call setresuid(0) / setresgid(0) — those calls require
-# CAP_SETUID / CAP_SETGID to be present in the bounding set, otherwise
-# they're dropped permanently for the entire process tree even through
-# setuid execution. Bug shipped in v0.3.1 (in-app update never exercised
-# on the real protected daemon — the test suite monkeypatches subprocess);
-# fixed in v0.4.2.
+# CapabilityBoundingSet removed (v0.5.0)
+# --------------------------------------
 #
-# Trade-off: an attacker who compromises the daemon could exec a setuid-
-# root binary and elevate. That capability is the same one sudo needs to
-# function at all — the alternative would be to drop sudo entirely and
-# use a polkit-mediated D-Bus call to systemd's StartUnit method, which
-# is a meaningful refactor. For a homelab tool with no network auth in
-# the first place, the trade-off is acceptable.
+# The bounding set used to be a tight whitelist (RAWIO + ADMIN +
+# NET_BIND_SERVICE). But the bounding set is a HARD cap on what
+# capabilities the entire process tree can hold — including caps
+# gained via setuid. Sudo is setuid-root and needs CAP_SETUID,
+# CAP_SETGID, CAP_AUDIT_WRITE, and realistically several more
+# (PAM modules pull in CAP_AUDIT_CONTROL, CAP_DAC_READ_SEARCH,
+# CAP_SYS_RESOURCE depending on sudoers config). v0.4.2 added three;
+# real-deploy testing surfaced that it still wasn't enough on the
+# R720. Rather than play whack-a-mole trying to enumerate every cap
+# sudo or its PAM stack transitively needs, drop the bounding set
+# entirely and rely on the daemon's ambient caps (above) as the
+# actual security boundary.
+#
+# Effective security posture:
+#   - Daemon process runs as user `driveforge` with exactly RAWIO +
+#     ADMIN + NET_BIND_SERVICE ambient caps. That's the load-bearing
+#     restriction; it's what prevents a compromised daemon from
+#     doing arbitrary kernel things.
+#   - Bounding set defaults to "all" (systemd's default when
+#     CapabilityBoundingSet is unset), so sudo (setuid-root) can
+#     elevate normally when the daemon invokes it for the one
+#     whitelisted action (`sudo systemctl start driveforge-update`
+#     per /etc/sudoers.d/driveforge-update).
+#   - NoNewPrivileges=false preserves the setuid-sudo path.
+#
+# Trade-off unchanged from v0.4.2 — an attacker who compromises the
+# daemon could exec any setuid-root binary and elevate. The alternative
+# is replacing sudo with a polkit-mediated D-Bus call to systemd's
+# StartUnit method, which is a real refactor queued for v0.6.0 or
+# later. For a homelab tool with no network auth in the first place,
+# the current posture is acceptable.
 AmbientCapabilities=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE
 
 NoNewPrivileges=false
 ProtectHome=true
