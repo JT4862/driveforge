@@ -195,6 +195,19 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     last_phase = last_run.phase if last_run else None
     last_quick = bool(last_run.quick_mode) if last_run else False
     last_poh = last_run.power_on_hours_at_test if last_run else None
+    # v0.5.5: triage verdict for quick-pass runs (grade is NULL in that case).
+    last_triage = last_run.triage_result if last_run else None
+    # v0.5.5: healing delta (post - pre reallocations). Only meaningful
+    # when both snapshots are populated; NULL on legacy pre-v0.5.5 rows.
+    remapped_during_run: int | None = None
+    if (
+        last_run is not None
+        and last_run.reallocated_sectors is not None
+        and last_run.pre_reallocated_sectors is not None
+    ):
+        remapped_during_run = (
+            last_run.reallocated_sectors - last_run.pre_reallocated_sectors
+        )
     # Compact age label: "45k POH" or "5.2y" when POH is meaningful.
     # Hours → years at 24*365.25 = 8766 h/y. Skipped for drives we've
     # never tested (no POH captured) or drives still showing near-zero.
@@ -245,10 +258,17 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
         "last_tested": last_tested,
         "last_phase": last_phase,
         "last_quick": last_quick,
+        "last_triage": last_triage,
+        "remapped_during_run": remapped_during_run,
         "last_error": last_error,
         "drive_age_label": drive_age_label,
         "just_completed": just_completed,
         "identifying": identifying,
+        # v0.5.5+ — True when the operator has opted into the "prompt"
+        # mode for quick-pass triage=fail (settings.daemon.quick_pass_fail_action="prompt")
+        # AND the drive's latest quick-pass triaged as fail. The card
+        # template renders a banner with Yes / Dismiss buttons.
+        "promote_prompt": drive.serial in state.promote_prompts,
     }
 
 
@@ -580,6 +600,52 @@ async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
         pass
     return RedirectResponse(url="/", status_code=303)
 
+
+@router.post("/drives/{serial}/promote-to-full")
+async def promote_to_full_web(serial: str, request: Request) -> RedirectResponse:
+    """v0.5.5+ \u2014 operator confirmed the quick-pass fail prompt.
+
+    Starts a full-pipeline batch on this drive and clears the prompt.
+    Only meaningful when the drive's latest run was a quick-pass with
+    triage=fail AND the prompt was surfaced by the
+    `quick_pass_fail_action="prompt"` setting path.
+    """
+    state = get_state()
+    state.promote_prompts.discard(serial)
+    orch = request.app.state.orchestrator
+    # Re-discover the drive to get a current Drive object with live
+    # device path (kernel letters can drift across reboots).
+    from driveforge.core import drive as drive_mod
+    drives = {d.serial: d for d in drive_mod.discover()}
+    match = drives.get(serial)
+    if match is None:
+        # Drive was pulled between the prompt rendering and the click.
+        # Nothing to do; fall through to dashboard.
+        return RedirectResponse(url="/", status_code=303)
+    try:
+        await orch.start_batch(
+            [match],
+            source="operator-promoted after quick-pass triage=fail",
+            quick=False,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("promote-to-full failed for %s", serial)
+    return RedirectResponse(url="/", status_code=303)
+
+
+@router.post("/drives/{serial}/dismiss-promote-prompt")
+async def dismiss_promote_prompt_web(serial: str, request: Request) -> RedirectResponse:
+    """v0.5.5+ \u2014 operator dismissed the quick-pass fail prompt.
+
+    Removes the drive from state.promote_prompts. The triage-fail badge
+    stays on the card; only the inline prompt banner goes away. Operator
+    can still run a full pipeline manually via New Batch.
+    """
+    state = get_state()
+    state.promote_prompts.discard(serial)
+    return RedirectResponse(url="/", status_code=303)
+
+
 # --- Manual cert label printing ---------------------------------------------
 # Labels are printed on-demand, not automatically, so the operator can inspect
 # each cert before committing a sticker. See BUILD.md → Certification Labels.
@@ -648,6 +714,15 @@ def _cert_label_data_for(request: Request, state, drive, run):
     # reason as "generic failed grading" text.
     fail_reason = printer_mod.primary_fail_reason(run.rules or [])
 
+    # v0.5.5+ healing delta. Only meaningful when both pre and post
+    # snapshots are present (pre is NULL on legacy pre-v0.5.5 rows).
+    remapped = None
+    if (
+        run.reallocated_sectors is not None
+        and run.pre_reallocated_sectors is not None
+    ):
+        remapped = run.reallocated_sectors - run.pre_reallocated_sectors
+
     return printer_mod.CertLabelData(
         model=drive.model,
         serial=drive.serial,
@@ -661,6 +736,7 @@ def _cert_label_data_for(request: Request, state, drive, run):
         current_pending_sector=run.current_pending_sector,
         badblocks_errors=badblocks,
         fail_reason=fail_reason,
+        remapped_during_run=remapped,
     )
 
 
@@ -1144,6 +1220,19 @@ async def save_daemon(request: Request) -> RedirectResponse:
     port_v = form.get("port")
     if port_v:
         d.port = int(port_v)
+    # v0.5.5+ \u2014 quick-pass fail action + telemetry interval.
+    action = form.get("quick_pass_fail_action")
+    if action in ("badge_only", "prompt", "auto_promote"):
+        d.quick_pass_fail_action = action
+    interval_v = form.get("telemetry_sample_interval_s")
+    if interval_v:
+        try:
+            interval_i = int(interval_v)
+        except ValueError:
+            interval_i = d.telemetry_sample_interval_s
+        # Bounds match the input's min/max; defensive clamp in case
+        # someone POSTs outside the form UI.
+        d.telemetry_sample_interval_s = max(5, min(600, interval_i))
     restart_needed = old_host != d.host or old_port != d.port
     await _save_settings_or_ignore(request)
     suffix = "&restart=1" if restart_needed else ""

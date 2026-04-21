@@ -30,15 +30,40 @@
   {% endif %}
   <dl class="kv">
     <dt>Phase</dt><dd>{{ latest.phase|replace("_", " ") }}</dd>
-    <dt>Grade</dt><dd>{% if latest.grade %}<span class="grade grade-{{ latest.grade }}"{% if latest.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ latest.grade|upper }}{% if latest.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% if latest.quick_mode %} <span class="muted small">(provisional — quick mode)</span>{% endif %}{% else %}—{% endif %}</dd>
+    <dt>Grade</dt><dd>
+      {%- if latest.grade %}<span class="grade grade-{{ latest.grade }}"{% if latest.quick_mode %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ latest.grade|upper }}{% if latest.quick_mode %}<sup class="provisional">*</sup>{% endif %}</span>{% if latest.quick_mode %} <span class="muted small">(provisional — quick mode)</span>{% endif %}
+      {%- elif latest.triage_result %}<span class="grade triage-{{ latest.triage_result }}" title="v0.5.5+ quick-pass triage verdict — not a full certification">{{ latest.triage_result|capitalize }}</span> <span class="muted small">(quick-pass triage)</span>
+      {%- else %}—{% endif -%}
+    </dd>
     {% if suggested_use %}
     <dt>Suggested use</dt><dd class="muted">{{ suggested_use }}</dd>
     {% endif %}
     <dt>Started</dt><dd>{{ latest.started_at.isoformat() if latest.started_at else "—" }}</dd>
     <dt>Completed</dt><dd>{{ latest.completed_at.isoformat() if latest.completed_at else "—" }}{% if duration_label %} &middot; ran {{ duration_label }}{% endif %}</dd>
     <dt>Power-on hours</dt><dd>{{ "{:,}".format(latest.power_on_hours_at_test) if latest.power_on_hours_at_test else "—" }}{% if latest.power_on_hours_at_test %} ({{ "%.1f"|format(latest.power_on_hours_at_test / 8760) }} years continuous){% endif %}</dd>
-    <dt>Reallocated sectors</dt><dd>{{ latest.reallocated_sectors if latest.reallocated_sectors is not none else "—" }}</dd>
-    <dt>Current pending</dt><dd>{% if latest.current_pending_sector and latest.current_pending_sector > 0 %}<span class="bad">{{ latest.current_pending_sector }}</span>{% else %}{{ latest.current_pending_sector if latest.current_pending_sector is not none else "—" }}{% endif %}</dd>
+    <dt>Reallocated sectors</dt><dd>
+      {{- latest.reallocated_sectors if latest.reallocated_sectors is not none else "—" -}}
+      {%- if latest.pre_reallocated_sectors is not none and latest.reallocated_sectors is not none %}
+        <span class="muted small"> &middot; pre {{ latest.pre_reallocated_sectors }} &rarr; post {{ latest.reallocated_sectors }}
+        {%- set delta = latest.reallocated_sectors - latest.pre_reallocated_sectors %}
+        {%- if delta > 0 %} <span class="remapped-inline">(+{{ delta }} remapped during run)</span>{% endif -%}
+        </span>
+      {% endif -%}
+    </dd>
+    <dt>Current pending</dt><dd>
+      {%- if latest.current_pending_sector and latest.current_pending_sector > 0 -%}
+        <span class="bad">{{ latest.current_pending_sector }}</span>
+      {%- else -%}
+        {{ latest.current_pending_sector if latest.current_pending_sector is not none else "—" }}
+      {%- endif -%}
+      {%- if latest.pre_current_pending_sector is not none and latest.current_pending_sector is not none %}
+        <span class="muted small"> &middot; pre {{ latest.pre_current_pending_sector }} &rarr; post {{ latest.current_pending_sector }}
+        {%- set pend_delta = latest.current_pending_sector - latest.pre_current_pending_sector %}
+        {%- if pend_delta < 0 %} <span class="remapped-inline">(healed {{ pend_delta|abs }})</span>
+        {%- elif pend_delta > 0 %} <span class="bad">(grew by {{ pend_delta }})</span>{% endif -%}
+        </span>
+      {% endif -%}
+    </dd>
     <dt>Offline uncorrectable</dt><dd>{% if latest.offline_uncorrectable and latest.offline_uncorrectable > 0 %}<span class="bad">{{ latest.offline_uncorrectable }}</span>{% else %}{{ latest.offline_uncorrectable if latest.offline_uncorrectable is not none else "—" }}{% endif %}</dd>
     <dt>SMART status</dt><dd>{% if latest.smart_status_passed %}passed{% elif latest.smart_status_passed is false %}failed{% else %}—{% endif %}</dd>
     {% if max_temp %}
@@ -182,14 +207,31 @@
   <h2>Full test history ({{ runs|length }})</h2>
   {% if runs %}
   <table class="runs">
-    <thead><tr><th>When</th><th>Batch</th><th>Phase</th><th>Grade</th></tr></thead>
+    <thead><tr><th>When</th><th>Batch</th><th>Mode</th><th>Phase</th><th>Verdict</th><th>Sectors pre&rarr;post</th></tr></thead>
     <tbody>
     {% for run in runs %}
       <tr>
         <td>{{ run.started_at.isoformat() if run.started_at else "" }}</td>
         <td>{% if run.batch_id %}<a href="/batches/{{ run.batch_id }}">{{ run.batch_id[:8] }}</a>{% else %}—{% endif %}</td>
+        <td class="muted small">{{ "quick" if run.quick_mode else "full" }}</td>
         <td>{{ run.phase|replace("_", " ") }}</td>
-        <td>{% if run.grade %}<span class="grade grade-{{ run.grade }}">{{ run.grade|upper }}</span>{% else %}—{% endif %}</td>
+        <td>
+          {%- if run.grade %}<span class="grade grade-{{ run.grade }}">{{ run.grade|upper }}</span>
+          {%- elif run.triage_result %}<span class="grade triage-{{ run.triage_result }}" title="Quick-pass triage verdict">{{ run.triage_result|capitalize }}</span>
+          {%- else %}—{% endif -%}
+        </td>
+        <td class="muted small">
+          {%- if run.pre_reallocated_sectors is not none and run.reallocated_sectors is not none -%}
+            realloc {{ run.pre_reallocated_sectors }}&rarr;{{ run.reallocated_sectors }}
+            {%- set d = run.reallocated_sectors - run.pre_reallocated_sectors -%}
+            {%- if d > 0 %} <span class="remapped-inline">(+{{ d }})</span>{% endif %}
+          {%- else -%}
+            —
+          {%- endif -%}
+          {%- if run.pre_current_pending_sector is not none and run.current_pending_sector is not none %}
+            &middot; pending {{ run.pre_current_pending_sector }}&rarr;{{ run.current_pending_sector }}
+          {%- endif -%}
+        </td>
       </tr>
     {% endfor %}
     </tbody>

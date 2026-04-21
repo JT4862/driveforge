@@ -270,6 +270,21 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
             latest_completed.isoformat() if latest_completed else "?",
         )
         return
+    # v0.5.5+ — quick-pass runs carry a triage verdict instead of a grade.
+    # Any completed quick-pass (clean/watch/fail) is a deliberate verdict
+    # about the drive and should NOT auto-rerun on re-insert — operator
+    # can trigger a full pipeline via New Batch or the dashboard prompt
+    # (settings.quick_pass_fail_action=prompt) if they want more.
+    STICKY_TRIAGE = ("clean", "watch", "fail")
+    if latest is not None and latest.triage_result in STICKY_TRIAGE:
+        logger.info(
+            "hotplug add: drive %s has a quick-pass triage verdict (%s, %s); "
+            "skipping auto-enroll",
+            match.serial,
+            latest.triage_result,
+            latest_completed.isoformat() if latest_completed else "?",
+        )
+        return
     if latest is not None and latest.grade == "error":
         logger.info(
             "hotplug add: drive %s's latest run was a pipeline error "

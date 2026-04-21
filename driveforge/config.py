@@ -88,6 +88,31 @@ class DaemonConfig(BaseModel):
     # synthetic tree. Production leaves this at "/".
     sysfs_root: Path = Path("/")
 
+    # v0.5.5+ — What to do when a quick-pass run finishes with triage=fail
+    # (the drive deteriorated during the quick pass). Three modes:
+    #   "badge_only" (default)  — show the Fail triage badge and leave
+    #                             the next step to the operator.
+    #   "prompt"                — surface a dashboard prompt offering to
+    #                             run a full pipeline on the drive.
+    #   "auto_promote"          — automatically queue a full-pipeline run
+    #                             once the failed quick pass completes.
+    # Conservative default (badge_only) matches DriveForge's appliance
+    # philosophy: no silent auto-escalation without operator consent.
+    quick_pass_fail_action: str = "badge_only"
+
+    # v0.5.5+ — How often (in seconds) to sample per-drive temperature +
+    # chassis power during active runs. Each active drive gets its own
+    # background sampler; samples land in the telemetry_samples table
+    # and feed the drive-detail telemetry charts.
+    #
+    # Pre-v0.5.5 the orchestrator only sampled at SMART-snapshot phase
+    # boundaries (twice per run total), producing the sparse 2-sample
+    # charts on multi-hour runs. 30 s is the sweet spot: enough
+    # resolution to see the warm-up curve and thermal plateau during
+    # badblocks, cheap enough to not hammer smartctl while the drive
+    # is under heavy I/O.
+    telemetry_sample_interval_s: int = 30
+
 
 class Settings(BaseSettings):
     """Top-level config. Loaded from disk + env."""

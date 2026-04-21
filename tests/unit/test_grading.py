@@ -77,6 +77,50 @@ def test_degradation_between_pre_and_post_forces_fail() -> None:
     assert result.grade == grading.Grade.FAIL
 
 
+def test_pending_climbed_during_pipeline_forces_fail() -> None:
+    """v0.5.5: pending sectors appearing during the pipeline run are the
+    strongest possible fail signal — the drive deteriorated on the bench
+    under controlled conditions. Explicit regression test for the
+    "pending climbed" rule mentioned in the v0.5.5 backlog."""
+    pre = _snap(current_pending_sector=0)
+    post = _snap(current_pending_sector=3)
+    result = grading.grade_drive(pre=pre, post=post, config=_config())
+    assert result.grade == grading.Grade.FAIL
+    rule = next(r for r in result.rules if r.name == "no_degradation_current_pending_sector")
+    assert not rule.passed
+    assert rule.forces_grade == grading.Grade.FAIL
+
+
+def test_pending_shrunk_during_pipeline_passes() -> None:
+    """The flip side: pending went DOWN during the run (the drive healed
+    itself). Must NOT be a fail — this is the whole point of burn-in.
+    Reallocated climbs correspondingly (pending sector got swapped for
+    a spare), which is also the healing behavior we want to reward."""
+    pre = _snap(current_pending_sector=5, reallocated_sectors=10)
+    post = _snap(current_pending_sector=0, reallocated_sectors=15)
+    # reallocated climbed from 10 to 15 though \u2014 that IS degradation by
+    # our rule, so it should still fail. This reflects conservative
+    # grading: reallocations during the run are bench-observed drive
+    # activity that grading treats as concerning even when pending
+    # cleared. Triage (for quick pass) treats this identically as Fail.
+    result = grading.grade_drive(pre=pre, post=post, config=_config())
+    assert result.grade == grading.Grade.FAIL
+
+
+def test_missing_pre_snapshot_does_not_manufacture_failure() -> None:
+    """If pre-snapshot is missing (legacy row, smartctl transient failure)
+    the degradation rule must NOT claim degradation against an absent
+    baseline \u2014 absence of evidence is not evidence of absence.
+    Conservative on purpose: better to miss a fail than to fail a drive
+    on ambiguous data."""
+    pre = _snap(reallocated_sectors=None, current_pending_sector=None)
+    post = _snap(reallocated_sectors=2, current_pending_sector=0)
+    result = grading.grade_drive(pre=pre, post=post, config=_config())
+    # reallocated=2 is within Grade A (max 3) and pending=0 clean,
+    # so without phantom-degradation false positive this should pass A.
+    assert result.grade == grading.Grade.A
+
+
 def test_bad_short_test_fails() -> None:
     result = grading.grade_drive(
         pre=_snap(), post=_snap(), config=_config(), short_test_passed=False

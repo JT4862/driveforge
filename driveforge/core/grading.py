@@ -146,15 +146,27 @@ def grade_drive(
 
     # Degradation: if any of the key counters got worse between pre and post,
     # that's an automatic fail (the drive actively deteriorated on the bench).
+    # A missing pre-snapshot (legacy row, smartctl transient failure) is
+    # treated as "unknown, can't prove degradation" — the rule passes neutrally
+    # rather than manufacturing a False positive against an absent baseline.
     for attr in ("reallocated_sectors", "current_pending_sector", "offline_uncorrectable"):
-        pre_v = getattr(pre, attr) or 0
-        post_v = getattr(post, attr) or 0
+        pre_v = getattr(pre, attr)
+        post_v = getattr(post, attr)
+        if pre_v is None or post_v is None:
+            rules.append(
+                Rule(
+                    name=f"no_degradation_{attr}",
+                    passed=True,
+                    detail=f"{attr}: pre/post comparison skipped (pre={pre_v}, post={post_v})",
+                )
+            )
+            continue
         degraded = post_v > pre_v
         rules.append(
             _rule(
                 f"no_degradation_{attr}",
                 not degraded,
-                f"{attr}: pre={pre_v} → post={post_v}",
+                f"{attr}: pre={pre_v} \u2192 post={post_v}",
                 fail_tier=Grade.FAIL if degraded else None,
             )
         )

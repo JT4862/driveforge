@@ -33,10 +33,23 @@ class TestRunOut(BaseModel):
     bay: int | None
     phase: str
     grade: str | None
+    # v0.5.5: triage_result is the verdict for quick-pass runs
+    # ("clean" | "watch" | "fail"); grade stays NULL for quick-pass.
+    # For full-pipeline runs the grade field carries the verdict and
+    # triage_result stays NULL.
+    triage_result: str | None = None
     started_at: str | None
     completed_at: str | None
     power_on_hours: int | None
     reallocated_sectors: int | None
+    current_pending_sector: int | None = None
+    # Start-of-test snapshots (v0.5.5+). NULL on runs that predate the
+    # denormalization. `remapped_during_run` is the convenience delta
+    # post_reallocated - pre_reallocated, shown to consumers who want
+    # the "healing" story without re-computing it client-side.
+    pre_reallocated_sectors: int | None = None
+    pre_current_pending_sector: int | None = None
+    remapped_during_run: int | None = None
     report_url: str | None
     quick_mode: bool = False
     error_message: str | None = None
@@ -274,6 +287,12 @@ async def abort_drive(serial: str, request: Request) -> dict[str, Any]:
 
 
 def _test_run_to_out(r: m.TestRun) -> TestRunOut:
+    # Compute the healing delta for quick consumption by dashboard / label.
+    # Only meaningful when both pre and post snapshots are present; NULL
+    # otherwise so clients can tell "no data" from "zero healing."
+    remapped = None
+    if r.reallocated_sectors is not None and r.pre_reallocated_sectors is not None:
+        remapped = r.reallocated_sectors - r.pre_reallocated_sectors
     return TestRunOut(
         id=r.id,
         drive_serial=r.drive_serial,
@@ -281,10 +300,15 @@ def _test_run_to_out(r: m.TestRun) -> TestRunOut:
         bay=r.bay,
         phase=r.phase,
         grade=r.grade,
+        triage_result=r.triage_result,
         started_at=r.started_at.isoformat() if r.started_at else None,
         completed_at=r.completed_at.isoformat() if r.completed_at else None,
         power_on_hours=r.power_on_hours_at_test,
         reallocated_sectors=r.reallocated_sectors,
+        current_pending_sector=r.current_pending_sector,
+        pre_reallocated_sectors=r.pre_reallocated_sectors,
+        pre_current_pending_sector=r.pre_current_pending_sector,
+        remapped_during_run=remapped,
         report_url=r.report_url,
         quick_mode=bool(r.quick_mode),
         error_message=r.error_message,
