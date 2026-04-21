@@ -8,6 +8,7 @@ in-flight batch tracking, and the async queue bridging events to the UI.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,6 +20,17 @@ from driveforge.core import capabilities as capabilities_mod
 from driveforge.core import enclosures
 from driveforge.core.process import FixtureRunner, set_fixture_runner
 from driveforge.db.session import make_engine, init_db, make_session_factory
+
+
+# v0.6.5+: drive-command thread pool sizing. 16 workers covers the
+# widest chassis we expect (24-bay JBOD expanders) plus a handful of
+# concurrent telemetry samplers. If this cap is hit, drive subprocesses
+# queue on the drive executor instead of starving HTTP request
+# threads in FastAPI's default pool. The root cause today of "dashboard
+# wedges when drives go D-state" is that FastAPI's default threadpool is
+# shared with drive subprocess execution; isolating them fixes the
+# cascade symptom even while individual drives stay stuck.
+_DRIVE_COMMAND_EXECUTOR_WORKERS = 16
 
 
 @dataclass
@@ -123,6 +135,21 @@ class DaemonState:
             led_control=False, chassis_power=False, chassis_temperature=False
         )
     )
+    # v0.6.5+ dedicated thread pool for drive-subprocess execution
+    # (sg_raw, smartctl, hdparm, badblocks, sg_format, nvme). Kept
+    # SEPARATE from FastAPI's default anyio threadpool so a drive
+    # stuck in kernel D-state can't starve HTTP request handlers.
+    # Without this split, 2-3 stuck drives consume 2-3 of the ~40
+    # default pool slots, dashboard polling fills the rest, and the
+    # UI wedges. With this split, the orchestrator's executor has
+    # its own 16 workers and the dashboard's responsiveness is
+    # independent of drive state.
+    drive_command_executor: ThreadPoolExecutor = field(
+        default_factory=lambda: ThreadPoolExecutor(
+            max_workers=_DRIVE_COMMAND_EXECUTOR_WORKERS,
+            thread_name_prefix="drive-cmd",
+        )
+    )
 
     def refresh_bay_plan(self) -> enclosures.BayPlan:
         """Re-discover enclosures + capabilities. Called on daemon start
@@ -134,8 +161,15 @@ class DaemonState:
         return self.bay_plan
 
     def active_serials(self) -> set[str]:
-        """Serials currently in the test pipeline. Single source of truth."""
-        return set(self.active_phase.keys())
+        """Serials currently in the test pipeline. Single source of truth.
+
+        v0.6.5+: snapshot via list() before building the set — orchestrator
+        tasks mutate active_phase concurrently, and `set(dict.keys())`
+        iterates internally while building the set. Under the 8-drive
+        concurrent scenario this raced and raised "dictionary changed
+        size during iteration." list() snapshots atomically under GIL.
+        """
+        return set(list(self.active_phase))
 
     @classmethod
     def boot(cls, settings: Settings) -> "DaemonState":

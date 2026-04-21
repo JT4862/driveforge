@@ -354,7 +354,10 @@ def _handle_drive_removed(state: DaemonState, orch: Orchestrator, event) -> None
     serial = event.serial
     if not serial and event.device_node:
         basename = event.device_node.rsplit("/", 1)[-1]
-        for s, bn in state.device_basenames.items():
+        # v0.6.5+: snapshot device_basenames before iterating — orchestrator
+        # writes to this dict when drives enter active_phase, and a hotplug
+        # remove during a batch start could otherwise race with the write.
+        for s, bn in list(state.device_basenames.items()):
             if bn == basename:
                 serial = s
                 logger.info(
@@ -543,6 +546,13 @@ def make_app(settings: cfg.Settings) -> FastAPI:
                 await task
             except asyncio.CancelledError:
                 pass
+        # v0.6.5+: release the dedicated drive-command thread pool. If
+        # any drive subprocesses are mid-D-state, those threads won't
+        # actually exit until the kernel releases them, but shutdown()
+        # with wait=False returns immediately so the daemon unwinds
+        # cleanly. The threads become orphans managed by the Python
+        # runtime — they're gone on process exit either way.
+        state.drive_command_executor.shutdown(wait=False)
         logger.info("driveforge-daemon shutting down")
 
     from driveforge.version import __version__ as DRIVEFORGE_VERSION

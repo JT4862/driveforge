@@ -109,27 +109,44 @@ def decode_secure_erase_error(raw: str) -> DecodedError:
     # ------------------------------------------------------ ABRT on ERASE
     # Sense = aborted-command, ATA error = ABRT. Most common pattern.
     # Drive acknowledged the command but refused it. Could be:
-    #   - Drive is frozen (libata re-freeze after reinsert — spec says
-    #     frozen drives abort all security commands)
-    #   - Drive firmware disables ERASE UNIT over SAT specifically
-    #     (the case JT hit on ST4000NM0033 — hdparm native path worked)
-    #   - Drive has hit its 5-attempt security count and locked out
-    #   - Drive doesn't support the exact security feature we asked for
+    #   - Linux libata auto-freeze issued during udev probe on reinsert
+    #     (drive aborts all security commands; `hdparm -I` may still
+    #     report "not frozen" because the freeze fires during probe,
+    #     not at identify-read time. This is the OVERWHELMING majority
+    #     of ABRT-on-ERASE-UNIT cases on server hosts with many drives.)
+    #   - BIOS issued SECURITY FREEZE LOCK during POST
+    #   - Drive firmware refuses SECURITY ERASE UNIT over SAT specifically
+    #     (workaround: hdparm native path — already attempted before the
+    #     decoder runs, so if we got here, that also failed)
+    #   - Drive's 5-attempt security count expired
+    #   - Drive firmware has ATA security feature disabled in its
+    #     current configuration
     if sense_key == "aborted command" and ata_error is not None and (ata_error & ABRT):
         return DecodedError(
             cause=(
-                "Drive refused SECURITY ERASE UNIT over SAT passthrough AND "
-                "via native hdparm ATA command. Both paths returned ABRT "
-                "(command aborted by drive firmware)."
+                "Drive refused SECURITY ERASE UNIT over both SAT passthrough "
+                "AND native hdparm ATA paths with ABRT (command aborted "
+                "by drive firmware). Most common root cause: Linux's libata "
+                "driver auto-issued SECURITY FREEZE LOCK during the post-"
+                "reinsert udev probe. hdparm -I may still report 'not "
+                "frozen' because the freeze fires during probe, not at "
+                "identify-read time."
             ),
             next_step=(
-                "Most likely the drive is frozen (BIOS/libata issued "
-                "SECURITY FREEZE LOCK after reinsert) or the drive firmware "
-                "doesn't support security erase in its current state. "
-                "Options: (1) boot with BIOS security freeze disabled, "
-                "(2) if drive model is on the known-flaky list, set aside "
-                "as known-bad, (3) for SEDs, try PSID-based factory reset "
-                "via the label's PSID (not yet supported)."
+                "In priority order: "
+                "(1) Suspend + resume the host (systemctl suspend) — "
+                "libata's freeze does NOT persist across suspend; drive "
+                "accepts security commands after resume. "
+                "(2) Move the drive to a USB-SATA enclosure on a host "
+                "whose kernel doesn't auto-freeze. "
+                "(3) Reboot with BIOS 'security freeze lock' disabled, "
+                "if your firmware exposes that option. "
+                "(4) For self-encrypting drives (SEDs), a PSID-based "
+                "factory reset from the physical label's PSID works "
+                "independently of the security freeze (not yet automated "
+                "in DriveForge). "
+                "(5) If the drive is on the known-flaky advisory list, "
+                "set aside as known-bad and move on."
             ),
             severity="error",
         )
