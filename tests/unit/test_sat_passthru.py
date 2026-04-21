@@ -291,6 +291,98 @@ def test_sat_failure_raises_sat_passthru_error(monkeypatch) -> None:
     assert "ABORTED COMMAND" in msg
 
 
+def test_sat_secure_erase_cleans_up_password_on_mid_sequence_failure(monkeypatch) -> None:
+    """v0.4.4 regression. If SET PASSWORD succeeds but PREPARE or
+    ERASE UNIT fails, the erase function MUST attempt to DISABLE
+    PASSWORD on the way out — otherwise the drive stays
+    security-enabled with a lingering password that breaks future
+    attempts. The recovery workflow only covers pulled-drive cases,
+    not failed-in-place — so cleanup is the erase function's job."""
+    call_log: list[int] = []
+
+    def fake_run(argv, *, check=False, timeout=None, owner=None):
+        # Extract the ATA opcode (CDB byte 14) to tell which command this is
+        opcode = int(argv[-2], 16)
+        call_log.append(opcode)
+        # SET PASSWORD succeeds; PREPARE fails; we then expect DISABLE to run
+        if opcode == sat_passthru.ATA_SECURITY_ERASE_PREPARE:
+            return ProcessResult(
+                argv=list(argv),
+                returncode=2,
+                stdout="",
+                stderr="sg_raw: SCSI status: Check Condition",
+            )
+        return ProcessResult(argv=list(argv), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sat_passthru, "run", fake_run)
+
+    with pytest.raises(sat_passthru.SatPassthruError) as exc_info:
+        sat_passthru.sat_secure_erase("/dev/sdfake", timeout_s=60)
+
+    # Verify order: SET PASSWORD → PREPARE (failed) → DISABLE PASSWORD (cleanup)
+    # No ERASE UNIT should fire since PREPARE failed first.
+    assert call_log == [
+        sat_passthru.ATA_SECURITY_SET_PASSWORD,
+        sat_passthru.ATA_SECURITY_ERASE_PREPARE,
+        sat_passthru.ATA_SECURITY_DISABLE_PASSWORD,
+    ], f"command order wrong: {[hex(c) for c in call_log]}"
+
+    # Original error from PREPARE is what propagates, NOT the cleanup result.
+    assert "ERASE PREPARE" in str(exc_info.value)
+
+
+def test_sat_secure_erase_does_not_run_cleanup_on_success(monkeypatch) -> None:
+    """Guardrail: on a fully-successful erase (SET PASSWORD → PREPARE →
+    ERASE UNIT all succeed), we must NOT issue DISABLE PASSWORD. The
+    ERASE UNIT itself clears the password as part of its operation;
+    adding an extra DISABLE would be wasted round-trip and could error
+    on some drive firmware."""
+    call_log: list[int] = []
+
+    def fake_run(argv, *, check=False, timeout=None, owner=None):
+        opcode = int(argv[-2], 16)
+        call_log.append(opcode)
+        return ProcessResult(argv=list(argv), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sat_passthru, "run", fake_run)
+    sat_passthru.sat_secure_erase("/dev/sdfake", timeout_s=60)
+
+    assert sat_passthru.ATA_SECURITY_DISABLE_PASSWORD not in call_log, (
+        "DISABLE PASSWORD must not fire on successful erase — "
+        f"calls were: {[hex(c) for c in call_log]}"
+    )
+
+
+def test_sat_secure_erase_cleanup_failure_does_not_mask_original_error(monkeypatch) -> None:
+    """If both the main command AND the cleanup DISABLE PASSWORD fail,
+    the caller should see the ORIGINAL error (which is what the
+    operator needs to diagnose), not the cleanup error (secondary)."""
+    def fake_run(argv, *, check=False, timeout=None, owner=None):
+        opcode = int(argv[-2], 16)
+        if opcode == sat_passthru.ATA_SECURITY_SET_PASSWORD:
+            return ProcessResult(argv=list(argv), returncode=0, stdout="", stderr="")
+        # PREPARE fails with distinctive marker
+        if opcode == sat_passthru.ATA_SECURITY_ERASE_PREPARE:
+            return ProcessResult(
+                argv=list(argv), returncode=2, stdout="", stderr="ORIGINAL_ERROR_MARKER"
+            )
+        # DISABLE also fails, with different marker
+        if opcode == sat_passthru.ATA_SECURITY_DISABLE_PASSWORD:
+            return ProcessResult(
+                argv=list(argv), returncode=2, stdout="", stderr="CLEANUP_ERROR_MARKER"
+            )
+        return ProcessResult(argv=list(argv), returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sat_passthru, "run", fake_run)
+
+    with pytest.raises(sat_passthru.SatPassthruError) as exc_info:
+        sat_passthru.sat_secure_erase("/dev/sdfake", timeout_s=60)
+
+    msg = str(exc_info.value)
+    assert "ORIGINAL_ERROR_MARKER" in msg, "original failure must propagate"
+    assert "CLEANUP_ERROR_MARKER" not in msg, "cleanup error must not mask original"
+
+
 def test_sat_secure_erase_temp_file_cleaned_up(monkeypatch, tmp_path) -> None:
     """The password-bearing temp file MUST be unlinked after the
     sg_raw call returns, even on failure. Leaving secrets in /tmp
