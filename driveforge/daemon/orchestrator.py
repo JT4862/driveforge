@@ -568,58 +568,28 @@ class Orchestrator:
             return
 
         if effective == Transport.SATA:
-            # Check the security block of hdparm -I. hdparm -I uses
-            # HDIO_GET_IDENTITY which still works on modern kernels
-            # (it's the legacy task ioctl that hdparm --security-* used
-            # to issue that's gone). For the actual unlock + disable we
-            # go through SAT passthrough since v0.3.0; identify-read
-            # stays on hdparm.
-            result = process.run(["hdparm", "-I", drive.device_path], timeout=10)
-            out = (result.stdout or "").lower() if result.ok else ""
-            is_frozen = "\tfrozen" in out and "not\tfrozen" not in out
-            is_locked = "\tlocked" in out and "not\tlocked" not in out
-
-            if is_frozen:
-                self._log(
-                    serial,
-                    "recovery: drive security is FROZEN (BIOS/OS froze it at boot) — "
-                    "cannot unlock via software. Power-cycle required with a BIOS "
-                    "that doesn't issue SECURITY FREEZE LOCK.",
+            # v0.5.0+: delegate to the shared `ensure_clean_security_state`
+            # primitive. Same probe + unlock + disable flow that the
+            # secure_erase pre-flight uses on every run; keeping the
+            # logic in one place means future edits don't drift between
+            # recovery and pre-flight. The preflight primitive raises
+            # EraseError on unrecoverable states (frozen, unknown
+            # password) with user-facing messages; we re-raise those as
+            # RuntimeError so the recovery caller's except block handles
+            # them the same way it handles SAS recovery failures.
+            self._log(
+                serial,
+                "recovery: running shared preflight to clean security state "
+                "(unlock + disable if needed)",
+            )
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(
+                    None, erase.ensure_clean_security_state, drive,
                 )
-                raise RuntimeError("SATA security is frozen; cannot recover via software")
-
-            if is_locked:
-                from driveforge.core import sat_passthru
-                self._log(
-                    serial,
-                    "recovery: drive security-locked; attempting unlock via SAT passthrough",
-                )
-                try:
-                    sat_passthru.security_unlock(drive.device_path, owner=serial)
-                except sat_passthru.SatPassthruError as exc:
-                    raise RuntimeError(f"SAT SECURITY UNLOCK failed: {exc}") from exc
-                self._log(serial, "recovery: security-unlock succeeded")
-                # Clear the ATA security password so the next erase starts fresh.
-                # Non-fatal if it fails — pipeline will SET its own password
-                # at next erase, which on a still-locked drive would fail
-                # explicitly with a clear error rather than corrupting state.
-                try:
-                    sat_passthru.security_disable_password(drive.device_path, owner=serial)
-                    self._log(
-                        serial,
-                        "recovery: security-disable succeeded; drive is fully released",
-                    )
-                except sat_passthru.SatPassthruError as exc:
-                    self._log(
-                        serial,
-                        f"recovery: security-disable failed (non-fatal): {exc}",
-                    )
-                return
-
-            # Not locked, not frozen — drive's security state was never entered
-            # (pull happened before security-set-pass succeeded) or the drive
-            # self-cleared on power-cycle. Either way, nothing to do.
-            self._log(serial, "recovery: drive not locked; fresh pipeline will re-erase")
+            except erase.EraseError as exc:
+                raise RuntimeError(str(exc)) from exc
+            self._log(serial, "recovery: drive is in CLEAN security state; fresh pipeline will re-erase")
             return
 
         self._log(serial, f"recovery: unknown transport {effective}; skipping drive-state repair")
@@ -997,6 +967,26 @@ class Orchestrator:
             # boot drive or adapter, not a test target.
             raise PipelineFailure("secure_erase", "refusing to erase USB-transport drive")
         serial = drive.serial
+
+        # v0.5.0 pre-flight: ensure the drive is in a clean security state
+        # before we start. Self-heals drives still enabled/locked from a
+        # previous interrupted run; raises a clear user-facing EraseError
+        # on genuinely unrecoverable states (BIOS-frozen, unknown user-set
+        # password). No-op on SAS/NVMe.
+        self.state.active_sublabel[serial] = "preflight: checking security state"
+        self._log(serial, "secure_erase preflight: probing drive security state")
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, erase.ensure_clean_security_state, drive
+            )
+        except erase.EraseError as exc:
+            # Surface the preflight error as a pipeline failure with a
+            # distinctive phase label so the failed-card shows what
+            # actually blocked the erase vs. an erase that got partway in.
+            raise PipelineFailure("secure_erase", f"preflight: {exc}") from exc
+        self._log(serial, "secure_erase preflight: drive in CLEAN state; proceeding")
+
         # Surface the specific erase mechanism on the dashboard card so the
         # operator can see at a glance why some drives' activity LEDs blink
         # (SAS `sg_format` issues per-sector SCSI commands → HBA sees traffic
@@ -1004,7 +994,7 @@ class Orchestrator:
         # take a single ATA command and let the drive firmware handle the
         # overwrite internally → no link-level traffic → LED idle).
         mechanism = {
-            Transport.SATA: "hdparm --security-erase",
+            Transport.SATA: "SAT passthrough SECURITY ERASE UNIT",
             Transport.SAS: "sg_format --format",
             Transport.NVME: "nvme format -s 1",
         }.get(drive.transport, "secure erase")

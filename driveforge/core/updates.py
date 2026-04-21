@@ -186,6 +186,110 @@ def update_command() -> str:
 UPDATE_LOG_PATH = "/var/log/driveforge-update.log"
 UPDATE_SERVICE = "driveforge-update.service"
 
+# v0.5.0+: explicit markers that driveforge-update emits at known
+# transition points. Parsing these (rather than relying on systemctl
+# exit codes, which only tell us "unit finished") lets the dashboard
+# distinguish "running" / "succeeded" / "failed with reason" without
+# ambiguity — even across daemon restarts that may have interrupted
+# the poll loop.
+UPDATE_MARKER_START = "=== DRIVEFORGE_UPDATE_START ==="
+UPDATE_MARKER_SUCCESS = "=== DRIVEFORGE_UPDATE_SUCCESS ==="
+UPDATE_MARKER_FAILED_PREFIX = "=== DRIVEFORGE_UPDATE_FAILED:"
+
+
+class UpdateState:
+    """Unambiguous update state for the dashboard. Derived from BOTH
+    the systemd unit's activity AND the explicit markers in the log
+    file — either signal alone can be misleading, but the combination
+    tells the full story.
+
+    States:
+
+      `idle`       — no START marker in the log, unit inactive.
+                     Either the update flow has never been run on
+                     this host, or the log was rotated since the last
+                     run. Dashboard renders nothing.
+
+      `running`    — START marker present, no SUCCESS/FAILED marker
+                     yet. Unit is likely still `active` or
+                     `activating`; dashboard shows "Update in
+                     progress" with live log tail.
+
+      `succeeded`  — SUCCESS marker present. Unit may be
+                     `inactive` (oneshot complete). Dashboard shows
+                     "Update complete" and the daemon should have
+                     restarted under the new version.
+
+      `failed`     — FAILED marker present (or unit failed without
+                     ever emitting SUCCESS after START). Dashboard
+                     shows "Update failed" + the reason string from
+                     the marker, plus the log tail for operator
+                     diagnosis.
+    """
+
+    IDLE = "idle"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+def classify_update_state(log_text: str, service_state: str) -> tuple[str, str | None]:
+    """Derive the unambiguous update state from the log tail + the
+    systemd unit's activity state.
+
+    Returns (state, detail). `detail` is the reason string for FAILED
+    state, None otherwise.
+
+    Logic (first match wins):
+      - If FAILED marker present → FAILED (with reason)
+      - If SUCCESS marker present (and no later FAILED) → SUCCEEDED
+      - If START marker present (no SUCCESS/FAILED yet):
+          - unit `active` / `activating` → RUNNING
+          - unit `failed` → FAILED (unit died before emitting marker)
+          - unit `inactive` → FAILED (unit finished without success marker)
+      - No START marker → IDLE
+    """
+    lines = (log_text or "").splitlines()
+
+    # Scan in reverse so the LATEST marker wins — a run that failed,
+    # then got retried and succeeded, should report SUCCEEDED.
+    latest_marker: str | None = None
+    latest_failed_detail: str | None = None
+    for line in reversed(lines):
+        if line.startswith(UPDATE_MARKER_SUCCESS):
+            latest_marker = "success"
+            break
+        if line.startswith(UPDATE_MARKER_FAILED_PREFIX):
+            latest_marker = "failed"
+            # Extract detail between "FAILED: " and " ==="
+            detail = line[len(UPDATE_MARKER_FAILED_PREFIX):].rstrip("= ").strip()
+            latest_failed_detail = detail or None
+            break
+        if line.startswith(UPDATE_MARKER_START):
+            latest_marker = "start"
+            break
+
+    if latest_marker == "success":
+        return (UpdateState.SUCCEEDED, None)
+    if latest_marker == "failed":
+        return (UpdateState.FAILED, latest_failed_detail)
+    if latest_marker == "start":
+        # START with no terminal marker yet. Lean on unit state.
+        if service_state in ("active", "activating"):
+            return (UpdateState.RUNNING, None)
+        if service_state == "failed":
+            return (UpdateState.FAILED, "systemd unit failed before emitting completion marker")
+        if service_state == "inactive":
+            # Unit finished without either success or failed marker.
+            # Most likely: script crashed hard (SIGKILL, OOM, power glitch
+            # mid-run) before reaching `mark_success` or the trap.
+            return (UpdateState.FAILED, "update process exited without emitting a completion marker")
+        # `deactivating` / `unknown` — assume still in-flight
+        return (UpdateState.RUNNING, None)
+
+    # No marker at all → IDLE
+    return (UpdateState.IDLE, None)
+
 
 def trigger_in_app_update() -> tuple[bool, str]:
     """Fire `sudo systemctl start driveforge-update.service` to kick off

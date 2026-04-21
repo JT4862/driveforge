@@ -961,28 +961,44 @@ async def install_update(request: Request) -> RedirectResponse:
 @router.get("/_partials/update-log", response_class=HTMLResponse)
 def update_log_partial(request: Request) -> HTMLResponse:
     """HTMX-polled live tail of /var/log/driveforge-update.log + the
-    systemd unit's current activity state. Drives the live progress
-    panel that appears after clicking Install update.
+    unambiguous update-state classification (v0.5.0+).
 
-    The HTMX wrapper polls every 2 s while the unit is `active` /
-    `activating` and stops polling once we observe `inactive` or
-    `failed` — at which point the daemon may also be mid-restart, so
-    the page-level reconnect logic takes over.
+    Combines two signals:
+      - `systemctl is-active driveforge-update.service` — tells us
+        whether the systemd unit is currently running
+      - Explicit markers in the log (`=== DRIVEFORGE_UPDATE_START ===`
+        / `_SUCCESS` / `_FAILED: <reason>`) emitted by the update
+        script itself at known transition points
+
+    Neither signal alone is sufficient: the unit can be `inactive`
+    because it succeeded OR because it died silently without cleanup;
+    the log can lack a SUCCESS marker because the update really
+    failed OR because it's still in progress. Combined, the
+    classification is unambiguous.
+
+    HTMX only polls while state is `running`. On `succeeded` or
+    `failed` the partial renders without `hx-trigger`, which stops
+    the polling loop — at which point the page-level JS watches
+    /api/health for the daemon coming back under the new version
+    (succeeded) or gives the operator a clear failure banner with
+    the reason + log tail (failed).
     """
     from driveforge.core import updates as updates_mod
 
     log = updates_mod.update_log_tail(max_lines=400)
-    state = updates_mod.update_service_state()
-    # `inactive` after a successful run; the next render of /settings
-    # will show the new version in the footer if the daemon restarted
-    # cleanly.
-    is_running = state in ("active", "activating")
+    service_state = updates_mod.update_service_state()
+    update_state, failure_detail = updates_mod.classify_update_state(
+        log, service_state,
+    )
+    is_running = update_state == updates_mod.UpdateState.RUNNING
     return templates.TemplateResponse(
         request,
         "_update_log.html",
         {
             "log": log,
-            "service_state": state,
+            "service_state": service_state,
+            "update_state": update_state,
+            "failure_detail": failure_detail,
             "is_running": is_running,
         },
     )

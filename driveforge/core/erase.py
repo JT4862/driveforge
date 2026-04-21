@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from enum import Enum
 
 from driveforge.core import sat_passthru
 from driveforge.core.drive import Drive, Transport
@@ -83,6 +84,178 @@ def estimate_erase_seconds(drive: Drive) -> int | None:
         seconds = int((gb / 100) * 20 * 60)
         return max(5 * 60, min(seconds, 6 * 3600))
     return None
+
+
+class SataSecurityState(str, Enum):
+    """Possible SATA security states visible via `hdparm -I`."""
+
+    CLEAN = "clean"       # security not enabled — fresh drive, ready to erase
+    ENABLED = "enabled"   # password set but drive is not locked — can DISABLE with right password
+    LOCKED = "locked"     # password set AND drive locked (post-power-cycle state)
+    FROZEN = "frozen"     # BIOS issued SECURITY FREEZE LOCK; cannot unlock via software
+    UNKNOWN = "unknown"   # hdparm -I failed or output was unparseable
+
+
+def _parse_sata_security_state(hdparm_i_output: str) -> SataSecurityState:
+    """Extract the drive's security state from `hdparm -I` stdout.
+
+    hdparm prints a `Security:` stanza with lines like:
+        	not	enabled
+        	not	locked
+        	not	frozen
+    (tab-separated). Parsing via substring match is brittle because
+    'not enabled' and 'enabled' both contain the word 'enabled'; we use
+    the tab prefix as a cheap but reliable anchor.
+    """
+    out = hdparm_i_output.lower()
+    is_frozen = "\tfrozen" in out and "not\tfrozen" not in out
+    is_locked = "\tlocked" in out and "not\tlocked" not in out
+    is_enabled = "\tenabled" in out and "not\tenabled" not in out
+
+    # Order matters: frozen beats locked beats enabled. A frozen drive
+    # will typically also report "enabled" in hdparm's output; what
+    # matters operationally is that we can't do anything security-side
+    # until the BIOS-induced freeze is cleared.
+    if is_frozen:
+        return SataSecurityState.FROZEN
+    if is_locked:
+        return SataSecurityState.LOCKED
+    if is_enabled:
+        return SataSecurityState.ENABLED
+    return SataSecurityState.CLEAN
+
+
+def _probe_sata_security_state(device: str) -> SataSecurityState:
+    """Run `hdparm -I <device>` and return the parsed security state.
+
+    hdparm -I is read-only — it uses HDIO_GET_IDENTITY which still
+    works on modern kernels (it's the HDIO_DRIVE_TASKFILE ioctl for
+    destructive commands that was removed). So we keep using hdparm
+    for this probe even though the actual erase went through SAT
+    passthrough in v0.3.0+.
+    """
+    result = run(["hdparm", "-I", device], timeout=10)
+    if not result.ok:
+        logger.warning(
+            "hdparm -I failed on %s (rc=%d): %s",
+            device, result.returncode, (result.stderr or "").strip(),
+        )
+        return SataSecurityState.UNKNOWN
+    return _parse_sata_security_state(result.stdout or "")
+
+
+def ensure_clean_security_state(drive: Drive) -> None:
+    """Self-healing pre-flight for the SATA secure_erase phase (v0.5.0+).
+
+    Before kicking off SET PASSWORD → PREPARE → ERASE UNIT, verify the
+    drive is in a sane security state. Auto-resolve what we can
+    (drives still enabled/locked from a previous interrupted run —
+    disable the password, start clean), refuse with a clear user-
+    facing explanation on what we can't (frozen BIOS, unknown
+    password set by another tool). Net effect: no code path left
+    where the operator has to SSH in and hand-run hdparm.
+
+    No-op for SAS and NVMe — they don't have ATA security state.
+    SAS drives behind a SAS HBA sometimes report as "sas" via lsblk
+    but speak ATA; we refine via smartctl first so we run the right
+    pre-flight.
+
+    Raises EraseError on any genuinely-unrecoverable state. The error
+    message is written for the operator, not the developer — it
+    includes what state the drive is in, why we can't handle it
+    automatically, and what they should do next.
+    """
+    effective = drive.transport
+    if effective == Transport.SAS:
+        from driveforge.core.drive import detect_true_transport
+        refined = detect_true_transport(drive.device_path)
+        if refined in (Transport.SATA, Transport.SAS, Transport.NVME):
+            effective = refined
+
+    if effective != Transport.SATA:
+        # SAS and NVMe have no ATA security state — no pre-flight needed.
+        return
+
+    state = _probe_sata_security_state(drive.device_path)
+    logger.info(
+        "secure_erase preflight: %s (%s) reports security state = %s",
+        drive.device_path, drive.serial, state.value,
+    )
+
+    if state == SataSecurityState.CLEAN:
+        return  # Nothing to do.
+
+    if state == SataSecurityState.UNKNOWN:
+        raise EraseError(
+            f"preflight: could not read security state from {drive.device_path} "
+            f"(hdparm -I failed). Drive may be unresponsive, cabling may be "
+            f"loose, or the HBA may have lost the drive. Check "
+            f"`dmesg | tail` and `lsblk` for the drive's current state."
+        )
+
+    if state == SataSecurityState.FROZEN:
+        raise EraseError(
+            f"preflight: drive {drive.device_path} is in FROZEN security state. "
+            f"The system BIOS issued SECURITY FREEZE LOCK during POST, which "
+            f"cannot be undone via software. Options: (1) reboot into a BIOS "
+            f"that has 'security freeze lock' disabled, (2) on some chassis, "
+            f"hot-remove + re-insert the drive (power cycles just the drive, "
+            f"clearing the freeze), (3) replace the drive."
+        )
+
+    # state is LOCKED or ENABLED. Both mean "our previous run (or someone
+    # else) set a security password." Try to clear it with our known
+    # throwaway password; surface a clear error if that fails (drive has
+    # a user-set password we don't know).
+
+    if state == SataSecurityState.LOCKED:
+        logger.info(
+            "preflight: attempting SAT unlock on %s with default password",
+            drive.device_path,
+        )
+        try:
+            sat_passthru.security_unlock(
+                drive.device_path, owner=drive.serial,
+            )
+        except sat_passthru.SatPassthruError as exc:
+            raise EraseError(
+                f"preflight: drive {drive.device_path} is security-locked with "
+                f"an unknown password. DriveForge's default password "
+                f"('{sat_passthru.DEFAULT_PASSWORD}') did not unlock it, which "
+                f"means another tool set this password — DriveForge cannot "
+                f"erase drives with passwords it doesn't know. Options: "
+                f"(1) boot the drive on a system that knows the password and "
+                f"issue SECURITY DISABLE there, (2) if the drive supports "
+                f"TCG Opal/SED, issue a PSID-based factory reset with the "
+                f"label PSID (not yet supported in DriveForge), (3) replace "
+                f"the drive. Underlying error: {exc}"
+            ) from exc
+        # Unlock succeeded → drive is now enabled-but-not-locked. Fall through.
+        logger.info("preflight: SAT unlock succeeded on %s", drive.device_path)
+
+    # state is ENABLED (either originally, or after unlock).
+    logger.info(
+        "preflight: attempting SAT disable-password on %s with default password",
+        drive.device_path,
+    )
+    try:
+        sat_passthru.security_disable_password(
+            drive.device_path, owner=drive.serial,
+        )
+    except sat_passthru.SatPassthruError as exc:
+        raise EraseError(
+            f"preflight: drive {drive.device_path} has security enabled but "
+            f"DriveForge could not disable it with its default password "
+            f"('{sat_passthru.DEFAULT_PASSWORD}'). This typically means the "
+            f"password was set by another tool. See the locked-state recovery "
+            f"options in the docs (/hardware/known-issues). Underlying "
+            f"error: {exc}"
+        ) from exc
+
+    logger.info(
+        "preflight: %s is now in CLEAN security state, ready for fresh erase",
+        drive.device_path,
+    )
 
 
 def _sata_secure_erase(
