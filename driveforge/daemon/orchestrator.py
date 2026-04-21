@@ -1166,18 +1166,16 @@ class Orchestrator:
             session.commit()
 
     async def _capture_smart(self, run_id: int, drive: Drive, *, kind: str) -> smart.SmartSnapshot:
-        # v0.6.6+: offload the blocking smartctl subprocess to the
-        # drive-command executor instead of running it synchronously
-        # in the event loop. A smartctl that goes D-state (drive
-        # unresponsive) previously blocked the entire daemon event
-        # loop — all pipelines stalled, dashboard unresponsive.
-        loop = asyncio.get_event_loop()
+        # v0.6.9+: native async subprocess via smart.snapshot_async
+        # (which uses asyncio.create_subprocess_exec under the hood).
+        # Replaces the v0.6.6 `run_in_executor(drive_command_executor,
+        # smart.snapshot, ...)` dance — same D-state isolation (a
+        # hung smartctl no longer blocks the event loop) without
+        # burning a thread per call. Thread-pool path remains as a
+        # safety net elsewhere; this one of the hottest sites (two
+        # calls per pipeline run) and the first to migrate.
         try:
-            snap = await loop.run_in_executor(
-                self.state.drive_command_executor,
-                smart.snapshot,
-                drive.device_path,
-            )
+            snap = await smart.snapshot_async(drive.device_path)
         except Exception as exc:  # noqa: BLE001
             raise PipelineFailure(f"smart_{kind}", f"smartctl failed: {exc}") from exc
         with self.state.session_factory() as session:
@@ -1201,7 +1199,11 @@ class Orchestrator:
                     run.pre_reallocated_sectors = snap.reallocated_sectors
                     run.pre_current_pending_sector = snap.current_pending_sector
             session.commit()
-        self._record_telemetry(
+        # v0.6.9+: _record_telemetry is async now (ipmitool call goes
+        # through read_chassis_power_async). Pre-v0.6.9 this was a
+        # direct sync call from async context — the last stragger
+        # sync-in-async site the v0.6.6 audit missed.
+        await self._record_telemetry(
             run_id,
             drive.serial,
             phase=f"smart_{kind}",
@@ -1437,7 +1439,8 @@ class Orchestrator:
             # unsafe (wear leveling may leave stale NAND pages) so we
             # keep the original failure for them.
             is_hdd = drive.rotation_rate and drive.rotation_rate > 0
-            if is_hdd and erase.is_libata_freeze_pattern(str(exc)):
+            is_libata_freeze = erase.is_libata_freeze_pattern(str(exc))
+            if is_hdd and is_libata_freeze:
                 self._log(
                     serial,
                     "secure_erase unavailable (libata freeze detected) — HDD "
@@ -1452,6 +1455,35 @@ class Orchestrator:
                 # Return normally — the pipeline continues to the
                 # badblocks phase which will do the actual sanitization.
                 return
+
+            # v0.6.9+: SSDs hitting the same libata-freeze pattern CAN'T
+            # safely fall back to badblocks (wear leveling + NIST 800-88
+            # flash exclusion). Register the drive for operator-facing
+            # remediation: dashboard renders a structured checklist of
+            # bypass paths (USB-SATA enclosure, Dell Lifecycle, vendor
+            # tools, PSID reset, or destroy). Pipeline still fails with
+            # the decoded message — nothing auto-runs — but the operator
+            # gets an actionable panel instead of raw prose.
+            if not is_hdd and is_libata_freeze:
+                from driveforge.core import frozen_remediation
+                rem_state = frozen_remediation.register_freeze(
+                    self.state.frozen_remediation,
+                    serial=serial,
+                    drive_model=drive.model or "unknown",
+                )
+                if rem_state.retry_count == 0:
+                    self._log(
+                        serial,
+                        "SSD frozen by libata — structured remediation panel "
+                        "available on drive detail page (USB enclosure, "
+                        "Lifecycle Controller, vendor ISO, PSID reset, destroy)",
+                    )
+                else:
+                    self._log(
+                        serial,
+                        f"SSD frozen by libata AGAIN after retry #{rem_state.retry_count} "
+                        f"— remediation panel escalated to destruction-recommended tone",
+                    )
 
             failure_msg = f"{decoded.cause} — {decoded.next_step}"
             self._log(serial, f"secure_erase failed: {decoded.cause}")
@@ -1718,33 +1750,25 @@ class Orchestrator:
         except asyncio.CancelledError:
             return
 
-        # v0.6.6+: capture the event loop once; reuse across ticks.
-        # run_in_executor offloads smartctl + ipmitool subprocess calls
-        # to the drive-command executor. Pre-v0.6.6 these ran
-        # synchronously inside the sampler coroutine, and when smartctl
-        # went D-state (drive unresponsive) the event loop was blocked
-        # for the duration — every pipeline and every HTTP request
-        # stalled. The "dashboard locks up when a drive misbehaves"
-        # class of symptoms JT saw on his R720 on 2026-04-21 traced
-        # here.
-        loop = asyncio.get_event_loop()
+        # v0.6.9+: native-async subprocess path. Calls smart.snapshot_async
+        # + telemetry.read_chassis_power_async directly instead of
+        # offloading their sync twins to the drive-command executor.
+        # Same D-state isolation (asyncio.wait_for with timeout cancels
+        # the child process cleanly even when it's Ds waiting on SG
+        # I/O — the kernel task can't be SIGKILL'd but the asyncio
+        # child handle can be released) without burning a thread per
+        # tick. Hottest site in the codebase: one tick per 30 s per
+        # active pipeline = dozens of subprocess spawns per minute
+        # under realistic batch load.
         while True:
             try:
                 phase = self.state.active_phase.get(drive.serial, "unknown")
-                temp = await loop.run_in_executor(
-                    self.state.drive_command_executor,
-                    self._sample_drive_temp_quietly,
-                    drive,
-                )
-                await loop.run_in_executor(
-                    self.state.drive_command_executor,
-                    functools.partial(
-                        self._record_telemetry,
-                        run_id,
-                        drive.serial,
-                        phase=phase,
-                        drive_temp_c=temp,
-                    ),
+                temp = await self._sample_drive_temp_quietly_async(drive)
+                await self._record_telemetry(
+                    run_id,
+                    drive.serial,
+                    phase=phase,
+                    drive_temp_c=temp,
                 )
             except asyncio.CancelledError:
                 # Propagate \u2014 the finally block in _execute_pipeline
@@ -1765,12 +1789,15 @@ class Orchestrator:
                 return
 
     def _sample_drive_temp_quietly(self, drive: Drive) -> int | None:
-        """Fetch current drive temperature for a telemetry tick.
+        """Fetch current drive temperature for a telemetry tick (sync).
 
         Falls back to None on smartctl errors / timeouts \u2014 telemetry is
         best-effort, a temperature gap is a smaller sin than crashing
         the sampler. Heavy smartctl reads are acceptable at 30 s
         cadence; badblocks' own I/O cost dwarfs a periodic SMART query.
+
+        Kept for sync callers (CLI, tests). Async code uses
+        `_sample_drive_temp_quietly_async` (v0.6.9+).
         """
         try:
             snap = smart.snapshot(drive.device_path, timeout=10.0)
@@ -1778,7 +1805,18 @@ class Orchestrator:
             return None
         return snap.temperature_c
 
-    def _record_telemetry(
+    async def _sample_drive_temp_quietly_async(self, drive: Drive) -> int | None:
+        """v0.6.9+: async twin of `_sample_drive_temp_quietly`. Preferred
+        from inside the event loop. Uses smart.snapshot_async, so
+        smartctl's subprocess is owned by asyncio rather than a
+        run_in_executor thread."""
+        try:
+            snap = await smart.snapshot_async(drive.device_path, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            return None
+        return snap.temperature_c
+
+    async def _record_telemetry(
         self,
         run_id: int,
         drive_serial: str,
@@ -1786,11 +1824,22 @@ class Orchestrator:
         phase: str,
         drive_temp_c: int | None,
     ) -> None:
-        # Surface the live temp on the dashboard in addition to persisting it.
-        # Cleared when the drive leaves active_phase (in _run_drive's finally).
+        """v0.6.9+: now async. Previous sync body blocked the event
+        loop on `telemetry.read_chassis_power` (ipmitool subprocess)
+        every time `_capture_smart` called it directly — one of the
+        sync-in-async sites v0.6.6 partially fixed (the sampler
+        path) but left broken in the _capture_smart direct-call
+        path. Converting the whole method to async closes the leak
+        + lets the sampler drop its run_in_executor wrap.
+
+        Surface the live temp on the dashboard, then fetch chassis
+        power via the async ipmitool twin, then persist. Best-effort
+        throughout: any exception inside this path must propagate so
+        the caller's except handler logs it — but nothing in here
+        should raise under normal operation."""
         if drive_temp_c is not None:
             self.state.active_drive_temp[drive_serial] = drive_temp_c
-        chassis_w = telemetry.read_chassis_power()
+        chassis_w = await telemetry.read_chassis_power_async()
         with self.state.session_factory() as session:
             session.add(
                 m.TelemetrySample(
@@ -1863,6 +1912,22 @@ class Orchestrator:
                 run.grade = result.grade.value
                 run.triage_result = None
             session.commit()
+
+            # v0.6.9+: a successful pipeline completion clears any
+            # frozen-SSD remediation entry for this serial. If the
+            # operator's remediation (USB enclosure round-trip, etc.)
+            # cleared the freeze and the retry pipeline graded the
+            # drive, we don't want the remediation panel to linger.
+            # No-op if the serial was never registered.
+            try:
+                from driveforge.core import frozen_remediation
+                frozen_remediation.clear(self.state.frozen_remediation, drive.serial)
+            except Exception:  # noqa: BLE001
+                # Defensive: never fail a finalize on a housekeeping
+                # miss. The next orchestrator cycle will retry.
+                logger.exception(
+                    "frozen_remediation.clear failed for %s (non-fatal)", drive.serial
+                )
 
             # v0.6.4+: auto-print the cert label now that the run is
             # finalized + graded. Only fires on full pipelines (not

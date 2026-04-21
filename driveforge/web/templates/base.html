@@ -45,6 +45,45 @@
     </a>
     {% endif %}
   </header>
+  {# v0.6.9+ udev-pipeline stall banner. Only renders when the
+     background `_udev_health_loop` has flagged the pipeline as STALLED
+     (settle timed out AND at least one sysfs block device is orphaned
+     — drive visible to kernel but udev never finished discovering it).
+     Button POSTs to /settings/restart-udev which triggers a polkit-
+     authorized `systemctl restart systemd-udevd`. Safe w/ active
+     pipelines — restarts just give udev a fresh worker pool;
+     daemon-owned drive subprocesses are untouched. #}
+  {% set __udev = udev_health() %}
+  {% if __udev and __udev.needs_operator_action %}
+  <div class="udev-stall-banner" role="alert">
+    <span class="udev-stall-dot" aria-hidden="true"></span>
+    <div class="udev-stall-text">
+      <strong>Drive discovery is stuck.</strong>
+      <span>{{ __udev.note }}</span>
+    </div>
+    <form method="post" action="/settings/restart-udev" style="margin:0;">
+      <button type="submit" class="btn udev-stall-button">Restart udev</button>
+    </form>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('udev_restart') == 'ok' %}
+  <div class="udev-stall-banner udev-stall-banner--ok" role="status">
+    <span class="udev-stall-dot udev-stall-dot--ok" aria-hidden="true"></span>
+    <div class="udev-stall-text">
+      udev restart requested — new insertions should enumerate within
+      a few seconds. Banner will clear on the next health probe.
+    </div>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('udev_restart_error') %}
+  <div class="udev-stall-banner udev-stall-banner--err" role="alert">
+    <span class="udev-stall-dot" aria-hidden="true"></span>
+    <div class="udev-stall-text">
+      <strong>Restart failed:</strong>
+      <span>{{ request.query_params.get('udev_restart_error') }}</span>
+    </div>
+  </div>
+  {% endif %}
   {% endblock %}
   <main class="content">
     {% block content %}{% endblock %}

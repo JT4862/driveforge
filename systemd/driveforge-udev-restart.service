@@ -1,0 +1,42 @@
+[Unit]
+Description=DriveForge on-demand systemd-udevd restart
+Documentation=file:///opt/driveforge-src/driveforge/core/udev_health.py
+# Unlike the update unit, this one does not need the network — it's
+# purely local. But we do want to be sure systemd is fully up (we're
+# calling systemctl from within the unit).
+After=basic.target
+
+[Service]
+# Oneshot. We intentionally DON'T use `Requires=systemd-udevd.service`
+# — we WANT the daemon to come back whether or not it was running.
+# (systemctl restart on a stopped unit starts it; that's fine.)
+Type=oneshot
+# Why this sequence:
+#   1. `daemon-reexec` on systemd itself is NOT needed; we only touch
+#      one unit.
+#   2. `restart systemd-udevd` replaces the main udevd process AND
+#      respawns the worker pool. D-state workers that are truly stuck
+#      on kernel syscalls CANNOT be killed — but when the main daemon
+#      exits it stops feeding them work, and the kernel eventually
+#      reaps them when the underlying I/O completes or the drive is
+#      pulled. The NEW pool starts fresh and processes any events
+#      queued after the restart.
+#   3. `udevadm trigger --action=add --subsystem-match=block` replays
+#      add events for every block device currently in sysfs. This
+#      forces the NEW udev pool to run its rules against drives that
+#      were discovered-but-not-finalized during the stall — the drives
+#      DriveForge was blind to. Scoped to `block` to avoid replaying
+#      events for every USB / input / tty device on the system.
+ExecStart=/bin/systemctl restart systemd-udevd.service
+ExecStartPost=/bin/udevadm trigger --action=add --subsystem-match=block
+RemainAfterExit=no
+# Short timeout — the actual restart is seconds. If it takes longer
+# than this, something is very broken and we want the operator to
+# know via a failed systemctl status rather than a hang.
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Not WantedBy anything — strictly on-demand via the daemon's polkit
+# trigger path (see driveforge.core.udev_health.trigger_udev_restart).

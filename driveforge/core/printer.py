@@ -244,30 +244,35 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     Two layouts, picked by `data.grade`:
 
     Pass tier (A/B/C) — emphasis: "this drive is certified, here's why":
-      +--------------------------------------------+
-      | DriveForge Certified                 [A*]  |
-      |---------------------------------------     |
-      | Model: Seagate ST3000DM001                 |
-      | Serial: Z1F248SL · 3.0 TB       [QR code]  |
-      | Tested: 2026-04-21                         |
-      | POH: 45,123 (5.2 y)                        |
-      | Realloc: 0 · Pending: 0 · BB: 0            |
-      | Wipe: NIST 800-88 + 4-pass                 |
-      | Scan QR to verify.                         |
-      +--------------------------------------------+
+      +-----------------------------------------------+
+      | DriveForge Certified                          |
+      |----------------------------------   [A*]      |
+      | Model: Seagate ST3000DM001                    |
+      | Serial: Z1F248SL · 3.0 TB       [QR code]     |
+      | Tested: 2026-04-21                            |
+      | POH: 45,123 (5.2 y)                           |
+      | Realloc: 0 · Pending: 0 · BB: 0               |
+      | Wipe: NIST 800-88 + 4-pass                    |
+      | Scan QR to verify.                            |
+      +-----------------------------------------------+
 
     Fail tier (F) — emphasis: "this drive is bad, here's the reason":
-      +--------------------------------------------+
-      | DriveForge — FAIL                    [F]   |
-      |---------------------------------------     |
-      | Model: Seagate ST3000DM001                 |
-      | Serial: Z1F248SL · 3.0 TB       [QR code]  |
-      | Failed: 2026-04-21                         |
-      | POH: 45,123 (5.2 y)                        |
-      | Reason: 47 reallocated                     |
-      |         (> 40 threshold)                   |
-      | See QR for full report.                    |
-      +--------------------------------------------+
+      +-----------------------------------------------+
+      | DriveForge — FAIL                             |
+      |----------------------------------    [F]      |
+      | Model: Seagate ST3000DM001                    |
+      | Serial: Z1F248SL · 3.0 TB       [QR code]     |
+      | Failed: 2026-04-21                            |
+      | POH: 45,123 (5.2 y)                           |
+      | Reason: 47 reallocated sectors                |
+      |         exceeded threshold of 40              |
+      | See QR for full report.                       |
+      +-----------------------------------------------+
+
+    v0.6.9+: grade glyph + QR are stacked in a single right-column
+    block so body text gets the full label width minus ~130px for
+    the block. Pre-v0.6.9 had the QR mid-label which forced text
+    wrapping to 24 chars.
 
     Pipeline-error drives (grade="error") do NOT print labels — the
     web layer refuses the print before this function is called. If
@@ -301,7 +306,11 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
 
     font_title = _load_font(34)
     font_body = _load_font(20)
-    font_grade = _load_font(72)
+    # v0.6.9+: grade glyph shrunk from 72pt → 56pt so it can stack
+    # above the QR in a single ~130px right-column block (see the
+    # QR-layout rework below). 56pt is still the biggest glyph on
+    # the label — the visual anchor function is preserved.
+    font_grade = _load_font(56)
     font_footer = _load_font(14)
 
     padding = 14
@@ -313,11 +322,23 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
         width=2,
     )
 
+    # Right-column geometry (v0.6.9+): grade+QR form a single stacked
+    # block along the right edge. Computed UP FRONT so the body-text
+    # column below can use `right_col_left` as its right-edge budget
+    # for wrap / truncation decisions. Pre-v0.6.9 had the QR mid-label
+    # and the text column was pinched to ~24 chars to avoid overlap;
+    # the stacked block frees the text column to ~36 chars.
+    right_col_w = 130
+    right_col_x = size[0] - padding - right_col_w
+    right_col_left = right_col_x - 12  # 12px gap between text and right col
+
     # Body lines
     body_y = padding + 52
     tested_label = "Failed" if is_fail else "Tested"
     lines: list[str] = [
-        f"Model: {data.model[:28]}",
+        # v0.6.9+: model truncation bumped 28 → 36 chars (extra room
+        # from the QR-layout rework).
+        f"Model: {data.model[:36]}",
         f"Serial: {data.serial} · {data.capacity_tb:.1f} TB",
         f"{tested_label}: {data.tested_date.isoformat()}",
         _format_poh(data.power_on_hours),
@@ -325,20 +346,20 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
 
     if is_fail:
         # Reason line — the whole point of the F label variant.
-        # v0.6.7+: tighter default ("failed grading" without the
-        # redundant "(see report)" — the footer already says that)
-        # + tighter wrap at 24 chars so long reasons fit inside the
-        # left column cleanly without overlapping the QR code.
+        # v0.6.9+: wrap at 32 chars (up from v0.6.7's 24-char limit).
+        # The QR no longer blocks the body column mid-label; the only
+        # rightward constraint now is the right-column block at
+        # x=right_col_left. 32 chars at 20pt fits comfortably.
         reason = data.fail_reason or "failed grading"
-        if len(reason) <= 24:
+        if len(reason) <= 32:
             lines.append(f"Reason: {reason}")
         else:
             # Split at the first space past the midpoint so wrap
             # breaks look natural.
             mid = len(reason) // 2
             split_at = reason.find(" ", mid)
-            if split_at == -1 or split_at > 24:
-                split_at = 24
+            if split_at == -1 or split_at > 32:
+                split_at = 32
             lines.append(f"Reason: {reason[:split_at]}")
             lines.append(f"        {reason[split_at:].strip()}")
     else:
@@ -385,33 +406,41 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
         draw.text((padding, body_y), line, font=font_body, fill="black")
         body_y += 24
 
-    # Right column: QR and the big grade letter.
+    # Right-column block: grade glyph stacked above QR, both
+    # centered within the ~130px right column reserved above.
+    #
+    # v0.6.9 layout rework. Previously the grade lived in the
+    # top-right corner and the QR sat mid-label at padding+420,
+    # which forced body text into a cramped left column (~24-char
+    # wrap). Now grade + QR form a single vertical block along
+    # the right edge; body text gets the full left column.
     grade_text = "F" if is_fail else data.grade.upper()
     grade_suffix = "*" if (data.quick_mode and not is_fail) else ""
     grade_display = grade_text + grade_suffix
     grade_bbox = draw.textbbox((0, 0), grade_display, font=font_grade)
     grade_w = grade_bbox[2] - grade_bbox[0]
-    grade_x = size[0] - grade_w - padding
-    grade_y = padding + 70  # below title separator, vertically centered-ish
+    grade_h = grade_bbox[3] - grade_bbox[1]
+    grade_x = right_col_x + (right_col_w - grade_w) // 2
+    grade_y = padding + 48  # 6px below title separator at padding+42
+    draw.text((grade_x, grade_y), grade_display, font=font_grade, fill="black")
 
-    # QR positioning. v0.6.7+: nudged right by 40px (380 → 420) so
-    # long body lines like "Reason: failed grading (see report)"
-    # don't clip against the QR's left edge. Body text is still
-    # confined to the left column by its ~24-character wrap limit;
-    # the 40px gap is defense-in-depth.
+    # QR directly below the grade, centered within the right column.
+    # Size picks up whatever vertical space is left between the grade
+    # glyph and the footer, capped at right_col_w to avoid spilling
+    # sideways, floored at 96px so phone-camera scanning stays
+    # reliable. DK-1209 (271 px tall) typically lands ~120-130px;
+    # larger rolls (DK-1208) get proportionally bigger.
     qr = qrcode.QRCode(box_size=3, border=1)
     qr.add_data(data.report_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_top = padding + 52
-    qr_x = padding + 420
-    qr_size_cap = size[1] - qr_top - 32
-    qr_size = min(qr_size_cap, grade_x - qr_x - 12, 150)
-    qr_size = max(qr_size, 80)
+    qr_top = grade_y + grade_h + 8
+    qr_bottom_max = size[1] - padding - 24  # leave room for footer text
+    qr_size = min(right_col_w, qr_bottom_max - qr_top)
+    qr_size = max(qr_size, 96)
     qr_img = qr_img.resize((qr_size, qr_size))
+    qr_x = right_col_x + (right_col_w - qr_size) // 2
     img.paste(qr_img, (qr_x, qr_top))
-
-    draw.text((grade_x, grade_y), grade_display, font=font_grade, fill="black")
 
     # Footer — slightly different wording for F labels to reinforce
     # "this is not a certification."

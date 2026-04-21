@@ -7,11 +7,79 @@
   {{ request.query_params.get('msg', '') }}
 </div>
 {% endif %}
+{# v0.6.9+ frozen-SSD remediation flash messages from the retry /
+   mark-unrecoverable routes. Distinct from `flash` above so the two
+   categories don't collide on the same query-param key. #}
+{% set frozen_flash = request.query_params.get('frozen') %}
+{% if frozen_flash == 'retry-started' %}
+<div class="banner ok-banner">Retry started. Watch the pipeline card on the dashboard for progress.</div>
+{% elif frozen_flash == 'retry-queued' %}
+<div class="banner warn-banner">Drive not currently present. Retry will fire on next insert.</div>
+{% elif frozen_flash == 'retry-failed' %}
+<div class="banner warn-banner">Retry failed to start — check daemon logs.</div>
+{% elif frozen_flash == 'marked-unrecoverable' %}
+<div class="banner ok-banner">Drive marked as unrecoverable. Grade F stamped; auto-enroll will skip this serial.</div>
+{% endif %}
 <section class="page-head">
   <a href="/" class="back">&larr; Dashboard</a>
   <h1>{{ drive.model }}</h1>
   <div class="subtitle">SN: {{ drive.serial }} &middot; {{ capacity_tb }} TB &middot; {{ drive.transport|upper }}</div>
 </section>
+
+{# v0.6.9+ frozen-SSD remediation panel. Renders above everything
+   else when the orchestrator registered this drive in
+   state.frozen_remediation. Lists structured bypass paths so the
+   operator doesn't have to parse the v0.6.3 decoder prose out of the
+   error banner.  Hidden entirely on drives without a freeze record. #}
+{% if frozen_remediation_state %}
+<section class="panel frozen-remediation-panel{% if frozen_remediation_state.status.value == 'retried' %} frozen-remediation-panel--escalated{% endif %}">
+  <h2 style="display:flex; align-items:center; gap:12px;">
+    {% if frozen_remediation_state.status.value == 'retried' %}
+      &#9888; Drive refused secure-erase again after retry
+    {% else %}
+      &#9888; Drive frozen by libata — operator action needed
+    {% endif %}
+  </h2>
+  <p>
+    {% if frozen_remediation_state.status.value == 'retried' %}
+      This SSD has now refused <strong>SECURITY ERASE UNIT</strong> on
+      both SAT and hdparm paths <strong>after</strong> an operator retry.
+      The checklist below is still worth another try — but if it fails
+      a second time, physical destruction is the sanctioned path.
+    {% else %}
+      This SSD refused <strong>SECURITY ERASE UNIT</strong> on both the
+      SAT passthrough and native-ATA (hdparm) paths. The signature
+      matches libata's in-kernel freeze lock, which is issued during
+      udev probe on most ATA drives. Because it's an SSD, the v0.6.7
+      HDD badblocks-only fallback doesn't apply (wear-leveling makes
+      overwrite-only sanitization non-compliant). Pick one of the
+      bypass paths below.
+    {% endif %}
+  </p>
+  <ol class="frozen-remediation-steps">
+    {% for step in frozen_remediation_state.steps %}
+    <li>
+      <strong>{{ step.title }}</strong>
+      <p class="muted">{{ step.detail }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  <div class="frozen-remediation-actions">
+    <form method="post" action="/drives/{{ drive.serial }}/frozen/retry" style="margin:0;">
+      <button type="submit" class="btn">I tried one of these — retest</button>
+    </form>
+    <form method="post" action="/drives/{{ drive.serial }}/frozen/mark-unrecoverable"
+          style="margin:0;"
+          onsubmit="return confirm('Mark {{ drive.serial }} as unrecoverable? This stamps an F grade so auto-enroll will skip this serial on future inserts.');">
+      <button type="submit" class="btn btn-danger">Mark as unrecoverable</button>
+    </form>
+    <span class="muted small">
+      First seen {{ frozen_remediation_state.first_seen_at.strftime('%Y-%m-%d %H:%M') }} UTC
+      {% if frozen_remediation_state.retry_count %} &middot; {{ frozen_remediation_state.retry_count }} retry attempt{% if frozen_remediation_state.retry_count != 1 %}s{% endif %}{% endif %}
+    </span>
+  </div>
+</section>
+{% endif %}
 
 {% if latest %}
 <section class="panel">

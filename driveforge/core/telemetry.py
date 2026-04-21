@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
-from driveforge.core.process import run
+from driveforge.core.process import run, run_async
 
 
 class TelemetryPoint(BaseModel):
@@ -41,8 +41,31 @@ _IPMITOOL_SDR_TEMP_RE = re.compile(
 
 
 def read_chassis_power() -> float | None:
-    """Return instantaneous chassis power draw in watts, via local BMC (IPMI DCMI)."""
+    """Return instantaneous chassis power draw in watts, via local
+    BMC (IPMI DCMI). Sync variant — used by CLI + tests + non-async
+    callers. Prefer `read_chassis_power_async` from async code."""
     result = run(["ipmitool", "dcmi", "power", "reading"])
+    if not result.ok:
+        return None
+    m = _IPMITOOL_POWER_RE.search(result.stdout)
+    return float(m.group(1)) if m else None
+
+
+async def read_chassis_power_async() -> float | None:
+    """Async variant (v0.6.9+). Goes through `asyncio.create_subprocess_exec`
+    instead of burning a thread. Called from the orchestrator's
+    per-drive telemetry sampler which fires every 30s per active
+    pipeline — on a 10-drive batch that's 20 thread-uses per minute
+    that asyncio handles natively.
+
+    Returns None on any failure (missing ipmitool, permission denied,
+    unparseable output) — this is a best-effort telemetry sample, not
+    a correctness-critical reading. Same contract as the sync variant.
+    """
+    try:
+        result = await run_async(["ipmitool", "dcmi", "power", "reading"])
+    except FileNotFoundError:
+        return None
     if not result.ok:
         return None
     m = _IPMITOOL_POWER_RE.search(result.stdout)

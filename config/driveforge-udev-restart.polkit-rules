@@ -1,0 +1,45 @@
+// DriveForge on-demand systemd-udevd restart polkit rule.
+// Installed to /etc/polkit-1/rules.d/51-driveforge-udev-restart.rules
+// by scripts/install.sh.
+//
+// Paired with systemd/driveforge-udev-restart.service (oneshot that
+// runs `systemctl restart systemd-udevd`). Grants the unprivileged
+// daemon user `driveforge` permission to StartUnit on THAT SPECIFIC
+// service via systemd's D-Bus interface. Nothing else — every other
+// StartUnit for every other unit falls through to the default polkit
+// policy (interactive auth required).
+//
+// Why not grant direct restart of systemd-udevd itself?
+//   It's simpler to audit. This rule whitelists ONE unit name;
+//   whoever reads /etc/polkit-1/rules.d/ can see what the grant
+//   does without cross-referencing the unit file. The mediator
+//   service contains the actual `systemctl restart systemd-udevd`
+//   call, which is easier to inspect in /etc/systemd/system/ than
+//   in a JavaScript policy rule.
+//
+// Why the daemon needs this:
+//   v0.6.9's udev-health detector (driveforge/core/udev_health.py)
+//   surfaces a dashboard banner when the udev pipeline stalls (D-state
+//   workers + orphan sysfs block devices). The banner's "Restart udev"
+//   button hits an HTTP route, which calls trigger_udev_restart(),
+//   which shells out to `systemctl start --no-block
+//   driveforge-udev-restart.service`. That StartUnit call gets
+//   authorized by THIS rule.
+//
+// Blast radius if the daemon is compromised:
+//   attacker can restart systemd-udevd repeatedly. That's a DoS
+//   (brief hotplug latency) but not privilege escalation — no new
+//   files are written, no new processes are spawned as root beyond
+//   the replacement udevd itself.
+//
+// File number: 51 — sorts right after the update rule (50-) so the
+// two DriveForge polkit policies stay adjacent in ls output.
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "driveforge-udev-restart.service" &&
+        action.lookup("verb") === "start" &&
+        subject.user === "driveforge") {
+        return polkit.Result.YES;
+    }
+});
