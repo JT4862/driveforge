@@ -1,0 +1,36 @@
+// DriveForge in-app self-update polkit rule.
+// Installed to /etc/polkit-1/rules.d/50-driveforge-update.rules by
+// scripts/install.sh.
+//
+// Replaces the pre-v0.6.0 sudoers rule
+// (config/driveforge-update.sudoers), which suffered from an
+// occasional 10-second subprocess.run timeout on Debian hosts where
+// sudo's PAM stack triggered reverse-DNS — see backlog v0.5.4 entry.
+// The polkit path bypasses sudo + PAM entirely.
+//
+// Grants ONE specific authorization to the unprivileged daemon user
+// `driveforge`: calling StartUnit on `driveforge-update.service` via
+// systemd's D-Bus interface. systemctl itself already speaks that
+// D-Bus interface under the hood, so the daemon code just drops the
+// `sudo -n` prefix from its argv; the resulting
+// `systemctl start driveforge-update.service` is authorized through
+// this rule instead.
+//
+// Not a general grant: every OTHER systemd manage-units action for
+// every OTHER user falls through this rule and is handled by the
+// default polkit policy (interactive auth required). If an attacker
+// compromises the daemon, the worst they can do is force a re-install
+// from origin/main — which is exactly the same blast radius the
+// sudoers rule had.
+//
+// File number: 50 — sorts after distro defaults (10-) and before any
+// site-specific overrides (90-) an operator might layer on top.
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "driveforge-update.service" &&
+        action.lookup("verb") === "start" &&
+        subject.user === "driveforge") {
+        return polkit.Result.YES;
+    }
+});

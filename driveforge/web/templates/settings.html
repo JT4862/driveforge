@@ -231,10 +231,34 @@
   {% if update_info and update_info.update_available %}
   <div class="banner ok-banner" style="margin-top: 14px;">
     <strong>Update {{ update_info.latest_version }} is available.</strong>
-    {# Primary action: one-click in-app install (v0.3.1+). The button
-       fires sudo systemctl start driveforge-update.service via the
-       /settings/install-update endpoint, which is preconditioned on
-       no drives being under test. #}
+
+    {# v0.6.0+: release-notes preview BEFORE the Install button. The
+       whole point is that the operator reads what's changing before
+       committing — previously the GitHub link opened after install.
+       Rendered server-side from the cached markdown body
+       (updates.render_release_notes_html). `<details open>` keeps it
+       visible by default; operators can collapse if they've already
+       read it. Plain external link stays in the header as a fallback
+       for anyone who wants the full GitHub experience. #}
+    {% if update_notes_html %}
+    <details open class="release-notes-preview" style="margin-top: 12px;">
+      <summary>
+        <strong>What's changing in {{ update_info.latest_version }}</strong>
+        {% if update_info.release_url %}
+          &middot; <a href="{{ update_info.release_url }}" target="_blank" rel="noopener">full notes on GitHub ↗</a>
+        {% endif %}
+      </summary>
+      <div class="release-notes-body">
+        {{ update_notes_html | safe }}
+      </div>
+    </details>
+    {% endif %}
+
+    {# Primary action: one-click in-app install. v0.6.0 replaces the
+       sudo path with a polkit-mediated systemctl start — the HTTP
+       route still hits /settings/install-update, but the underlying
+       primitive in updates.trigger_in_app_update() no longer shells
+       through sudo. #}
     <form method="post" action="/settings/install-update"
           style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
       <button type="submit" class="btn primary"
