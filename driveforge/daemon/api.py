@@ -197,7 +197,7 @@ def list_batches() -> list[BatchOut]:
         batches = session.query(m.Batch).order_by(m.Batch.started_at.desc()).all()
         out: list[BatchOut] = []
         for b in batches:
-            totals = {"A": 0, "B": 0, "C": 0, "fail": 0}
+            totals = {"A": 0, "B": 0, "C": 0, "F": 0, "error": 0, "fail": 0}
             for run in b.test_runs:
                 if run.grade in totals:
                     totals[run.grade] += 1

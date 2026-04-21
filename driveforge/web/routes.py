@@ -366,7 +366,11 @@ SUGGESTED_USE = {
     "A": "Primary Ceph OSD, TrueNAS main pool — no reservations",
     "B": "Secondary OSD, scratch pool, backup target",
     "C": "Cold storage, test environment, heavy-redundancy array",
-    "fail": "Scrap / e-waste — do not deploy",
+    "F": "Scrap / e-waste — drive failed grading rules, do not deploy",
+    "error": "Retry — pipeline errored; drive's actual health is unknown",
+    # Legacy "fail" rows (pre-v0.5.1) — before the F/error split existed.
+    # Render with a generic "not-a-grade" message until operator re-runs.
+    "fail": "Legacy fail from pre-v0.5.1 code — re-test to get a real verdict (F or A/B/C)",
 }
 
 
@@ -445,7 +449,7 @@ def batches(request: Request) -> HTMLResponse:
         )
         batches_view = []
         for b in rows:
-            totals = {"A": 0, "B": 0, "C": 0, "fail": 0}
+            totals = {"A": 0, "B": 0, "C": 0, "F": 0, "error": 0, "fail": 0}
             for run in b.test_runs:
                 if run.grade in totals:
                     totals[run.grade] += 1
@@ -720,13 +724,19 @@ def print_batch_labels(request: Request, batch_id: str) -> RedirectResponse:
         batch = session.get(m.Batch, batch_id)
         if batch is None:
             raise HTTPException(status_code=404, detail="batch not found")
-        # Only print labels for runs that actually graded (skip fails + incomplete)
+        # Only print labels for runs whose grade is a real pass-tier
+        # verdict (A/B/C). Skip:
+        #   - incomplete runs (completed_at NULL)
+        #   - aborted runs (grade NULL)
+        #   - drive-fail runs ("F") — label prints in the F sticker path,
+        #     not the batch-print-all flow; they're scrapped, not certified
+        #   - pipeline-error runs ("error") — no verdict reached; nothing to certify
+        #   - legacy "fail" (pre-v0.5.1 rows) — same
         runs = (
             session.query(m.TestRun)
             .filter_by(batch_id=batch_id)
             .filter(m.TestRun.completed_at.isnot(None))
-            .filter(m.TestRun.grade.isnot(None))
-            .filter(m.TestRun.grade != "fail")
+            .filter(m.TestRun.grade.in_(("A", "B", "C")))
             .all()
         )
         printed = 0
@@ -768,7 +778,7 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
         if batch is None:
             raise HTTPException(status_code=404, detail="batch not found")
         runs = session.query(m.TestRun).filter_by(batch_id=batch_id).all()
-        totals = {"A": 0, "B": 0, "C": 0, "fail": 0}
+        totals = {"A": 0, "B": 0, "C": 0, "F": 0, "error": 0, "fail": 0}
         for r in runs:
             if r.grade in totals:
                 totals[r.grade] += 1
@@ -787,8 +797,11 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
                 "report_url": r.report_url,
                 "error_message": r.error_message,
                 "quick_mode": bool(r.quick_mode),
+                # Only A/B/C drives are printable. Graded-F drives
+                # get their own sticker-print path (v0.5.1+); pipeline
+                # errors produce no certification artifact.
                 "printable": bool(
-                    r.completed_at and r.grade and r.grade != "fail"
+                    r.completed_at and r.grade in ("A", "B", "C")
                 ),
             }
             for r in runs
@@ -1096,6 +1109,62 @@ async def replay_wizard(request: Request) -> RedirectResponse:
     state.settings.setup_completed = False
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/setup/1", status_code=303)
+
+
+@router.post("/settings/clear-legacy-fails")
+async def clear_legacy_fails(request: Request) -> Response:
+    """v0.5.1 migration endpoint: delete TestRun rows with the legacy
+    pre-v0.5.1 `grade="fail"` vocabulary.
+
+    Before v0.5.1, `grade="fail"` conflated two distinct outcomes:
+      - real drive-fail (grading rules determined the drive is bad)
+      - pipeline-error (daemon broke mid-run, drive's actual state unknown)
+
+    v0.5.1 splits these into `grade="F"` and `grade="error"`
+    respectively. Legacy rows can't be retroactively classified, so
+    this endpoint purges them — operator retests affected drives to
+    get real-vocabulary verdicts.
+
+    Returns JSON `{"deleted": N}`. Logged at WARNING level since it's
+    destructive. Not authenticated (homelab assumption, same as every
+    other action endpoint).
+
+    The endpoint also deletes cascading SmartSnapshot and
+    TelemetrySample rows via the FK relationships — dangling
+    telemetry from legacy runs goes away cleanly.
+    """
+    import json
+    state = get_state()
+    with state.session_factory() as session:
+        legacy_count = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.grade == "fail")
+            .count()
+        )
+        if legacy_count == 0:
+            return Response(
+                content=json.dumps({"deleted": 0, "message": "no legacy-fail rows present"}),
+                media_type="application/json",
+            )
+        session.query(m.TestRun).filter(m.TestRun.grade == "fail").delete(
+            synchronize_session=False,
+        )
+        session.commit()
+    logger.warning(
+        "v0.5.1 migration: deleted %d legacy grade='fail' TestRun row(s) "
+        "(and their cascaded telemetry/snapshots) per operator request",
+        legacy_count,
+    )
+    return Response(
+        content=json.dumps({
+            "deleted": legacy_count,
+            "message": (
+                f"purged {legacy_count} pre-v0.5.1 fail rows. Affected drives "
+                f"will show as 'never tested' until re-run."
+            ),
+        }),
+        media_type="application/json",
+    )
 
 
 @router.get("/reports/{serial}", response_class=HTMLResponse)

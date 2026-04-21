@@ -209,10 +209,16 @@ def _seed_stale_pass(state: DaemonState, drive: Drive, *, hours_ago: int) -> Non
         session.commit()
 
 
-def _seed_stale_fail(state: DaemonState, drive: Drive, *, hours_ago: int) -> None:
+def _seed_stale_fail(state: DaemonState, drive: Drive, *, hours_ago: int, grade: str = "F") -> None:
     """Failed drive from hours ago. Same principle as stale pass: a
     failed drive shouldn't auto-retest on re-insert either — that's
-    retest-churn on drives the operator already knows are bad."""
+    retest-churn on drives the operator already knows are bad.
+
+    v0.5.1+ the `grade` parameter distinguishes:
+      - "F"      = real drive-fail, sticky (default)
+      - "error"  = pipeline error, NOT sticky (auto-retries)
+      - "fail"   = legacy pre-v0.5.1 vocabulary, treated as sticky
+    """
     now = datetime.now(UTC)
     with state.session_factory() as session:
         session.add(
@@ -230,9 +236,9 @@ def _seed_stale_fail(state: DaemonState, drive: Drive, *, hours_ago: int) -> Non
                 phase="failed",
                 started_at=now - timedelta(hours=hours_ago, minutes=5),
                 completed_at=now - timedelta(hours=hours_ago),
-                grade="fail",
+                grade=grade,
                 quick_mode=False,
-                error_message="[badblocks] block 0x12345 read error",
+                error_message="[badblocks] block 0x12345 read error" if grade == "F" else "[secure_erase] sg_raw failed: timeout",
             )
         )
         session.commit()
@@ -387,15 +393,15 @@ async def test_auto_enroll_skipped_for_stale_pass(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_auto_enroll_skipped_for_stale_fail(tmp_path, monkeypatch) -> None:
-    """Same principle as stale pass — a drive that failed days ago
-    must not auto-re-test itself just because it got re-inserted.
-    Operator can manually start a new batch if they want a re-check."""
+async def test_auto_enroll_skipped_for_stale_grade_F(tmp_path, monkeypatch) -> None:
+    """v0.5.1 vocabulary: grade='F' = real drive-fail = sticky. Drive
+    that legitimately failed its grading rules does not auto-retest
+    itself just because it got re-inserted."""
     settings = _make_settings(tmp_path, auto_enroll_mode="full")
     state = DaemonState.boot(settings)
     orch = Orchestrator(state)
     drive = _make_drive()
-    _seed_stale_fail(state, drive, hours_ago=72)
+    _seed_stale_fail(state, drive, hours_ago=72, grade="F")
 
     monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
 
@@ -403,7 +409,57 @@ async def test_auto_enroll_skipped_for_stale_fail(tmp_path, monkeypatch) -> None
     await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
 
     assert spy.start_batch_calls == [], (
-        "stale fail (72h old) must NOT auto-re-enroll — failed drives stay failed"
+        "grade=F drive (real drive-fail) must NOT auto-re-enroll — "
+        "the verdict is durable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_enroll_fires_for_pipeline_error_on_reinsert(tmp_path, monkeypatch) -> None:
+    """v0.5.1 key behavior: grade='error' = pipeline broke = NOT
+    sticky. Re-inserting a drive whose last run was a pipeline error
+    (SAT failure, kernel ioctl issue, transient subprocess crash) DOES
+    auto-retest. The error may have been transient; the drive's
+    actual health is unknown and we should find out."""
+    settings = _make_settings(tmp_path, auto_enroll_mode="quick")
+    state = DaemonState.boot(settings)
+    orch = Orchestrator(state)
+    drive = _make_drive()
+    _seed_stale_fail(state, drive, hours_ago=2, grade="error")
+
+    monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
+
+    spy = _SpyOrch(orch)
+    await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
+
+    assert len(spy.start_batch_calls) == 1, (
+        "grade=error drive (pipeline error) MUST auto-retest on re-insert — "
+        "the error may have been transient, we need to re-learn the drive's state"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_enroll_skipped_for_legacy_fail_grade(tmp_path, monkeypatch) -> None:
+    """Legacy grade='fail' rows (pre-v0.5.1, when the vocabulary
+    conflated drive-fail and pipeline-error) should be treated as
+    sticky. We can't retroactively know whether they were real drive
+    failures or pipeline errors; safer default is to NOT auto-retest
+    and let the operator manually re-verify via New Batch if they
+    want the real verdict."""
+    settings = _make_settings(tmp_path, auto_enroll_mode="quick")
+    state = DaemonState.boot(settings)
+    orch = Orchestrator(state)
+    drive = _make_drive()
+    _seed_stale_fail(state, drive, hours_ago=24, grade="fail")  # legacy
+
+    monkeypatch.setattr(drive_mod, "discover", lambda: [drive])
+
+    spy = _SpyOrch(orch)
+    await _handle_drive_added(state, spy, _make_event(drive))  # type: ignore[arg-type]
+
+    assert spy.start_batch_calls == [], (
+        "legacy grade=fail row must NOT auto-re-enroll (treated as sticky "
+        "since we can't distinguish real-fail from pipeline-error retroactively)"
     )
 
 

@@ -17,7 +17,7 @@
 <section class="panel">
   <h2 style="display: flex; align-items: center; gap: 12px;">
     Latest test run{% if latest.quick_mode %} <span class="pill">quick mode</span>{% endif %}
-    {% if latest.completed_at and latest.grade and latest.grade != "fail" %}
+    {% if latest.completed_at and latest.grade in ("A", "B", "C") %}
     <button type="button" class="btn" style="margin-left: auto;" onclick="document.getElementById('label-preview-modal').showModal()">Preview cert label</button>
     {% endif %}
   </h2>
@@ -43,7 +43,7 @@
   </dl>
 </section>
 
-{% if latest.completed_at and latest.grade and latest.grade != "fail" %}
+{% if latest.completed_at and latest.grade in ("A", "B", "C") %}
 <dialog id="label-preview-modal" class="label-preview-dialog">
   <header class="label-preview-head">
     <strong>Cert label preview</strong>

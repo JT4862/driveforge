@@ -250,15 +250,33 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     latest_completed = latest.completed_at if latest is not None else None
     if latest_completed is not None and latest_completed.tzinfo is None:
         latest_completed = latest_completed.replace(tzinfo=UTC)
-    if latest is not None and latest.grade is not None:
+    # v0.5.1+ auto-enroll stickiness: A/B/C/F are VERDICTS ABOUT THE
+    # DRIVE and stick indefinitely. "error" is a verdict about the
+    # SOFTWARE (pipeline broke) — we WANT auto-retest on re-insert
+    # because the error might have been transient (transient bus
+    # glitch, temporary daemon issue, etc.). Aborted (grade=NULL) also
+    # auto-retests since the abort wasn't a verdict.
+    #
+    # Legacy "fail" rows (pre-v0.5.1) are sticky too — treat them like
+    # F, since we can't retroactively tell real-fail from pipeline-error.
+    # Operator can manually retest via New Batch.
+    STICKY_GRADES = ("A", "B", "C", "F", "fail")
+    if latest is not None and latest.grade in STICKY_GRADES:
         logger.info(
-            "hotplug add: drive %s has a graded completed run (%s, %s); "
+            "hotplug add: drive %s has a sticky graded run (%s, %s); "
             "skipping auto-enroll",
             match.serial,
             latest.grade,
             latest_completed.isoformat() if latest_completed else "?",
         )
         return
+    if latest is not None and latest.grade == "error":
+        logger.info(
+            "hotplug add: drive %s's latest run was a pipeline error "
+            "(%s); firing auto-enroll retry",
+            match.serial,
+            latest_completed.isoformat() if latest_completed else "?",
+        )
     logger.info("hotplug add: auto-enrolling drive %s (%s mode)", match.serial, mode)
     try:
         await orch.start_batch(

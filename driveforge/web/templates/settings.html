@@ -364,10 +364,35 @@
   <div class="panel-head">
     <h2>Advanced</h2>
   </div>
-  <p class="muted">Replay the first-run setup wizard. Existing settings stay in place until you change them during the wizard.</p>
+
+  <h3 style="margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);">Replay setup wizard</h3>
+  <p class="muted">Existing settings stay in place until you change them during the wizard.</p>
   <form method="post" action="/settings/wizard-replay">
     <div class="form-actions">
       <button type="submit" class="btn">Run setup wizard again</button>
+    </div>
+  </form>
+
+  <hr style="border: none; border-top: 1px solid var(--panel-border); margin: 24px 0;">
+
+  <h3 style="margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);">Purge legacy <code>fail</code> rows (v0.5.1 migration)</h3>
+  <p class="muted small">
+    Before v0.5.1, <code>grade="fail"</code> conflated two distinct
+    outcomes: real drive-fail (grading rules failed the drive) and
+    pipeline-error (daemon broke mid-run). v0.5.1 splits these into
+    <code>F</code> and <code>error</code> respectively. Legacy rows
+    can't be retroactively classified; purging them lets affected
+    drives auto-re-test cleanly with the new vocabulary.
+  </p>
+  <p class="muted small">
+    <strong>Only affects rows with <code>grade="fail"</code></strong> —
+    does not touch A/B/C, F, error, or aborted runs. Cascades to
+    SMART snapshots + telemetry samples for those runs.
+  </p>
+  <form method="post" action="/settings/clear-legacy-fails"
+        onsubmit="return confirm('Purge all legacy grade=fail TestRuns? This cannot be undone. Only affects rows from pre-v0.5.1 code; A/B/C/F/error/aborted runs are preserved.\n\nAfter purge, affected drives show as &quot;never tested&quot; until re-run.');">
+    <div class="form-actions">
+      <button type="submit" class="btn">Purge legacy fail rows</button>
     </div>
   </form>
 </section>

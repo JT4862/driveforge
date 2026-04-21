@@ -134,6 +134,8 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 }
 .bay-card.installed.graded.graded-fail:hover { border-color: var(--grade-fail); }
 .bay-card .fail-text { color: var(--fail); font-weight: 600; font-style: normal; }
+.bay-card .err-text { color: #e8a73c; font-weight: 600; font-style: normal; }
+.bay-card .legacy-text { color: var(--muted); font-weight: 500; font-style: italic; }
 .bay-card .fail-detail {
   color: var(--muted); font-family: var(--mono); font-size: 11px;
   margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -439,6 +441,15 @@ table tr:hover { background: rgba(255,255,255,0.02); }
 .grade-A { background: rgba(63,185,80,0.18); color: var(--grade-a); }
 .grade-B { background: rgba(88,166,255,0.18); color: var(--grade-b); }
 .grade-C { background: rgba(210,153,34,0.18); color: var(--grade-c); }
+/* v0.5.1+ grade vocabulary: F = real drive-fail (red), error = pipeline
+   broke (amber, distinct from F so operator can tell from the badge
+   alone whether the verdict is "drive is bad" vs "we're bad"). */
+.grade-F { background: rgba(248,81,73,0.22); color: var(--grade-fail); }
+.grade-error { background: rgba(210,153,34,0.25); color: #e8a73c; border: 1px solid rgba(210,153,34,0.45); }
+.grade-legacy { background: rgba(139,151,165,0.18); color: var(--muted); font-style: italic; }
+/* Legacy alias — keep styling working for pre-v0.5.1 DB rows that still
+   carry grade="fail". Maps to the same red as F so the existing UI
+   elements that reference grade-fail still render correctly. */
 .grade-fail { background: rgba(248,81,73,0.18); color: var(--grade-fail); }
 .grade-xl { font-size: 48px; padding: 14px 28px; border-radius: 10px; }
 
