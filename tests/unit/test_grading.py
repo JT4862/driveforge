@@ -24,6 +24,23 @@ def _config() -> GradingConfig:
     return GradingConfig()
 
 
+def test_grade_enum_values_match_v0_5_1_vocabulary() -> None:
+    """v0.5.1 renamed Grade.FAIL.value from 'fail' to 'F' to disambiguate
+    it from pipeline-error (grade='error' in the DB). If someone reverts
+    this to 'fail', the DB-layer distinction between drive-fail and
+    pipeline-error collapses and the UI / auto-enroll / sticky-retry
+    behavior all break in ways that are hard to notice in isolation.
+    Fail loudly if the vocabulary regresses."""
+    assert grading.Grade.A.value == "A"
+    assert grading.Grade.B.value == "B"
+    assert grading.Grade.C.value == "C"
+    assert grading.Grade.FAIL.value == "F", (
+        "Grade.FAIL.value must be 'F' (v0.5.1+). The literal string 'fail' "
+        "is now RESERVED for legacy pre-v0.5.1 DB rows and is no longer "
+        "written by the grading layer."
+    )
+
+
 def test_pristine_drive_gets_grade_a() -> None:
     pre = _snap()
     post = _snap()

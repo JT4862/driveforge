@@ -19,10 +19,23 @@ from driveforge.core.smart import SmartSnapshot
 
 
 class Grade(str, Enum):
+    """Grading verdicts. A/B/C/F are VERDICTS ABOUT THE DRIVE — they
+    come from the grading rules applied to SMART data, badblocks
+    output, and self-test results. Distinct from pipeline errors
+    (represented separately as `grade="error"` at the DB layer),
+    which are verdicts about the software, not about the drive.
+
+    Naming change from v0.5.1: FAIL.value was "fail" (the same string
+    `_record_failure` wrote for pipeline errors — the two were
+    indistinguishable at the DB layer). Now FAIL.value is "F" and
+    pipeline errors use "error". See docs/reference/grading.md for
+    the full vocabulary.
+    """
+
     A = "A"
     B = "B"
     C = "C"
-    FAIL = "fail"
+    FAIL = "F"
 
 
 class Rule(BaseModel):

@@ -24,8 +24,24 @@
         {%- if card.transport %} &middot; {{ card.transport|upper }}{% endif -%}
         {%- if card.drive_age_label %} &middot; <span class="drive-age" title="Power-on hours at last test">{{ card.drive_age_label }}</span>{% endif -%}
       </div>
-      {% if card.last_grade == "fail" %}
-        <div class="phase last-test fail-text">✗ Failed {{ card.last_tested.strftime('%Y-%m-%d') }}{% if card.last_phase %} &middot; {{ card.last_phase|replace("_", " ") }}{% endif %}</div>
+      {% if card.last_grade == "F" %}
+        {# Real drive-fail: grading rules determined this drive is bad. #}
+        <div class="phase last-test fail-text">✗ FAIL &middot; {{ card.last_tested.strftime('%Y-%m-%d') }} &middot; bad drive &middot; do not deploy</div>
+        {% if card.last_error %}
+        <div class="fail-detail" title="{{ card.last_error }}">{{ card.last_error }}</div>
+        {% endif %}
+      {% elif card.last_grade == "error" %}
+        {# Pipeline error: the daemon broke mid-run. Drive's actual
+           health is unknown — operator should retry. Distinct from F. #}
+        <div class="phase last-test err-text">&#9888; ERR &middot; {{ card.last_tested.strftime('%Y-%m-%d') }} &middot; pipeline error &middot; retry</div>
+        {% if card.last_error %}
+        <div class="fail-detail" title="{{ card.last_error }}">{{ card.last_error }}</div>
+        {% endif %}
+      {% elif card.last_grade == "fail" %}
+        {# Legacy pre-v0.5.1 rows where "fail" conflated drive-fail
+           with pipeline-error. Can't retroactively distinguish; render
+           as neutral "legacy" so operator re-tests for a real verdict. #}
+        <div class="phase last-test legacy-text">◐ legacy fail &middot; {{ card.last_tested.strftime('%Y-%m-%d') }} &middot; re-test for verdict</div>
         {% if card.last_error %}
         <div class="fail-detail" title="{{ card.last_error }}">{{ card.last_error }}</div>
         {% endif %}
@@ -38,11 +54,20 @@
   </a>
   {% if card.last_grade %}
   <div class="bay-badges">
-    <a class="report-link" href="/reports/{{ card.serial }}" title="View cert report">📄</a>
-    {% if card.last_grade == "fail" %}
-      <span class="grade grade-fail grade-corner">✗ FAIL</span>
-    {% else %}
+    {% if card.last_grade in ("A", "B", "C") %}
+      {# Pass-tier: cert PDF exists, link to it. #}
+      <a class="report-link" href="/reports/{{ card.serial }}" title="View cert report">📄</a>
       <span class="grade grade-{{ card.last_grade }} grade-corner"{% if card.last_quick %} title="Quick mode — burn-in skipped; not a full certification"{% endif %}>{{ card.last_grade|upper }}{% if card.last_quick %}<sup class="provisional">*</sup>{% endif %}</span>
+    {% elif card.last_grade == "F" %}
+      {# Drive-fail: badge is red "F", cert PDF exists explaining why. #}
+      <a class="report-link" href="/reports/{{ card.serial }}" title="View fail report">📄</a>
+      <span class="grade grade-F grade-corner" title="Drive failed grading rules — bad drive, do not deploy">F</span>
+    {% elif card.last_grade == "error" %}
+      {# Pipeline error: no cert (nothing to certify); badge is amber "ERR". #}
+      <span class="grade grade-error grade-corner" title="Pipeline errored mid-run — retry to determine real drive health">ERR</span>
+    {% else %}
+      {# Legacy "fail" — grey neutral badge, no cert link. #}
+      <span class="grade grade-legacy grade-corner" title="Legacy fail (pre-v0.5.1 vocabulary) — re-test for real verdict">legacy</span>
     {% endif %}
   </div>
   {% endif %}

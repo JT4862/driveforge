@@ -279,11 +279,15 @@ class Orchestrator:
                 return
             if last_run.phase == "aborted":
                 return
-            # Any pass-tier grade → heartbeat. Any fail (grade-fail OR
-            # pipeline-error where grade wasn't assigned) → lighthouse.
+            # Any pass-tier grade → heartbeat. Any fail-like outcome
+            # (real drive-fail "F" OR pipeline-error "error") →
+            # lighthouse. Legacy "fail" rows (from pre-v0.5.1 code)
+            # also go to lighthouse. The operator distinguishes
+            # drive-fail from pipeline-error via sticker presence at
+            # the rack, not via LED pattern.
             if last_run.grade in ("A", "B", "C"):
                 outcome = "pass"
-            elif last_run.grade == "fail":
+            elif last_run.grade in ("F", "error", "fail"):
                 outcome = "fail"
             else:
                 return
@@ -655,8 +659,12 @@ class Orchestrator:
                     self._record_failure(drive, phase="error", detail=tb)
                     outcome = "fail"
             else:
-                # Normal completion — a grading "fail" verdict is not an
-                # exception, so refine outcome from the DB grade.
+                # Normal completion — a grading fail-tier verdict is not
+                # an exception, so refine outcome from the DB grade.
+                # v0.5.1+ vocabulary: grade "F" is the real-drive-fail
+                # verdict; "error" is the pipeline-error (not reached
+                # here since pipeline errors raise). Legacy "fail" rows
+                # from pre-v0.5.1 still honored.
                 with self.state.session_factory() as session:
                     latest = (
                         session.query(m.TestRun)
@@ -664,7 +672,7 @@ class Orchestrator:
                         .order_by(m.TestRun.started_at.desc())
                         .first()
                     )
-                    if latest and latest.grade == "fail":
+                    if latest and latest.grade in ("F", "error", "fail"):
                         outcome = "fail"
             finally:
                 import time as _time
@@ -765,6 +773,32 @@ class Orchestrator:
                 session.commit()
 
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
+        """Close an open TestRun with a non-success verdict.
+
+        Three distinct outcomes encoded here via `grade`:
+
+          - aborted (user cancelled mid-pipeline):
+              phase="aborted", grade=NULL
+              Re-insert triggers auto-enroll. Drive was never graded.
+
+          - pipeline error (code/infra broke: SAT error, timeout,
+            subprocess crash, preflight refusal, etc.):
+              phase="failed", grade="error"
+              Re-insert triggers auto-retest — the error may have been
+              transient. Drive's health is unknown; no cert, no label.
+
+          - drive-health fail (grading rules determined the drive is
+            bad — not reached from this function; written by
+            `_finalize_run` via `result.grade.value` which is "F"):
+              phase="failed", grade="F"
+              Sticky — auto-enroll skips. Cert + label print. Drive
+              is definitively bad.
+
+        Vocabulary added in v0.5.1 — pre-0.5.1 wrote grade="fail" for
+        BOTH pipeline errors AND drive-health fails, making them
+        indistinguishable at the DB + UI layer. See the v0.5.1 release
+        notes for migration notes on legacy rows.
+        """
         self._log(drive.serial, f"✗ {phase}: {detail}")
         with self.state.session_factory() as session:
             run = (
@@ -778,12 +812,12 @@ class Orchestrator:
             is_abort = phase == "aborted"
             run.phase = "aborted" if is_abort else "failed"
             run.completed_at = datetime.now(UTC)
-            # User-initiated aborts aren't failures — the drive never got a
-            # real verdict. Treat it as "never tested" so the dashboard
-            # shows it as idle, the LED stays dark, and (with auto-enroll
-            # on) re-inserting it kicks off a fresh run. Only genuine
-            # pipeline failures get grade="fail".
-            run.grade = None if is_abort else "fail"
+            # Encode the distinction:
+            #   abort   → grade=NULL  (treated as "never tested")
+            #   error   → grade="error" (code broke; drive state unknown)
+            # The "F" verdict (drive is really bad) is written elsewhere,
+            # by _finalize_run when grading rules return Grade.FAIL.
+            run.grade = None if is_abort else "error"
             run.error_message = f"[{phase}] {detail}"[:4000]
             run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
             session.commit()
@@ -1206,7 +1240,11 @@ class Orchestrator:
                 return
             batch.completed_at = datetime.now(UTC)
             runs = session.query(m.TestRun).filter_by(batch_id=batch_id).all()
-            totals = {"A": 0, "B": 0, "C": 0, "fail": 0}
+            # v0.5.1+ totals vocabulary: A/B/C pass tiers, F for
+            # real drive-fail, error for pipeline-error. Legacy "fail"
+            # bucket kept so pre-v0.5.1 rows still appear in totals
+            # (rather than silently dropping from the count).
+            totals = {"A": 0, "B": 0, "C": 0, "F": 0, "error": 0, "fail": 0}
             drives_summary = []
             for run in runs:
                 if run.grade and run.grade in totals:
