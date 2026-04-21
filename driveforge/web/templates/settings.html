@@ -59,6 +59,35 @@
   </dl>
 </section>
 
+<form class="panel" method="post" action="/settings/hostname">
+  <div class="panel-head">
+    <h2>Hostname</h2>
+    {% if saved_panel == "hostname" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  {% if hostname_error %}
+  <div class="banner warn-banner">&#9888; {{ hostname_error }}</div>
+  {% endif %}
+  <label class="field">
+    <span>Hostname</span>
+    <input type="text" name="hostname" value="{{ current_hostname }}"
+           maxlength="63"
+           pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+           required>
+  </label>
+  <p class="muted small">
+    Published as <code>{{ current_hostname }}.local</code> via mDNS on the
+    local network. If you're running more than one DriveForge box on the
+    same LAN, give each one a distinct hostname here so avahi doesn't
+    auto-suffix them (<code>driveforge-2.local</code>, etc.) with
+    non-deterministic order across reboots. Letters, digits, and hyphens
+    only; must not start or end with a hyphen; 63 chars max. Changes
+    apply immediately &mdash; no reboot required.
+  </p>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save hostname</button>
+  </div>
+</form>
+
 <form class="panel" method="post" action="/settings/grading">
   <div class="panel-head">
     <h2>Grading thresholds</h2>

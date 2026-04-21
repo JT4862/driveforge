@@ -812,6 +812,8 @@ def settings_page(request: Request) -> HTMLResponse:
     state = get_state()
     saved = request.query_params.get("saved")
     restart = request.query_params.get("restart")
+    hostname_error = request.query_params.get("hostname_error")
+    from driveforge.core import hostname as hostname_mod
     from driveforge.core import telemetry
     from driveforge.core import updates as updates_mod
 
@@ -834,8 +836,31 @@ def settings_page(request: Request) -> HTMLResponse:
             "capabilities": state.capabilities,
             "chassis_power": chassis_power,
             "chassis_temps": chassis_temps,
+            "current_hostname": hostname_mod.current_hostname() or "driveforge",
+            "hostname_error": hostname_error,
         },
     )
+
+
+@router.post("/settings/hostname")
+async def save_hostname(request: Request) -> RedirectResponse:
+    """Rename the host: /etc/hostname + hostnamectl + /etc/hosts patch +
+    avahi-daemon restart. Hostname is OS-level state, not driveforge.yaml,
+    so this does NOT go through `_save_settings_or_ignore`."""
+    from driveforge.core import hostname as hostname_mod
+    from urllib.parse import quote
+
+    state = get_state()
+    form = await request.form()
+    raw = (form.get("hostname") or "").strip()
+    try:
+        hostname_mod.apply_hostname(raw, dev_mode=state.settings.dev_mode)
+    except hostname_mod.HostnameError as exc:
+        return RedirectResponse(
+            url=f"/settings?hostname_error={quote(str(exc))}",
+            status_code=303,
+        )
+    return RedirectResponse(url="/settings?saved=hostname", status_code=303)
 
 
 @router.post("/settings/check-updates")
