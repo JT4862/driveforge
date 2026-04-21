@@ -23,7 +23,6 @@ tests on macOS don't need a real /etc or hostnamectl.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import socket
 from pathlib import Path
@@ -127,12 +126,20 @@ def apply_hostname(new_name: str, *, dev_mode: bool = False) -> str:
         logger.info("apply_hostname(dev): would set hostname to %s", normalized)
         return normalized
 
-    # 1. /etc/hostname — atomic write via tmpfile + rename.
+    # 1. /etc/hostname — direct write.
+    #
+    # We can NOT use the atomic write-tempfile-then-rename pattern here:
+    # the daemon's systemd unit hardens us with `ProtectSystem=strict`
+    # plus `ReadWritePaths=/etc/hostname /etc/hosts`. That whitelist
+    # grants write access to the EXACT file paths listed, but creating
+    # a sibling `/etc/hostname.new` for the rename dance fails with
+    # EROFS — the parent directory is still read-only at the namespace
+    # layer. So we write directly. /etc/hostname is a 20-byte file;
+    # partial-write risk is essentially zero (single write() is atomic
+    # within page-cache for buffers this small).
     etc_hostname = Path("/etc/hostname")
     try:
-        tmp = etc_hostname.with_suffix(".new")
-        tmp.write_text(normalized + "\n", encoding="utf-8")
-        os.replace(tmp, etc_hostname)
+        etc_hostname.write_text(normalized + "\n", encoding="utf-8")
     except OSError as exc:
         raise HostnameError(f"Failed to write /etc/hostname: {exc}") from exc
 
@@ -188,6 +195,6 @@ def _patch_etc_hosts(new_name: str) -> None:
             out.append(line)
     if not replaced:
         out.append(f"127.0.1.1\t{new_name}")
-    tmp = hosts.with_suffix(".new")
-    tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
-    os.replace(tmp, hosts)
+    # Direct write — same systemd-namespace constraint as /etc/hostname.
+    # See `apply_hostname` for the EROFS / ReadWritePaths discussion.
+    hosts.write_text("\n".join(out) + "\n", encoding="utf-8")

@@ -24,7 +24,14 @@ NoNewPrivileges=false
 ProtectHome=true
 ProtectSystem=strict
 PrivateTmp=true
-ReadWritePaths=/var/lib/driveforge /var/log/driveforge /etc/driveforge
+# /etc/hostname + /etc/hosts are needed for the v0.2.8+ Settings → Hostname
+# rename feature. Without these, the daemon hits EROFS (Errno 30) trying
+# to write to /etc — systemd's mount-namespace protection makes the whole
+# filesystem read-only to the daemon by default, even though shells see
+# normal write permissions. Bug shipped in v0.2.8 (rename feature never
+# exercised against the real protected daemon — dev mode short-circuits
+# the writes); fixed in v0.4.1.
+ReadWritePaths=/var/lib/driveforge /var/log/driveforge /etc/driveforge /etc/hostname /etc/hosts
 
 # Allow journald + local logging
 StandardOutput=journal

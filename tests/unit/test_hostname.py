@@ -164,3 +164,25 @@ def test_patch_etc_hosts_noop_if_file_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(hn, "Path", lambda p: missing if p == "/etc/hosts" else Path(p))
     hn._patch_etc_hosts("freshbox")  # must not raise
     assert not missing.exists()
+
+
+def test_patch_etc_hosts_does_not_create_sibling_temp_file(tmp_path, monkeypatch) -> None:
+    """Regression for the v0.4.1 systemd-namespace bug. The daemon's
+    ProtectSystem=strict + ReadWritePaths=/etc/hosts whitelist allows
+    writes to the EXACT file path, but creating a sibling
+    `/etc/hosts.new` for an atomic rename fails with EROFS — the parent
+    directory remains read-only at the namespace layer.
+
+    This test catches a regression where someone re-introduces the
+    write-to-tempfile-then-rename pattern without realizing it breaks
+    under systemd's namespace protection."""
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1\tlocalhost\n", encoding="utf-8")
+    monkeypatch.setattr(hn, "Path", lambda p: hosts if p == "/etc/hosts" else Path(p))
+    hn._patch_etc_hosts("freshbox")
+    siblings = [p.name for p in tmp_path.iterdir()]
+    assert "hosts.new" not in siblings, (
+        "atomic-rename pattern reintroduced — would fail under systemd "
+        "ProtectSystem=strict with /etc/hosts whitelisted by file path. "
+        "Write directly to the target file instead."
+    )
