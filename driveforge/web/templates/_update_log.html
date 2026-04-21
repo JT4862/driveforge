@@ -1,0 +1,33 @@
+{#
+  Live tail of /var/log/driveforge-update.log + the systemd unit's
+  current activity state. Polled by the Settings page via HTMX while
+  the update is running; stops polling on inactive/failed.
+
+  The hx-trigger uses `every 2s` while the unit is active. When the
+  unit transitions to inactive/failed, we render WITHOUT hx-trigger,
+  which stops the polling loop. The page-level JS in settings.html
+  then watches for the daemon-restart window separately.
+#}
+<div id="update-log-pane"
+     {% if is_running %}
+     hx-get="/_partials/update-log"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  <div class="update-status-row">
+    <span class="muted small">systemd state:</span>
+    <span class="pill update-state-{{ service_state }}">{{ service_state }}</span>
+    {% if is_running %}
+      <span class="muted small">live polling every 2s &middot; daemon will restart at end</span>
+    {% elif service_state == "failed" %}
+      <span class="muted small">update failed &mdash; see log below for details</span>
+    {% elif service_state == "inactive" %}
+      <span class="muted small">last run finished &mdash; if successful, daemon is restarting now</span>
+    {% endif %}
+  </div>
+  {% if log %}
+    <pre class="log-tail update-log-tail" id="update-log-tail">{{ log }}</pre>
+  {% else %}
+    <p class="muted small">No update log yet &mdash; this is the first time the update flow has run on this host. The log will appear here once driveforge-update.service starts producing output.</p>
+  {% endif %}
+</div>

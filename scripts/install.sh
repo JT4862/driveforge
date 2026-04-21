@@ -205,7 +205,35 @@ log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-issue.service" /etc/systemd/system/
+install -m 0644 "$(dirname "$0")/../systemd/driveforge-update.service" /etc/systemd/system/
 install -m 0755 "$(dirname "$0")/../scripts/driveforge-update-issue.sh" /usr/local/sbin/driveforge-update-issue
+install -m 0755 "$(dirname "$0")/../scripts/driveforge-update" /usr/local/sbin/driveforge-update
+
+# Pre-create the update log file so the daemon (running as user
+# `driveforge`) can read it for live-tail streaming on the dashboard.
+# The systemd unit appends as root; we just need read perms for the
+# daemon group. Group-readable; no world-readable since the log can
+# include git URLs / package versions some operators consider noisy
+# but not secret.
+touch /var/log/driveforge-update.log
+chgrp driveforge /var/log/driveforge-update.log 2>/dev/null || true
+chmod 0640 /var/log/driveforge-update.log
+
+# Install the sudoers rule that grants the daemon user permission to
+# trigger driveforge-update.service. visudo --check'd before move so
+# a syntactically broken rule never lands in /etc/sudoers.d (which
+# would lock the operator out of sudo entirely on a freshly-installed
+# box).
+SUDOERS_TMP=$(mktemp)
+install -m 0440 "$(dirname "$0")/../config/driveforge-update.sudoers" "$SUDOERS_TMP"
+if visudo -c -f "$SUDOERS_TMP" >/dev/null; then
+  install -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/driveforge-update
+  ok "sudoers.d/driveforge-update installed (allows daemon → start update unit only)"
+else
+  warn "sudoers rule failed visudo -c — skipping; in-app update will be unavailable until fixed"
+fi
+rm -f "$SUDOERS_TMP"
+
 systemctl daemon-reload
 # Avahi usually autostarts on Debian but enable explicitly so
 # driveforge.local is reachable on first boot.

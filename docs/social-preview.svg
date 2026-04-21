@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GitHub social preview — 1280×640 with 40 px safe-area bleed.
+
+  GitHub crops the outer ~40 px (varies by client) when rendering as
+  an Open Graph card on Twitter/X / LinkedIn / Slack / Discord / etc.,
+  so anything load-bearing lives inside the inner 1200×560 frame
+  (the dashed guide rect, removed before render).
+
+  Dimensions match docs/logo-* file palette:
+    bg     #0e1116  (dark; same as the dashboard)
+    text   #e6edf3  (off-white)
+    teal   #2dd4bf  (DriveForge brand accent — the app.css teal var)
+
+  Convert to PNG with:
+    rsvg-convert -w 1280 -h 640 docs/social-preview.svg > docs/social-preview.png
+    # or:
+    magick docs/social-preview.svg docs/social-preview.png
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1280 640"
+     width="1280"
+     height="640">
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#0e1116"/>
+
+  <!-- Subtle teal-glow vignette so the dark background isn't flat. -->
+  <defs>
+    <radialGradient id="centerGlow" cx="50%" cy="55%" r="60%">
+      <stop offset="0%"   stop-color="#2dd4bf" stop-opacity="0.10"/>
+      <stop offset="55%"  stop-color="#2dd4bf" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#0e1116" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#centerGlow)"/>
+
+  <!-- Wordmark — large center-aligned. "Drive" off-white + "Forge" teal,
+       matching the dashboard header brand-text treatment.
+       Letter-spacing tightened slightly to read at small social-preview
+       crop sizes. -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+     text-anchor="middle">
+    <text x="640" y="280"
+          font-size="148"
+          font-weight="700"
+          letter-spacing="-3">
+      <tspan fill="#e6edf3">Drive</tspan><tspan fill="#2dd4bf">Forge</tspan>
+    </text>
+    <text x="640" y="350"
+          font-size="32"
+          font-weight="400"
+          fill="#8b97a5"
+          letter-spacing="0.4">
+      In-house enterprise drive refurbishment pipeline
+    </text>
+  </g>
+
+  <!-- Workflow bar — five pill steps showing the pipeline at a glance.
+       Centered horizontally, sits below the tagline. Plays the role
+       of "show, don't tell" — a viewer scrolls past and immediately
+       sees the project does sequential drive testing. -->
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+     font-size="20"
+     font-weight="500"
+     text-anchor="middle">
+    <!-- Layout: 5 pills, ~140 px wide each, ~20 px gap. Total = 5*140 + 4*20 = 780 px.
+         Centered: start x = (1280 - 780) / 2 = 250. -->
+    <g transform="translate(250, 420)">
+      <!-- SMART check -->
+      <rect x="0" y="0" width="140" height="50" rx="25" ry="25"
+            fill="rgba(88,166,255,0.15)" stroke="#58a6ff" stroke-width="1"/>
+      <text x="70" y="32" fill="#79b8ff">SMART</text>
+
+      <!-- Erase -->
+      <rect x="160" y="0" width="140" height="50" rx="25" ry="25"
+            fill="rgba(210,153,34,0.15)" stroke="#d29922" stroke-width="1"/>
+      <text x="230" y="32" fill="#d29922">Erase</text>
+
+      <!-- Burn-in -->
+      <rect x="320" y="0" width="140" height="50" rx="25" ry="25"
+            fill="rgba(163,113,247,0.15)" stroke="#a371f7" stroke-width="1"/>
+      <text x="390" y="32" fill="#a371f7">Burn-in</text>
+
+      <!-- Long test -->
+      <rect x="480" y="0" width="140" height="50" rx="25" ry="25"
+            fill="rgba(57,197,207,0.15)" stroke="#39c5cf" stroke-width="1"/>
+      <text x="550" y="32" fill="#39c5cf">Long test</text>
+
+      <!-- Grade -->
+      <rect x="640" y="0" width="140" height="50" rx="25" ry="25"
+            fill="rgba(45,212,191,0.18)" stroke="#2dd4bf" stroke-width="1"/>
+      <text x="710" y="32" fill="#2dd4bf">Grade A</text>
+    </g>
+  </g>
+
+  <!-- Repo URL — bottom-right corner of the safe area. -->
+  <text x="1240" y="600"
+        font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace"
+        font-size="20"
+        font-weight="400"
+        fill="#8b97a5"
+        text-anchor="end">
+    github.com/JT4862/driveforge
+  </text>
+</svg>

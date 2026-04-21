@@ -294,6 +294,43 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 .update-cmd-block .update-cmd-label:first-child { margin-top: 0; }
 .update-cmd-block pre.log-tail { margin: 0; }
 
+/* In-app self-update progress panel (v0.3.1+). Lives inside the
+   About/Updates section, appears after Install update is clicked.
+   Styled as a faintly-elevated tile with the live log front and center. */
+.install-progress {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: rgba(88, 166, 255, 0.04);
+}
+.install-progress h3 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  margin: 0 0 10px 0;
+}
+.update-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.update-log-tail {
+  max-height: 480px;          /* taller than copy-paste log; users want to read this one */
+  font-size: 11.5px;
+  background: #06090d;
+}
+/* Per-state pill colors mirror the systemd `is-active` vocabulary. */
+.update-state-active,
+.update-state-activating { background: rgba(88, 166, 255, 0.20); color: var(--accent); }
+.update-state-inactive   { background: rgba(63, 185, 80, 0.18); color: var(--ok); }
+.update-state-failed     { background: rgba(248, 81, 73, 0.20); color: var(--fail); }
+.update-state-unknown    { background: rgba(139, 151, 165, 0.18); color: var(--muted); }
+.update-cmd-details summary { cursor: pointer; padding: 4px 0; }
+.update-cmd-details[open] summary { margin-bottom: 6px; }
+
 /* Throughput sparkline — 30-second rolling window, normalized to peak.
    Uses currentColor so each phase-tinted card pulls the line into its
    own palette (burn=purple, long=cyan, info=blue). Height matches
