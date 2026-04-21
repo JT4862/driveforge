@@ -31,6 +31,14 @@ class PrinterConfig(BaseModel):
     connection: str = "usb"  # usb | network | bluetooth
     backend_identifier: str | None = None  # e.g. "file:///tmp/labels/" in dev
     label_roll: str | None = None  # e.g. "DK-1209"
+    # v0.6.4+ auto-print on pipeline completion. When True and a
+    # printer is configured, the orchestrator fires print_label
+    # automatically at the end of every drive's pipeline (pass OR
+    # fail tier — both produce a sticker with the grade). Operators
+    # can still click Print Label manually for a reprint. Default
+    # True because that's the whole point of having a printer
+    # configured: you want labels without extra clicks.
+    auto_print: bool = True
 
 
 class IntegrationsConfig(BaseModel):

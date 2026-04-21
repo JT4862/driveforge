@@ -675,69 +675,15 @@ def _public_report_url(request: Request, state, serial: str) -> str:
 
 def _cert_label_data_for(request: Request, state, drive, run):
     """Build CertLabelData for a given drive + run. Shared by preview +
-    print. v0.5.2+ populates the enriched fields (reallocated count,
-    pending sectors, badblocks errors, primary fail reason for F
-    drives) so the label can render the operator-facing detail the
-    sticker now shows.
-
-    `run.rules` is the pydantic-serialized list of grading rules —
-    safe to pass to `primary_fail_reason` even for non-F drives; it
-    returns None when no rule with forces_grade=F fired.
-    """
-    # Lazy import — the printer module pulls in qrcode + pillow which aren't
-    # always available in the macOS dev environment.
+    manual print. v0.6.4+ delegates to the request-free shared helper
+    in core/printer — only difference here is we derive the QR-code
+    URL from the incoming request (so the sticker QR resolves to the
+    same host the operator is using to view the dashboard)."""
     from driveforge.core import printer as printer_mod
 
-    # badblocks errors aren't stored on TestRun directly — they live
-    # in the grading rule output. Pull from rules if present; None
-    # otherwise. Rules format is [{"name": ..., "passed": ...,
-    # "detail": "badblocks found errors: read=3 write=0 compare=0"},
-    # ...]. For pass runs, the rule passed and detail reads
-    # "badblocks reported no errors" — we parse both.
-    badblocks: tuple[int, int, int] | None = None
-    for rule in (run.rules or []):
-        if rule.get("name") == "badblocks_clean":
-            import re as _re
-            m = _re.search(
-                r"read=(\d+)\s+write=(\d+)\s+compare=(\d+)",
-                rule.get("detail", ""),
-            )
-            if m:
-                badblocks = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            elif rule.get("passed"):
-                # pass-tier rule without parseable detail → 0/0/0
-                badblocks = (0, 0, 0)
-            break
-
-    # Primary fail reason — None for pass tiers. Caller of the label
-    # renderer doesn't need to check; the renderer treats missing
-    # reason as "generic failed grading" text.
-    fail_reason = printer_mod.primary_fail_reason(run.rules or [])
-
-    # v0.5.5+ healing delta. Only meaningful when both pre and post
-    # snapshots are present (pre is NULL on legacy pre-v0.5.5 rows).
-    remapped = None
-    if (
-        run.reallocated_sectors is not None
-        and run.pre_reallocated_sectors is not None
-    ):
-        remapped = run.reallocated_sectors - run.pre_reallocated_sectors
-
-    return printer_mod.CertLabelData(
-        model=drive.model,
-        serial=drive.serial,
-        capacity_tb=round(drive.capacity_bytes / 1_000_000_000_000, 2),
-        grade=run.grade or "—",
-        tested_date=(run.completed_at or run.started_at or datetime.now(UTC)).date(),
-        power_on_hours=run.power_on_hours_at_test or 0,
-        report_url=_public_report_url(request, state, drive.serial),
-        quick_mode=bool(run.quick_mode),
-        reallocated_sectors=run.reallocated_sectors,
-        current_pending_sector=run.current_pending_sector,
-        badblocks_errors=badblocks,
-        fail_reason=fail_reason,
-        remapped_during_run=remapped,
-        throughput_mean_mbps=run.throughput_mean_mbps,
+    report_url = _public_report_url(request, state, drive.serial)
+    return printer_mod.build_cert_label_data_from_run(
+        drive, run, report_url=report_url,
     )
 
 
@@ -1218,6 +1164,9 @@ async def save_printer(request: Request) -> RedirectResponse:
     p.model = (form.get("model") or "").strip() or None
     p.connection = (form.get("connection") or "usb").strip()
     p.label_roll = (form.get("label_roll") or "").strip() or None
+    # v0.6.4+: checkbox values are absent from the form submission when
+    # unchecked, present when checked. Presence-check = enabled.
+    p.auto_print = "auto_print" in form
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/settings?saved=printer", status_code=303)
 
