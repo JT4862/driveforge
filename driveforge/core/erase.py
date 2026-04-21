@@ -3,7 +3,12 @@
 One entry point — `secure_erase(drive)` — picks the right mechanism based on
 transport:
 
-- SATA: `hdparm --security-erase`
+- SATA: SAT passthrough — ATA SECURITY ERASE UNIT wrapped in
+        ATA-PASS-THROUGH(16) SCSI CDB, issued via `sg_raw`. Replaces
+        `hdparm --security-erase` as of v0.3.0; the legacy hdparm
+        path uses `HDIO_DRIVE_TASKFILE`, which modern Debian kernels
+        no longer provide on SAS-attached drives (CONFIG_IDE_TASK_IOCTL
+        error). See `driveforge.core.sat_passthru` for the SAT details.
 - SAS:  `sg_format --format`
 - NVMe: `nvme format -s 1`
 
@@ -16,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 
+from driveforge.core import sat_passthru
 from driveforge.core.drive import Drive, Transport
 from driveforge.core.process import run
 from driveforge.core.timing import capacity_timeout
@@ -81,37 +87,44 @@ def estimate_erase_seconds(drive: Drive) -> int | None:
 
 def _sata_secure_erase(
     device: str,
-    password: str = "driveforge",
+    password: str = sat_passthru.DEFAULT_PASSWORD,
     *,
     owner: str | None = None,
     capacity_bytes: int | None = None,
 ) -> None:
-    # Enable security with a throwaway password
-    r1 = run(
-        ["hdparm", "--user-master", "u", "--security-set-pass", password, device],
-        owner=owner,
-    )
-    if not r1.ok:
-        raise EraseError(f"failed to set ATA security pass on {device}: {r1.stderr}")
+    """SAT-passthrough secure erase for SATA drives. Replaces the
+    pre-v0.3.0 `hdparm --security-erase` call, which fails on modern
+    Debian kernels for SATA drives behind a SAS HBA with the
+    `CONFIG_IDE_TASK_IOCTL` kernel-configuration error. The SAT path
+    uses ATA-PASS-THROUGH(16) (SCSI opcode 0x85) wrapping the same
+    ATA SECURITY ERASE UNIT command, submitted via `sg_raw` →
+    `SG_IO` ioctl — which the kernel still supports universally.
 
+    The drive-side operation is identical to what hdparm would have
+    done: SET PASSWORD → ERASE PREPARE → ERASE UNIT. Only the
+    transport changes."""
     # Timeout preference: (1) drive's own hdparm-announced estimate × 1.5 if
     # present — vendor firmware knows the drive better than our blanket
-    # capacity model; (2) capacity-based fallback otherwise. No arbitrary
-    # upper cap — if an 8 TB drive needs 40 h, give it 40 h. The operator
-    # can abort from the dashboard if something's genuinely hung.
+    # capacity model — (2) capacity-based fallback otherwise. hdparm -I
+    # uses HDIO_GET_IDENTITY which still works on modern kernels (it's
+    # only the legacy IDE *task* ioctl that was removed); we keep using
+    # it for the time estimate even though the actual erase has moved to
+    # SAT passthrough. No arbitrary upper cap — if an 8 TB drive needs
+    # 40 h, give it 40 h. The operator can abort from the dashboard if
+    # something's genuinely hung.
     est = _sata_estimated_seconds(device)
     if est is not None:
         timeout_s = max(3600, int(est * 1.5))
     else:
         timeout_s = capacity_timeout(capacity_bytes, passes=1)
-
-    r2 = run(
-        ["hdparm", "--user-master", "u", "--security-erase", password, device],
-        timeout=timeout_s,
-        owner=owner,
-    )
-    if not r2.ok:
-        raise EraseError(f"security-erase failed on {device}: {r2.stderr}")
+    try:
+        sat_passthru.sat_secure_erase(
+            device, password=password, timeout_s=timeout_s, owner=owner
+        )
+    except sat_passthru.SatPassthruError as exc:
+        # Re-wrap so the orchestrator's generic EraseError catch still works
+        # without needing to know about the SAT layer.
+        raise EraseError(str(exc)) from exc
 
 
 def _sas_secure_erase(device: str, *, owner: str | None = None, capacity_bytes: int | None = None) -> None:

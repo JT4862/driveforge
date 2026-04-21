@@ -568,7 +568,12 @@ class Orchestrator:
             return
 
         if effective == Transport.SATA:
-            # Check the security block of hdparm -I
+            # Check the security block of hdparm -I. hdparm -I uses
+            # HDIO_GET_IDENTITY which still works on modern kernels
+            # (it's the legacy task ioctl that hdparm --security-* used
+            # to issue that's gone). For the actual unlock + disable we
+            # go through SAT passthrough since v0.3.0; identify-read
+            # stays on hdparm.
             result = process.run(["hdparm", "-I", drive.device_path], timeout=10)
             out = (result.stdout or "").lower() if result.ok else ""
             is_frozen = "\tfrozen" in out and "not\tfrozen" not in out
@@ -584,38 +589,30 @@ class Orchestrator:
                 raise RuntimeError("SATA security is frozen; cannot recover via software")
 
             if is_locked:
-                self._log(serial, "recovery: drive security-locked; attempting unlock")
-                unlock = process.run(
-                    [
-                        "hdparm",
-                        "--user-master", "u",
-                        "--security-unlock", "driveforge",
-                        drive.device_path,
-                    ],
-                    owner=serial,
+                from driveforge.core import sat_passthru
+                self._log(
+                    serial,
+                    "recovery: drive security-locked; attempting unlock via SAT passthrough",
                 )
-                if not unlock.ok:
-                    raise RuntimeError(
-                        f"hdparm --security-unlock failed: {unlock.stderr.strip() or 'unknown error'}"
-                    )
+                try:
+                    sat_passthru.security_unlock(drive.device_path, owner=serial)
+                except sat_passthru.SatPassthruError as exc:
+                    raise RuntimeError(f"SAT SECURITY UNLOCK failed: {exc}") from exc
                 self._log(serial, "recovery: security-unlock succeeded")
                 # Clear the ATA security password so the next erase starts fresh.
-                disable = process.run(
-                    [
-                        "hdparm",
-                        "--user-master", "u",
-                        "--security-disable", "driveforge",
-                        drive.device_path,
-                    ],
-                    owner=serial,
-                )
-                if disable.ok:
-                    self._log(serial, "recovery: security-disable succeeded; drive is fully released")
-                else:
-                    # Non-fatal — pipeline will set its own password at next erase.
+                # Non-fatal if it fails — pipeline will SET its own password
+                # at next erase, which on a still-locked drive would fail
+                # explicitly with a clear error rather than corrupting state.
+                try:
+                    sat_passthru.security_disable_password(drive.device_path, owner=serial)
                     self._log(
                         serial,
-                        f"recovery: security-disable failed (non-fatal): {disable.stderr.strip()}",
+                        "recovery: security-disable succeeded; drive is fully released",
+                    )
+                except sat_passthru.SatPassthruError as exc:
+                    self._log(
+                        serial,
+                        f"recovery: security-disable failed (non-fatal): {exc}",
                     )
                 return
 
