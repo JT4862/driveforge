@@ -125,6 +125,21 @@ class TestRun(Base):
     # recover_drive() path when the drive is re-inserted. Presence of a
     # non-NULL value with completed_at NULL marks a run awaiting recovery.
     interrupted_at_phase: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
+    # v0.6.7+ sanitization method actually used for this run. NULL on
+    # quick-pass + legacy pre-v0.6.7 rows + runs that didn't complete
+    # the sanitization phase.
+    #   "secure_erase"        — ATA SECURITY ERASE UNIT (SAT or hdparm)
+    #                            completed normally
+    #   "badblocks_overwrite" — secure_erase was unavailable (libata-
+    #                            freeze pattern on an HDD), pipeline
+    #                            fell through to badblocks' 4-pattern
+    #                            destructive write which IS NIST 800-88
+    #                            Clear for magnetic media
+    #   "none"                — pipeline never reached a sanitization
+    #                            step (error during earlier phase)
+    # Stamped on the run so the cert label + report can show the honest
+    # sanitization method.
+    sanitization_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")

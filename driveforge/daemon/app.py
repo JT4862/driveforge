@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -61,7 +62,16 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
     handles that class of pull deterministically.
 
     Never overwrites an already-set `interrupted_at_phase`.
+
+    v0.6.7+ also closes out truly-orphaned runs that are older than
+    24h AND already carry `interrupted_at_phase` from a previous
+    startup sweep — these drives were never re-inserted for recovery
+    and keeping their rows open forever clutters the DB and can lead
+    to stale "latest run" lookups in edge cases. Closed as
+    grade="error" with a clear error message so history shows what
+    happened.
     """
+    from datetime import timedelta
     from driveforge.db import models as m
 
     with state.session_factory() as session:
@@ -82,6 +92,38 @@ def _flag_dangling_runs_as_interrupted(state: DaemonState) -> None:
             logger.warning(
                 "daemon startup: %d dangling run(s) flagged for pull-recovery",
                 len(open_dangling),
+            )
+
+        # v0.6.7+ close out rows that have been sitting "interrupted,
+        # awaiting recovery" for more than 24h — the drive was never
+        # re-inserted, and keeping the row open is just DB clutter.
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        truly_orphaned = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.completed_at.is_(None))
+            .filter(m.TestRun.interrupted_at_phase.isnot(None))
+            .filter(m.TestRun.started_at < cutoff)
+            .all()
+        )
+        for run in truly_orphaned:
+            run.completed_at = datetime.now(UTC)
+            run.grade = "error"
+            run.error_message = (
+                f"[{run.interrupted_at_phase}] orphaned — daemon was "
+                f"force-killed or drive was never re-inserted for recovery; "
+                f"run closed automatically 24h+ after interrupt."
+            )[:4000]
+            logger.warning(
+                "daemon startup: closing truly-orphaned run %d (drive=%s, "
+                "interrupted_phase=%s, age>24h) as grade=error",
+                run.id, run.drive_serial, run.interrupted_at_phase,
+            )
+        if truly_orphaned:
+            session.commit()
+            logger.warning(
+                "daemon startup: closed %d truly-orphaned run(s) older than "
+                "24h (drive never re-inserted for recovery)",
+                len(truly_orphaned),
             )
 
 
