@@ -127,11 +127,15 @@ async def test_sampler_writes_samples_to_db(tmp_path) -> None:
          patch("driveforge.daemon.orchestrator.telemetry.read_chassis_power", return_value=180.0), \
          patch("driveforge.daemon.orchestrator.asyncio.sleep", side_effect=fast_sleep):
         task = asyncio.create_task(orch._telemetry_sampler_loop(run_id, drive))
-        # Let several sampling iterations run. Use the saved real-sleep
-        # reference so we don't trigger the orchestrator module's patched
-        # sleep from inside this test.
-        for _ in range(10):
-            await _real_sleep(0)
+        # v0.6.6+: sampler now offloads smart.snapshot + chassis_power
+        # reads to a real ThreadPoolExecutor so they don't block the
+        # event loop. Real threads need non-zero wall time to execute,
+        # so use a short real sleep per tick (vs. the pre-v0.6.6
+        # zero-sleep pattern which worked when the calls were sync).
+        # 30 ticks × 0.02 s = 0.6 s of real time is enough for
+        # several sampler iterations to complete on the executor.
+        for _ in range(30):
+            await _real_sleep(0.02)
         task.cancel()
         try:
             await task
@@ -183,8 +187,10 @@ async def test_sampler_survives_transient_smartctl_errors(tmp_path) -> None:
          patch("driveforge.daemon.orchestrator.telemetry.read_chassis_power", return_value=200.0), \
          patch("driveforge.daemon.orchestrator.asyncio.sleep", side_effect=fast_sleep):
         task = asyncio.create_task(orch._telemetry_sampler_loop(run_id, drive))
-        for _ in range(10):
-            await _real_sleep(0)
+        # v0.6.6+: sampler uses a real ThreadPoolExecutor now; threads
+        # need wall-clock time to schedule + run + resolve futures.
+        for _ in range(30):
+            await _real_sleep(0.02)
         task.cancel()
         try:
             await task
