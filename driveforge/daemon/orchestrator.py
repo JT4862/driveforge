@@ -639,6 +639,13 @@ class Orchestrator:
                 "recovery: running shared preflight to clean security state "
                 "(unlock + disable if needed)",
             )
+            # v0.6.7+: show the drive as active during recovery preflight
+            # so operators see progress on the dashboard during the
+            # potentially-long SAT unlock + disable-password sequence.
+            self.state.active_phase[serial] = "recovery_preflight"
+            self.state.active_sublabel[serial] = (
+                "recovery: probing security state + unlocking if needed"
+            )
             loop = asyncio.get_event_loop()
             try:
                 await loop.run_in_executor(
@@ -872,6 +879,32 @@ class Orchestrator:
                 run.interrupted_at_phase = phase
                 session.commit()
 
+    def _stamp_sanitization_method(self, run_id: int, method: str) -> None:
+        """v0.6.7+ — mark the sanitization method on a live run.
+
+        Called from `_run_secure_erase` after either path completes:
+          - "secure_erase" on successful SAT/hdparm SECURITY ERASE UNIT
+          - "badblocks_overwrite" when the HDD libata-freeze fallback
+            engaged and the pipeline is deferring sanitization to
+            badblocks
+
+        The cert label's "Sanitized via ..." line reads from this
+        column. Fail-safe: any DB error is logged but never raises —
+        the sanitization happened regardless of whether we stamped it.
+        """
+        try:
+            with self.state.session_factory() as session:
+                run = session.get(m.TestRun, run_id)
+                if run is None:
+                    return
+                run.sanitization_method = method
+                session.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "failed to stamp sanitization_method=%s on run_id=%s",
+                method, run_id,
+            )
+
     def _record_failure(self, drive: Drive, *, phase: str, detail: str) -> None:
         """Close an open TestRun with a non-success verdict.
 
@@ -1065,7 +1098,7 @@ class Orchestrator:
 
         # Phase 4: secure erase (ALWAYS runs — this is the destructive step)
         await self._advance(run_id, "secure_erase", drive)
-        await self._run_secure_erase(drive, dev_mode=dev_mode)
+        await self._run_secure_erase(drive, dev_mode=dev_mode, run_id=run_id)
 
         bb_errors = (0, 0, 0)
         bb_throughput = throughput_mod.ThroughputCollector().finalize()
@@ -1223,7 +1256,7 @@ class Orchestrator:
         logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
         return None
 
-    async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool) -> None:
+    async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool, run_id: int | None = None) -> None:
         if dev_mode:
             await asyncio.sleep(1.0)
             return
@@ -1232,6 +1265,15 @@ class Orchestrator:
             # boot drive or adapter, not a test target.
             raise PipelineFailure("secure_erase", "refusing to erase USB-transport drive")
         serial = drive.serial
+
+        # v0.6.7+: pre-active state visibility. Mark the drive as active in
+        # "preflight" phase BEFORE calling ensure_clean_security_state, so
+        # operators see the drive on the dashboard during the
+        # preflight/recovery window instead of a silent 1-2 minute gap
+        # while nothing renders. The preflight call can take 60+ seconds
+        # on drives stuck in LOCKED state (SAT unlock + disable-password).
+        self.state.active_phase[serial] = "preflight"
+        self.state.active_sublabel[serial] = "preflight: probing security state"
 
         # v0.6.3+: advisory-print for known-flaky drive families. ST3000DM001
         # et al — surface the heads-up in the drive log before any erase
@@ -1357,6 +1399,12 @@ class Orchestrator:
                 ),
                 timeout=outer_timeout_s,
             )
+            # v0.6.7+: stamp the method that actually sanitized the drive.
+            # Pass-through success path = "secure_erase" (either SAT
+            # directly or v0.6.3 hdparm fallback — both are real
+            # ATA SECURITY ERASE UNIT, just different transports).
+            if run_id is not None:
+                self._stamp_sanitization_method(run_id, "secure_erase")
         except asyncio.TimeoutError as exc:
             # Outer deadline tripped. Inner timeouts should have fired
             # before this — if we're here, either sg_raw/hdparm is
@@ -1377,6 +1425,34 @@ class Orchestrator:
             # for novel patterns).
             from driveforge.core import ata_errors
             decoded = ata_errors.decode_secure_erase_error(str(exc))
+
+            # v0.6.7+: HDD badblocks-only sanitization fallback. When the
+            # error is the libata-freeze signature (both SAT and hdparm
+            # paths refused with ABRT — which we've observed is 100% of
+            # ST3000DM001 inserts on libata-using hosts), AND the drive
+            # is a rotating HDD (rotation_rate > 0), the pipeline can
+            # safely continue to badblocks. A 4-pattern destructive
+            # overwrite IS NIST 800-88 Clear for magnetic media — a
+            # legitimate sanitization method. For SSDs this fallback is
+            # unsafe (wear leveling may leave stale NAND pages) so we
+            # keep the original failure for them.
+            is_hdd = drive.rotation_rate and drive.rotation_rate > 0
+            if is_hdd and erase.is_libata_freeze_pattern(str(exc)):
+                self._log(
+                    serial,
+                    "secure_erase unavailable (libata freeze detected) — HDD "
+                    "proceeding via badblocks 4-pattern overwrite (NIST 800-88 "
+                    "Clear for magnetic media)",
+                )
+                self.state.active_sublabel[serial] = (
+                    "secure_erase unavailable → proceeding via badblocks overwrite"
+                )
+                if run_id is not None:
+                    self._stamp_sanitization_method(run_id, "badblocks_overwrite")
+                # Return normally — the pipeline continues to the
+                # badblocks phase which will do the actual sanitization.
+                return
+
             failure_msg = f"{decoded.cause} — {decoded.next_step}"
             self._log(serial, f"secure_erase failed: {decoded.cause}")
             self._log(serial, f"  → {decoded.next_step}")

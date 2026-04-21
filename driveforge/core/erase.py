@@ -374,6 +374,32 @@ def _is_sat_erase_unit_abort(err_text: str) -> bool:
     )
 
 
+def is_libata_freeze_pattern(err_text: str) -> bool:
+    """True iff the error is the "both SAT and hdparm refused
+    SECURITY ERASE UNIT with ABRT" signature produced by
+    `_sata_secure_erase` when both paths fail (v0.6.3+).
+
+    This is the textbook libata-auto-freeze case — the drive
+    isn't broken, the kernel's libata driver just issued
+    SECURITY FREEZE LOCK during udev probe, and no amount of
+    software retry on this host will get the drive to accept
+    the command. v0.6.7+ uses this signal to decide whether
+    an HDD can fall back to badblocks-only sanitization
+    (safe — 4-pattern overwrite = NIST 800-88 Clear for
+    magnetic media) vs. failing the run outright.
+
+    SSDs hitting this pattern should NOT use the fallback —
+    wear leveling means logical-sector overwrite doesn't
+    necessarily rewrite NAND. Caller must gate on drive type.
+    """
+    t = (err_text or "").lower()
+    return (
+        "both sat" in t
+        and "hdparm" in t
+        and ("abrt" in t or "aborted" in t or "refused" in t)
+    )
+
+
 def _sata_secure_erase_hdparm(
     device: str,
     *,

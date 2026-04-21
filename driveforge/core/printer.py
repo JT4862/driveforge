@@ -82,6 +82,18 @@ class CertLabelData:
     # claiming a synthetic benchmark number, just surfacing what the
     # drive actually did during the burn-in we ran on it.
     throughput_mean_mbps: float | None = None
+    # v0.6.7+ sanitization method actually used for this run. Affects
+    # the Wipe: line on pass-tier labels:
+    #   "secure_erase" (default)  → "Wipe: NIST 800-88 + 4-pass"
+    #   "badblocks_overwrite"     → "Wipe: NIST 800-88 Clear (4-pass)"
+    #   None                      → fall through to quick_mode /
+    #                                secure_erase default
+    # The badblocks_overwrite case is when the HDD libata-freeze
+    # fallback engaged and we sanitized via 4-pattern destructive
+    # write only (no ATA SECURITY ERASE UNIT). Legitimate NIST 800-88
+    # Clear for magnetic media, but the label should state the method
+    # honestly so a downstream auditor can trace the verdict.
+    sanitization_method: str | None = None
 
 
 def primary_fail_reason(rules: list[dict]) -> str | None:
@@ -312,19 +324,21 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     ]
 
     if is_fail:
-        # Reason line — the whole point of the F label variant. Wrap
-        # at ~26 chars so long reasons still fit the left column
-        # without overlapping the QR.
-        reason = data.fail_reason or "failed grading (see report)"
-        if len(reason) <= 28:
+        # Reason line — the whole point of the F label variant.
+        # v0.6.7+: tighter default ("failed grading" without the
+        # redundant "(see report)" — the footer already says that)
+        # + tighter wrap at 24 chars so long reasons fit inside the
+        # left column cleanly without overlapping the QR code.
+        reason = data.fail_reason or "failed grading"
+        if len(reason) <= 24:
             lines.append(f"Reason: {reason}")
         else:
-            # Split roughly at the first space past the midpoint so
-            # wrap breaks look natural.
+            # Split at the first space past the midpoint so wrap
+            # breaks look natural.
             mid = len(reason) // 2
             split_at = reason.find(" ", mid)
-            if split_at == -1:
-                split_at = 28
+            if split_at == -1 or split_at > 24:
+                split_at = 24
             lines.append(f"Reason: {reason[:split_at]}")
             lines.append(f"        {reason[split_at:].strip()}")
     else:
@@ -353,11 +367,18 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
         if data.throughput_mean_mbps is not None and not data.quick_mode:
             lines.append(f"Sustained {data.throughput_mean_mbps:.0f} MB/s over 8-pass burn-in")
 
-        wipe_line = (
-            "Wipe: NIST 800-88 Purge*"
-            if data.quick_mode
-            else "Wipe: NIST 800-88 + 4-pass"
-        )
+        # v0.6.7+: wipe line reflects the actual sanitization method
+        # used. For HDDs where the libata-freeze fallback engaged, the
+        # honest label says "Clear (4-pass)" not the default
+        # "NIST 800-88 + 4-pass" (which implies secure_erase too).
+        if data.quick_mode:
+            wipe_line = "Wipe: NIST 800-88 Purge*"
+        elif data.sanitization_method == "badblocks_overwrite":
+            wipe_line = "Wipe: NIST 800-88 Clear (4-pass)"
+        else:
+            # Default / None / "secure_erase" — ATA SECURITY ERASE UNIT
+            # + 4-pass badblocks overwrite was run.
+            wipe_line = "Wipe: NIST 800-88 + 4-pass"
         lines.append(wipe_line)
 
     for line in lines:
@@ -373,15 +394,17 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     grade_x = size[0] - grade_w - padding
     grade_y = padding + 70  # below title separator, vertically centered-ish
 
-    # QR — same geometry as before, just now the body might extend
-    # another line or two. The wide left column (380 px) prevents
-    # collisions up to 28-char model strings.
+    # QR positioning. v0.6.7+: nudged right by 40px (380 → 420) so
+    # long body lines like "Reason: failed grading (see report)"
+    # don't clip against the QR's left edge. Body text is still
+    # confined to the left column by its ~24-character wrap limit;
+    # the 40px gap is defense-in-depth.
     qr = qrcode.QRCode(box_size=3, border=1)
     qr.add_data(data.report_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     qr_top = padding + 52
-    qr_x = padding + 380
+    qr_x = padding + 420
     qr_size_cap = size[1] - qr_top - 32
     qr_size = min(qr_size_cap, grade_x - qr_x - 12, 150)
     qr_size = max(qr_size, 80)
@@ -645,6 +668,11 @@ def build_cert_label_data_from_run(drive, run, *, report_url: str) -> CertLabelD
         fail_reason=fail_reason,
         remapped_during_run=remapped,
         throughput_mean_mbps=run.throughput_mean_mbps,
+        # v0.6.7+: pulled onto the label so the Wipe: line reflects
+        # the honest method (secure_erase vs 4-pass overwrite only).
+        # None on pre-v0.6.7 rows → label falls back to the default
+        # NIST 800-88 + 4-pass wording (backward compatible).
+        sanitization_method=getattr(run, "sanitization_method", None),
     )
 
 
