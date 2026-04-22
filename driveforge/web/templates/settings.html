@@ -158,13 +158,39 @@
     </label>
     <label class="field">
       <span>Connection</span>
-      <select name="connection">
+      <select name="connection" id="printer-connection-select">
         {% for c in ["usb", "network", "bluetooth"] %}
         <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
         {% endfor %}
         <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
       </select>
     </label>
+    {# v0.7.0+ Network connection fields. Shown only when connection=
+       "network". Tiny inline script at the bottom of this panel
+       toggles visibility on select change. Values always round-trip
+       on save (see routes.py::save_printer) so switching usb → network
+       → usb doesn't lose what the operator typed. #}
+    <div class="field-group printer-network-fields"
+         id="printer-network-fields"
+         style="{% if settings.printer.connection != 'network' %}display: none;{% endif %}">
+      <label class="field">
+        <span>Printer IP / hostname</span>
+        <input type="text" name="network_host"
+               placeholder="e.g. 10.10.10.42 or ql820.local"
+               value="{{ settings.printer.network_host or '' }}">
+      </label>
+      <label class="field">
+        <span>TCP port</span>
+        <input type="number" name="network_port" min="1" max="65535"
+               value="{{ settings.printer.network_port or 9100 }}">
+      </label>
+      <p class="muted small" style="margin-top: 4px;">
+        Brother QL-820NWB and other network-capable QL models listen on
+        TCP 9100 by default. Find the printer's IP from its LCD menu
+        (WLAN → TCP/IP → IP Address) or your DHCP lease list. Test Print
+        below verifies reachability + data dispatch in one click.
+      </p>
+    </div>
     <label class="field">
       <span>Label roll</span>
       <select name="label_roll">
@@ -235,6 +261,22 @@
     Save a printer model above to enable the Test print button.
   </p>
   {% endif %}
+
+  {# v0.7.0+ Show/hide the network-printer fields based on the
+     Connection select. Tiny vanilla-JS — no framework, no htmx, no
+     extra render. Deliberately inline here because it's one
+     selector + one style toggle and has no reuse outside this
+     panel. #}
+  <script>
+    (function () {
+      var sel = document.getElementById('printer-connection-select');
+      var fields = document.getElementById('printer-network-fields');
+      if (!sel || !fields) { return; }
+      sel.addEventListener('change', function () {
+        fields.style.display = (sel.value === 'network') ? '' : 'none';
+      });
+    })();
+  </script>
 </section>
 
 <form class="panel" method="post" action="/settings/integrations">
@@ -336,15 +378,33 @@
        sudo path with a polkit-mediated systemctl start — the HTTP
        route still hits /settings/install-update, but the underlying
        primitive in updates.trigger_in_app_update() no longer shells
-       through sudo. #}
+       through sudo.
+
+       v0.7.0+: client-side disable when pipelines are active. The
+       server-side refusal in /settings/install-update (v0.6.x) stays
+       as belt-and-suspenders — this is pure UX layering so operators
+       see the gate BEFORE clicking, not as an error banner after. #}
+    {% set _gate_blocked = active_phase_count > 0 or recovery_count > 0 %}
     <form method="post" action="/settings/install-update"
           style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
       <button type="submit" class="btn primary"
-              onclick="return confirm('Install update {{ update_info.latest_version }} now? This will:\n\n  • git-pull origin/main in the source tree\n  • re-run scripts/install.sh\n  • restart driveforge-daemon (10-15 sec dashboard outage)\n\nAny drive currently under test would have its pipeline interrupted; the daemon refuses to start an update while drives are active.\n\nProceed?');">
+              {% if _gate_blocked %}disabled
+              title="Update is blocked while drives are running."
+              {% else %}
+              onclick="return confirm('Install update {{ update_info.latest_version }} now? This will:\n\n  • git-pull origin/main in the source tree\n  • re-run scripts/install.sh\n  • restart driveforge-daemon (10-15 sec dashboard outage)\n\nAny drive currently under test would have its pipeline interrupted; the daemon refuses to start an update while drives are active.\n\nProceed?');"
+              {% endif %}>
         Install update now
       </button>
       <span class="muted small">
-        Restarts the daemon &mdash; the dashboard will reconnect automatically.
+        {% if _gate_blocked %}
+          {# Render the exact reason so operators know what to wait for. #}
+          {% set _bits = [] %}
+          {% if active_phase_count %}{% set _ = _bits.append(active_phase_count|string + " drive" + ("" if active_phase_count == 1 else "s") + " under test") %}{% endif %}
+          {% if recovery_count %}{% set _ = _bits.append(recovery_count|string + " drive" + ("" if recovery_count == 1 else "s") + " in recovery") %}{% endif %}
+          &#9888; Update blocked: {{ _bits|join(", ") }}. Available once pipelines are idle.
+        {% else %}
+          Restarts the daemon &mdash; the dashboard will reconnect automatically.
+        {% endif %}
       </span>
     </form>
     <details class="update-cmd-details" style="margin-top: 12px;">

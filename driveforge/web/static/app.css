@@ -85,6 +85,35 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
   50%      { box-shadow: 0 0 0 4px rgba(63,185,80,0.14); }
 }
 
+/* v0.7.0+ muted variant — pipelines are active so the install is
+   blocked server-side. Greyed-out colors signal "can't install right
+   now" while staying clickable for the release-notes preview. */
+.update-available-pill.update-available-pill--blocked {
+  background: rgba(200, 200, 200, 0.08);
+  border-color: rgba(200, 200, 200, 0.30);
+  color: var(--muted);
+}
+.update-available-pill.update-available-pill--blocked:hover {
+  background: rgba(200, 200, 200, 0.14);
+  border-color: rgba(200, 200, 200, 0.50);
+  color: var(--muted);
+}
+.update-available-pill.update-available-pill--blocked .update-dot {
+  background: var(--muted);
+  box-shadow: 0 0 0 2px rgba(200, 200, 200, 0.20);
+  animation: none;  /* no pulse; the state is "wait", not "act" */
+}
+.update-available-pill.update-available-pill--blocked .update-version {
+  color: rgba(200, 200, 200, 0.60);
+}
+.update-available-pill .update-gate-note {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(200, 200, 200, 0.75);
+  margin-left: 2px;
+}
+
 /* v0.6.9+ udev-pipeline stall banner. Sits between the topbar and
    .content so it can't be scrolled out of view; warns the operator
    that drive insertions won't enumerate until udev is restarted.
@@ -150,6 +179,61 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
 @keyframes udevStallPulse {
   0%, 100% { box-shadow: 0 0 0 3px rgba(240, 166, 64, 0.18); }
   50%      { box-shadow: 0 0 0 6px rgba(240, 166, 64, 0.08); }
+}
+
+/* v0.7.0+ Abort-flash banner. Thinner than the udev-stall banner
+   because it's transient (one pageload after submit) vs. persistent.
+   Four status tones match the four outcome keys in
+   orchestrator.abort_drive's return. */
+.abort-flash-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  font-size: 13px;
+  line-height: 1.4;
+  border-bottom: 1px solid transparent;
+}
+.abort-flash-banner .abort-flash-icon {
+  flex: 0 0 auto;
+  font-size: 16px;
+  font-weight: bold;
+}
+.abort-flash-banner .abort-flash-text {
+  flex: 1;
+  min-width: 0;
+}
+.abort-flash-banner .abort-flash-text strong {
+  margin-right: 4px;
+}
+.abort-flash-banner--aborted {
+  background: rgba(63,185,80,0.10);
+  border-bottom-color: rgba(63,185,80,0.30);
+  color: var(--ok);
+}
+.abort-flash-banner--not_active,
+.abort-flash-banner--already_done {
+  background: rgba(120, 160, 220, 0.10);
+  border-bottom-color: rgba(120, 160, 220, 0.30);
+  color: rgba(180, 200, 230, 0.9);
+}
+
+/* v0.7.0+ Active-pipeline panel on the drive-detail page. Subtle
+   left-border accent so it stands out from the static "Latest test
+   run" panel beneath it without becoming alarming. */
+.active-pipeline-panel {
+  border-left: 4px solid rgba(120, 160, 220, 0.60);
+  background: rgba(120, 160, 220, 0.05);
+}
+.active-pipeline-panel .active-phase-pill {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(120, 160, 220, 0.20);
+  color: rgba(180, 200, 230, 0.95);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 /* v0.6.9+ frozen-SSD remediation panel on the drive-detail page.

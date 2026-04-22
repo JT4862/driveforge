@@ -692,6 +692,16 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     # UdevHealth | None; base.html null-checks and only renders the
     # banner when `udev_health.needs_operator_action` is True.
     web_templates.env.globals["udev_health"] = lambda: state.udev_health
+    # v0.7.0+: expose active-drive + recovery counts so the navbar's
+    # Update Available pill can render a muted/disabled variant when
+    # pipelines are running. Returns a small dict rather than raw
+    # counts so we can add more gate signals later without touching
+    # every template.
+    web_templates.env.globals["update_gate"] = lambda: {
+        "active_count": len(state.active_phase),
+        "recovery_count": len(state.recovery_serials),
+        "blocked": bool(state.active_phase) or bool(state.recovery_serials),
+    }
     # v0.6.3+: known-flaky-drive advisory lookup. Templates can call
     # `drive_advisory(model)` on any drive card / detail page; returns a
     # string when the model is on the known-flaky list, None otherwise.
