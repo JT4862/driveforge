@@ -29,6 +29,18 @@
   {% endif %}
   <div class="actions">
     <a class="btn primary" href="/batches/new">+ New Batch</a>
+    {# v0.8.0+ Batch regrade. Only visible when there's at least one
+       idle drive with a completed A/B/C run eligible for regrade. The
+       route (POST /regrade-all-idle) iterates serially over candidates;
+       per-drive failures are logged but don't abort the batch. #}
+    <form method="post" action="/regrade-all-idle" class="inline"
+          style="margin: 0;">
+      <button type="submit" class="btn"
+              title="Re-apply current grading thresholds to every installed, idle drive with a prior A/B/C run. Non-destructive; ~5 seconds per drive."
+              onclick="return confirm('Regrade every installed idle drive using current Settings → Grading thresholds? Pulls fresh SMART and re-grades each one (no destructive operations). Typical duration: ~5 seconds per drive.')">
+        Regrade idle drives
+      </button>
+    </form>
     {#- Auto-enroll segmented toggle. Three mutually-exclusive modes; clicking
         one POSTs immediately and redirects back. Meant for the unattended
         rack workflow: operator watches LEDs, swaps drives as they pass/fail,

@@ -1,6 +1,20 @@
 {% extends "base.html" %}
 {% block title %}{{ drive.model }} ({{ drive.serial }}) — DriveForge{% endblock %}
 {% block content %}
+{# v0.8.0+ Print-only header. Visible ONLY when the operator prints
+   (Cmd-P / Ctrl-P → Save as PDF or send to printer). Gives the
+   printed sheet a professional header that carries the DriveForge
+   brand + timestamp of the report, which is exactly what a buyer
+   sees on paper. Hidden on the browser page via .print-only CSS. #}
+<div class="print-only print-header">
+  <div class="print-brand">
+    <strong>DriveForge</strong> drive condition report
+  </div>
+  <div class="print-meta">
+    Report generated: {{ report_generated_at }}
+    &middot; Version: {{ driveforge_version }}
+  </div>
+</div>
 {% set flash = request.query_params.get('flash') %}
 {% if flash %}
 <div class="banner {% if flash == 'ok' %}ok-banner{% else %}warn-banner{% endif %}">
@@ -205,6 +219,212 @@
   </dl>
 </section>
 
+{# v0.8.0+ Buyer-transparency report sections. Every numeric value below
+   is sourced from the post-test SMART snapshot persisted on the TestRun
+   row. Rows hide entirely when the drive's transport doesn't report
+   the attribute — never display "—" as if we tried and got nothing. #}
+
+{% macro format_bytes(b) -%}
+  {%- if b is none -%}—
+  {%- elif b >= 1_000_000_000_000 -%}{{ "%.2f"|format(b / 1_000_000_000_000) }} TB
+  {%- elif b >= 1_000_000_000 -%}{{ "%.1f"|format(b / 1_000_000_000) }} GB
+  {%- elif b >= 1_000_000 -%}{{ "%.0f"|format(b / 1_000_000) }} MB
+  {%- else -%}{{ "{:,}".format(b) }} B
+  {%- endif -%}
+{%- endmacro %}
+
+{% set has_lifetime_io = latest.lifetime_host_reads_bytes is not none or latest.lifetime_host_writes_bytes is not none or latest.wear_pct_used is not none %}
+{% if has_lifetime_io %}
+<section class="panel buyer-report-section">
+  <h2>Wear &amp; lifetime I/O</h2>
+  <dl class="kv">
+    {% if latest.drive_class %}
+    <dt>Drive class</dt>
+    <dd>
+      {{ latest.drive_class|replace("_", " ")|title }}
+      <span class="muted small">
+        &middot; auto-classified from model + transport + RPM; used to pick
+        the workload rating for the ceiling grading rule
+      </span>
+    </dd>
+    {% endif %}
+    {% if latest.lifetime_host_writes_bytes is not none %}
+    <dt>Lifetime host writes</dt>
+    <dd>
+      {{ format_bytes(latest.lifetime_host_writes_bytes) }}
+      {%- if latest.drive_class and latest.lifetime_host_writes_bytes %}
+        {%- set rated_map = {
+          "enterprise_hdd": settings.grading.rated_tbw_enterprise_hdd,
+          "enterprise_ssd": settings.grading.rated_tbw_enterprise_ssd,
+          "consumer_hdd": settings.grading.rated_tbw_consumer_hdd,
+          "consumer_ssd": settings.grading.rated_tbw_consumer_ssd
+        } %}
+        {%- set rated = rated_map.get(latest.drive_class) %}
+        {%- if rated %}
+          {%- set pct = (latest.lifetime_host_writes_bytes / (rated * 1_000_000_000_000) * 100)|round(0)|int %}
+          <span class="muted small">({{ pct }}% of rated {{ rated }} TB for class)</span>
+        {%- endif %}
+      {%- endif %}
+    </dd>
+    {% endif %}
+    {% if latest.lifetime_host_reads_bytes is not none %}
+    <dt>Lifetime host reads</dt>
+    <dd>{{ format_bytes(latest.lifetime_host_reads_bytes) }}</dd>
+    {% endif %}
+    {% if latest.wear_pct_used is not none %}
+    <dt>SSD wear used</dt>
+    <dd>
+      {{ latest.wear_pct_used }}%
+      <span class="muted small">
+        (0% = factory-fresh, 100% = end of rated life)
+      </span>
+    </dd>
+    {% endif %}
+    {% if latest.available_spare_pct is not none %}
+    <dt>NVMe available spare</dt>
+    <dd>
+      {{ latest.available_spare_pct }}%
+      <span class="muted small">
+        &middot; drive firmware's reserve pool for bad-block remapping
+      </span>
+    </dd>
+    {% endif %}
+  </dl>
+</section>
+{% endif %}
+
+{% set has_error_counters = latest.end_to_end_error_count is not none or latest.command_timeout_count is not none or latest.reallocation_event_count is not none or latest.nvme_critical_warning is not none or latest.nvme_media_errors is not none or latest.self_test_has_past_failure is not none %}
+{% if has_error_counters %}
+<section class="panel buyer-report-section">
+  <h2>Error counters &amp; self-test history</h2>
+  <dl class="kv">
+    {% if latest.end_to_end_error_count is not none %}
+    <dt>End-to-end errors</dt>
+    <dd>
+      {% if latest.end_to_end_error_count == 0 %}0
+      {% else %}<span class="bad">{{ latest.end_to_end_error_count }}</span> &middot; drive detected silent data corruption internally
+      {% endif %}
+    </dd>
+    {% endif %}
+    {% if latest.command_timeout_count is not none %}
+    <dt>Command timeouts (lifetime)</dt>
+    <dd>
+      {{ latest.command_timeout_count }}
+      {% if latest.command_timeout_count > 5 %}<span class="muted small">(elevated — drive has been slow to respond)</span>{% endif %}
+    </dd>
+    {% endif %}
+    {% if latest.reallocation_event_count is not none %}
+    <dt>Reallocation events</dt>
+    <dd>
+      {{ latest.reallocation_event_count }}
+      <span class="muted small">&middot; distinct remap events (vs total sectors remapped)</span>
+    </dd>
+    {% endif %}
+    {% if latest.nvme_critical_warning is not none %}
+    <dt>NVMe critical warnings</dt>
+    <dd>
+      {% if latest.nvme_critical_warning == 0 %}None
+      {% else %}<span class="bad">0x{{ "%02x"|format(latest.nvme_critical_warning) }}</span> &middot; drive firmware is signalling operator attention
+      {% endif %}
+    </dd>
+    {% endif %}
+    {% if latest.nvme_media_errors is not none %}
+    <dt>NVMe media errors</dt>
+    <dd>
+      {% if latest.nvme_media_errors == 0 %}0
+      {% else %}<span class="bad">{{ latest.nvme_media_errors }}</span> &middot; uncorrected read/write errors from the NAND layer
+      {% endif %}
+    </dd>
+    {% endif %}
+    {% if latest.self_test_has_past_failure is not none %}
+    <dt>Past self-test failures</dt>
+    <dd>
+      {% if latest.self_test_has_past_failure %}
+        <span class="bad">Yes</span> &middot; drive's own self-test log shows at least one past failure
+      {% else %}
+        None recorded
+      {% endif %}
+    </dd>
+    {% endif %}
+  </dl>
+</section>
+{% endif %}
+
+{# v0.8.0+ plain-English grading rationale for the buyer. Renders every
+   rule that FIRED (passed=False OR has a forces_grade ceiling). The
+   raw rules table further down is for developer-level debugging; this
+   section is the one aimed at somebody holding the printed report.  #}
+{% if latest.rules %}
+<section class="panel buyer-report-section grading-rationale">
+  <h2>Why this drive graded {{ latest.grade or "—" }}</h2>
+  {% set ceiling_rules = [] %}
+  {% set fail_rules = [] %}
+  {% for rule in latest.rules %}
+    {% if rule.forces_grade == "F" %}{% set _ = fail_rules.append(rule) %}
+    {% elif rule.forces_grade in ("B", "C") %}{% set _ = ceiling_rules.append(rule) %}
+    {% endif %}
+  {% endfor %}
+  {% if fail_rules %}
+  <p class="muted" style="margin-top: 0;"><strong>Auto-fail signals that fired:</strong></p>
+  <ul class="rationale-list">
+    {% for r in fail_rules %}<li><strong>&#9888; Fail</strong> &middot; {{ r.detail }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if ceiling_rules %}
+  <p class="muted"><strong>Ceiling rules that capped the grade:</strong></p>
+  <ul class="rationale-list">
+    {% for r in ceiling_rules %}<li><strong>{{ r.forces_grade }} cap</strong> &middot; {{ r.detail }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if not fail_rules and not ceiling_rules %}
+  <p class="muted">No ceiling or fail rules fired. Grade determined entirely
+  by the counter-based tier rule
+  (<code>reallocated_sectors ≤ {{ settings.grading.grade_a_reallocated_max }}</code> for A, etc.).</p>
+  {% endif %}
+  <details style="margin-top: 14px;">
+    <summary class="muted small">Show full rule evaluation (developer-level detail)</summary>
+    <table class="rules" style="margin-top: 10px;">
+      <thead><tr><th>Rule</th><th>Passed</th><th>Detail</th></tr></thead>
+      <tbody>
+        {% for rule in latest.rules %}
+        <tr class="{% if rule.passed %}ok{% else %}fail{% endif %}">
+          <td>{{ rule.name }}</td>
+          <td>{% if rule.passed %}✓{% else %}✗{% endif %}</td>
+          <td>{{ rule.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</section>
+{% endif %}
+
+{# v0.8.0+ Regrade button. Visible only when:
+   (1) drive is currently installed AND not active (no pipeline running),
+   (2) has at least one completed non-F TestRun.
+   Re-reads SMART without any destructive operations and re-applies
+   grading rules. Cheap (~5 s) — useful when thresholds change in
+   Settings, or when a drive has sat on a shelf long enough for its
+   counters to drift. #}
+{% if latest and latest.grade in ("A", "B", "C") and not active_phase and drive.serial in (installed_serials or []) %}
+<section class="panel">
+  <h2>Regrade</h2>
+  <p class="muted">
+    Pulls fresh SMART data and re-applies grading rules using your current
+    Settings &rarr; Grading thresholds. Does NOT re-run secure-erase,
+    badblocks, or self-tests &mdash; the destructive work from the original
+    pipeline is preserved. Creates a new test run (<code>phase=regrade</code>)
+    so the history column shows the grade transition.
+  </p>
+  <form method="post" action="/drives/{{ drive.serial }}/regrade" style="margin: 0;">
+    <button type="submit" class="btn"
+            onclick="return confirm('Regrade {{ drive.serial }}? Pulls fresh SMART and re-applies the current grading thresholds. Typical duration: 5 seconds. A banner at the top of the page will confirm.')">
+      Regrade this drive
+    </button>
+  </form>
+</section>
+{% endif %}
+
 {% if latest.completed_at and latest.grade in ("A", "B", "C", "F") %}
 <dialog id="label-preview-modal" class="label-preview-dialog">
   <header class="label-preview-head">
@@ -251,23 +471,10 @@
 </section>
 {% endif %}
 
-{% if latest.rules %}
-<section class="panel">
-  <h2>Grading rules</h2>
-  <table class="rules">
-    <thead><tr><th>Rule</th><th>Result</th><th>Detail</th></tr></thead>
-    <tbody>
-    {% for rule in latest.rules %}
-      <tr class="{% if rule.passed %}ok{% else %}fail{% endif %}">
-        <td>{{ rule.name }}</td>
-        <td>{% if rule.passed %}✓{% else %}✗{% endif %}</td>
-        <td>{{ rule.detail }}</td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</section>
-{% endif %}
+{# v0.8.0+: the standalone Grading Rules panel that used to live here
+   was absorbed into the "Why this drive graded X" buyer-rationale
+   section higher on the page (under <details> so the full rule
+   evaluation is still accessible without dominating the layout). #}
 
 {% if telemetry %}
 <section class="panel">
@@ -373,4 +580,28 @@
   <p class="muted">No test runs yet for this drive.</p>
   {% endif %}
 </section>
+
+{# v0.8.0+ Print-only legal disclaimer. Always invisible on-screen;
+   only included when the page is printed. Drafted in plain English
+   to be defensible without being lawyerly; operators can edit if
+   their jurisdiction needs different wording. #}
+<footer class="print-only print-disclaimer">
+  <hr>
+  <p><strong>Report scope and warranty:</strong></p>
+  <p>This report reflects the drive's measured condition at the test
+  date shown above. DriveForge tested this drive using SMART self-tests
+  (short and long where supported), full-surface destructive badblocks
+  verification (8 passes), and manufacturer secure-erase (or equivalent
+  NIST 800-88 Clear overwrite, as noted on the cert sticker). The grade
+  and rationale printed here reflect the test results at that point in
+  time. Past performance does not guarantee future reliability; storage
+  media can fail without prior warning. This report carries no express
+  or implied warranty regarding drive lifetime or data integrity after
+  the test date. For the most current drive status, scan the QR code on
+  the cert sticker.</p>
+  <p class="print-small">
+    DriveForge v{{ driveforge_version }} &middot; Serial: {{ drive.serial }}
+    &middot; Report URL: <code>/reports/{{ drive.serial }}</code>
+  </p>
+</footer>
 {% endblock %}

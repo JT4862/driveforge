@@ -28,6 +28,14 @@ class SmartSnapshot(BaseModel):
     """Point-in-time SMART snapshot for a drive.
 
     Stored pre- and post-test; diffed in Phase 8 to grade degradation.
+
+    v0.8.0+: gained lifetime I/O + wear + error-class fields drawn
+    from per-transport sources (NVMe health log / SCSI error-counter
+    log / SATA attributes 184/188/196/199/241/242/233/177/169/231).
+    These feed the buyer-transparency report on the drive-detail
+    page and the new ceiling-based grading rules. Every new field
+    is `| None` so drives that don't report the attribute don't get
+    graded on a missing signal.
     """
 
     device: str
@@ -45,14 +53,82 @@ class SmartSnapshot(BaseModel):
     attributes: list[SmartAttribute] = []
     raw: dict[str, Any] = {}
 
+    # v0.8.0+ lifetime I/O counters. Bytes (decimal), not LBAs — callers
+    # shouldn't have to know the drive's logical block size to interpret.
+    # Populated from NVMe data_units_{read,written}, SCSI error-counter-log
+    # bytes_processed, or SATA attrs 241/242 × logical_block_size.
+    lifetime_host_reads_bytes: int | None = None
+    lifetime_host_writes_bytes: int | None = None
+
+    # v0.8.0+ SSD wear signals. `wear_pct_used` is 0-100 (0=new, 100=EOL).
+    # Sourced from NVMe percentage_used (direct), or SATA normalized-
+    # remaining attrs (233/177/231/169) as `100 - remaining`. None on HDDs.
+    wear_pct_used: int | None = None
+    # NVMe-only (SATA doesn't have an equivalent). 0-100; when this drops
+    # below the drive's advertised available_spare_threshold, the drive
+    # is warning us that its error recovery is nearly exhausted.
+    available_spare_pct: int | None = None
+    available_spare_threshold_pct: int | None = None
+
+    # v0.8.0+ error-class signals. All "counts" are lifetime cumulative
+    # unless noted; zero means "drive has never reported one."
+    # SATA attr 184 — internal integrity check failure; ANY value > 0 is
+    # a hard signal of silent data corruption detected by the drive.
+    end_to_end_error_count: int | None = None
+    # SATA attr 188 — times a command failed to complete within the
+    # kernel's timeout window. High counts indicate unreliable response.
+    command_timeout_count: int | None = None
+    # SATA attr 196 — count of distinct reallocation EVENTS (vs attr 5
+    # which counts total reallocated sectors). Useful for "did this drive
+    # just remap something" vs "drive remapped long ago and is now stable".
+    reallocation_event_count: int | None = None
+
+    # NVMe-specific fields (all None on SATA/SAS).
+    # critical_warning is a bitfield the drive firmware uses to alert
+    # the host to conditions requiring operator attention: spare-below-
+    # threshold, temperature, reliability degraded, read-only, volatile-
+    # memory-backup-failed. ANY non-zero value is an auto-fail signal.
+    nvme_critical_warning: int | None = None
+    # Count of uncorrected read/write errors reported by the drive's own
+    # media layer. Zero-tolerance ceiling-C signal on NVMe.
+    nvme_media_errors: int | None = None
+    # Power-loss events mid-write. Not a grading signal; informational.
+    nvme_unsafe_shutdowns: int | None = None
+
+    # v0.8.0+ self-test log summary (parsed from
+    # `ata_smart_self_test_log.standard.table` or its SCSI equivalent).
+    # Records whether ANY past self-test failed; the date/LBA of the
+    # most recent failure; and total completed tests. Used by the
+    # drive-detail page's Test History section and as a ceiling-C
+    # grading signal ("drive has a failed long test in its past").
+    self_test_total_count: int | None = None
+    self_test_last_failed_at_hour: int | None = None  # POH of last-failed, for trend display
+    self_test_has_past_failure: bool | None = None
+
 
 ATTR_REALLOCATED = 5
 ATTR_POWER_ON_HOURS = 9
+# v0.8.0+ error-class attributes
+ATTR_END_TO_END_ERROR = 184
+ATTR_COMMAND_TIMEOUT = 188
 ATTR_TEMP_AIRFLOW = 190
 ATTR_TEMP_DRIVE = 194
+ATTR_REALLOC_EVENT_COUNT = 196
 ATTR_CURRENT_PENDING = 197
 ATTR_OFFLINE_UNCORRECTABLE = 198
 ATTR_UDMA_CRC_ERROR = 199
+# v0.8.0+ lifetime I/O (LBAs; multiply by logical block size for bytes)
+ATTR_TOTAL_LBAS_WRITTEN = 241
+ATTR_TOTAL_LBAS_READ = 242
+# v0.8.0+ SSD wear indicators — vendor-specific, we try each in order.
+# Each reports a normalized value (100 → 0) in the `value` field of
+# the attribute, representing REMAINING life; wear_pct_used = 100 - value.
+SSD_WEAR_ATTR_CANDIDATES = (
+    233,  # Intel — Media_Wearout_Indicator
+    177,  # Samsung — Wear_Leveling_Count
+    231,  # Various — SSD_Life_Left
+    169,  # Crucial / Micron — Remaining_Lifetime_Perc
+)
 
 
 def _raw_of(attrs: list[SmartAttribute], attr_id: int) -> int | None:
@@ -60,6 +136,156 @@ def _raw_of(attrs: list[SmartAttribute], attr_id: int) -> int | None:
         if a.id == attr_id:
             return a.raw_value
     return None
+
+
+def _normalized_of(attrs: list[SmartAttribute], attr_id: int) -> int | None:
+    """Return the `value` (normalized, 0-255 typically) field of an
+    attribute, distinct from its raw vendor-packed integer.
+
+    SSD wear indicators use the NORMALIZED field (where 100 = factory,
+    declining to 0 as wear accumulates) rather than the raw field, which
+    varies per vendor. Introduced v0.8.0 alongside wear_pct_used parsing.
+    """
+    for a in attrs:
+        if a.id == attr_id:
+            return a.value
+    return None
+
+
+# v0.8.0+ — NVMe `data_units_*` counters are documented in the spec as
+# "1000 * 512-byte units" (i.e. 512,000 bytes per unit, NOT 1 MB). This
+# is the single most-often-misread field in the NVMe SMART log; third-
+# party tools regularly report NVMe lifetime I/O as 2× reality because
+# they assume 1 MiB. Keep the constant named so nobody has to rediscover
+# this from the spec.
+NVME_DATA_UNIT_BYTES = 512_000
+
+
+def _parse_lifetime_io_and_wear(
+    data: dict[str, Any],
+    attrs: list[SmartAttribute],
+) -> dict[str, int | None]:
+    """Extract lifetime reads/writes + SSD wear + NVMe spare from the
+    smartctl JSON. Transport-aware: tries NVMe → SAS → SATA in that
+    order and returns whichever source has data. Fields that aren't
+    reported by the drive's transport come back None.
+
+    Why the three-path structure: smartctl presents each transport's
+    data in its own top-level subtree, and the fields that carry
+    lifetime I/O only overlap conceptually — not structurally. A
+    unified `smartctl --json` schema across transports would be
+    lovely, but until then this is the contract we work with.
+    """
+    out: dict[str, int | None] = {
+        "lifetime_host_reads_bytes": None,
+        "lifetime_host_writes_bytes": None,
+        "wear_pct_used": None,
+        "available_spare_pct": None,
+        "available_spare_threshold_pct": None,
+        "nvme_critical_warning": None,
+        "nvme_media_errors": None,
+        "nvme_unsafe_shutdowns": None,
+    }
+
+    # --- NVMe path: cleanest, universal for NVMe drives
+    nvme = data.get("nvme_smart_health_information_log") or {}
+    if nvme:
+        r = nvme.get("data_units_read")
+        w = nvme.get("data_units_written")
+        if r is not None:
+            out["lifetime_host_reads_bytes"] = r * NVME_DATA_UNIT_BYTES
+        if w is not None:
+            out["lifetime_host_writes_bytes"] = w * NVME_DATA_UNIT_BYTES
+        out["wear_pct_used"] = nvme.get("percentage_used")
+        out["available_spare_pct"] = nvme.get("available_spare")
+        out["available_spare_threshold_pct"] = nvme.get("available_spare_threshold")
+        out["nvme_critical_warning"] = nvme.get("critical_warning")
+        out["nvme_media_errors"] = nvme.get("media_errors")
+        out["nvme_unsafe_shutdowns"] = nvme.get("unsafe_shutdowns")
+        return out
+
+    # --- SAS path: SCSI error-counter-log, bytes native
+    scsi_log = data.get("scsi_error_counter_log") or {}
+    if scsi_log:
+        read_bytes = (scsi_log.get("read") or {}).get("bytes_processed")
+        write_bytes = (scsi_log.get("write") or {}).get("bytes_processed")
+        if read_bytes is not None:
+            out["lifetime_host_reads_bytes"] = int(read_bytes)
+        if write_bytes is not None:
+            out["lifetime_host_writes_bytes"] = int(write_bytes)
+        # Wear % + NVMe-only fields stay None on SAS — SAS drives can
+        # report SSD wear via log page 0x11 but smartctl exposes it
+        # inconsistently; we skip rather than parse unreliably.
+        return out
+
+    # --- SATA path: attrs 241/242 × logical block size, plus wear
+    # attributes. Fall through to this when neither NVMe nor SAS
+    # structures are present (i.e. a SATA drive).
+    sector_size = data.get("logical_block_size", 512) or 512
+    writes_lba = _raw_of(attrs, ATTR_TOTAL_LBAS_WRITTEN)
+    reads_lba = _raw_of(attrs, ATTR_TOTAL_LBAS_READ)
+    if writes_lba is not None:
+        out["lifetime_host_writes_bytes"] = writes_lba * sector_size
+    if reads_lba is not None:
+        out["lifetime_host_reads_bytes"] = reads_lba * sector_size
+    # SSD wear via one of the vendor attributes. First one that's
+    # present wins; semantics identical (value is normalized REMAINING
+    # life, 100 → 0).
+    for attr_id in SSD_WEAR_ATTR_CANDIDATES:
+        remaining = _normalized_of(attrs, attr_id)
+        if remaining is not None and 0 <= remaining <= 100:
+            out["wear_pct_used"] = 100 - remaining
+            break
+    return out
+
+
+def _parse_self_test_log(data: dict[str, Any]) -> dict[str, Any]:
+    """Summarize the ATA/SCSI self-test log into three flat fields for
+    the SmartSnapshot: total count, whether any past run failed, and
+    the POH at which the last-failed test ran. Doesn't return full
+    history — just the signal grading + the drive-detail-page Test
+    History section need.
+
+    ATA path reads `ata_smart_self_test_log.standard.table[]`, each
+    entry carrying `status.passed` (bool), `type.string` ("Short" /
+    "Extended" / etc), and `lifetime_hours`. SCSI path lives under
+    `scsi_self_test_0` with slightly different shape; we check both.
+    """
+    out: dict[str, Any] = {
+        "self_test_total_count": None,
+        "self_test_last_failed_at_hour": None,
+        "self_test_has_past_failure": None,
+    }
+    # ATA self-test log
+    ata_tests = (
+        (data.get("ata_smart_self_test_log") or {})
+        .get("standard", {})
+        .get("table", [])
+    )
+    if ata_tests:
+        out["self_test_total_count"] = len(ata_tests)
+        failures = [
+            t for t in ata_tests
+            if not ((t.get("status") or {}).get("passed", True))
+        ]
+        out["self_test_has_past_failure"] = len(failures) > 0
+        if failures:
+            # Table is in reverse-chronological order per spec; first
+            # failure in iteration = most-recent failure.
+            out["self_test_last_failed_at_hour"] = failures[0].get("lifetime_hours")
+        return out
+
+    # SCSI path (parsed similarly)
+    scsi_entries = (data.get("scsi_self_test_0") or {}).get("result", {})
+    if scsi_entries:
+        # smartctl exposes SCSI self-test as a single most-recent entry;
+        # richer history requires log-page-parsing that the library
+        # doesn't expose cleanly. Count what we have.
+        out["self_test_total_count"] = 1
+        passed = scsi_entries.get("string", "").lower().startswith("background scan")
+        out["self_test_has_past_failure"] = not passed
+        out["self_test_last_failed_at_hour"] = scsi_entries.get("power_on_time", {}).get("hours") if not passed else None
+    return out
 
 
 def parse(payload: str, *, device: str = "") -> SmartSnapshot:
@@ -114,6 +340,13 @@ def parse(payload: str, *, device: str = "") -> SmartSnapshot:
 
     status = data.get("smart_status") or {}
 
+    # v0.8.0+: transport-aware lifetime I/O + wear + NVMe-health + self-test.
+    # Each helper returns a dict of fields that are either populated (for
+    # drives/transports that report the signal) or None. Merged into the
+    # SmartSnapshot construction below.
+    io_wear = _parse_lifetime_io_and_wear(data, attrs)
+    test_log = _parse_self_test_log(data)
+
     return SmartSnapshot(
         device=device or (data.get("device") or {}).get("name", ""),
         captured_at=datetime.now(UTC),
@@ -129,6 +362,23 @@ def parse(payload: str, *, device: str = "") -> SmartSnapshot:
         smart_status_passed=status.get("passed"),
         attributes=attrs,
         raw=data,
+        # v0.8.0+ new error-class fields straight from SATA attrs
+        end_to_end_error_count=_raw_of(attrs, ATTR_END_TO_END_ERROR),
+        command_timeout_count=_raw_of(attrs, ATTR_COMMAND_TIMEOUT),
+        reallocation_event_count=_raw_of(attrs, ATTR_REALLOC_EVENT_COUNT),
+        # v0.8.0+ fields from the transport-aware helper
+        lifetime_host_reads_bytes=io_wear["lifetime_host_reads_bytes"],
+        lifetime_host_writes_bytes=io_wear["lifetime_host_writes_bytes"],
+        wear_pct_used=io_wear["wear_pct_used"],
+        available_spare_pct=io_wear["available_spare_pct"],
+        available_spare_threshold_pct=io_wear["available_spare_threshold_pct"],
+        nvme_critical_warning=io_wear["nvme_critical_warning"],
+        nvme_media_errors=io_wear["nvme_media_errors"],
+        nvme_unsafe_shutdowns=io_wear["nvme_unsafe_shutdowns"],
+        # v0.8.0+ self-test history summary
+        self_test_total_count=test_log["self_test_total_count"],
+        self_test_last_failed_at_hour=test_log["self_test_last_failed_at_hour"],
+        self_test_has_past_failure=test_log["self_test_has_past_failure"],
     )
 
 

@@ -107,6 +107,72 @@ class GradingConfig(BaseModel):
     within_pass_variance_ratio: float | None = 0.25
     pass_to_pass_degradation_ratio: float | None = 0.70
 
+    # v0.8.0+ Age-based ceilings. Applied AFTER the base grade is
+    # computed. A drive can only be DEMOTED by a ceiling; if the base
+    # grade is already below the ceiling, no change. Thresholds are in
+    # power-on hours (24/7 = 8760 h/year).
+    #   poh_a_ceiling_hours: above this, can't be A (default ~4 years)
+    #   poh_b_ceiling_hours: above this, can't be B (default ~7 years)
+    #   poh_fail_hours:      above this, force-F (None = disabled)
+    age_ceiling_enabled: bool = True
+    poh_a_ceiling_hours: int = 35040
+    poh_b_ceiling_hours: int = 61320
+    poh_fail_hours: int | None = None
+
+    # v0.8.0+ Workload ceilings — compare lifetime host writes to the
+    # drive's class-rated TBW. Writes-beyond-rated-workload is the
+    # strongest single indicator of "drive has done more than its
+    # design life." Ceilings below are percentages of the rated TBW
+    # for the drive's auto-detected class (enterprise/consumer × HDD/SSD).
+    workload_ceiling_enabled: bool = True
+    workload_a_ceiling_pct: int = 60    # > 60% of rated → can't be A
+    workload_b_ceiling_pct: int = 100   # > 100% of rated → can't be B
+    workload_fail_pct: int = 150        # > 150% of rated → force-F
+    # Rated lifetime host writes in TB, per drive class. The classifier
+    # (driveforge/core/drive_class.py) maps each drive to one of these
+    # buckets. Defaults reflect typical-market 5-year design-life:
+    #   Enterprise HDD @ 550 TB/yr × 5 yr = 2750 TB
+    #   Enterprise SSD @ ~730 TB/yr × 5 yr = 3650 TB (mid-range DC)
+    #   Consumer  HDD @ 55 TB/yr × 5 yr = 275 TB
+    #   Consumer  SSD @ ~120 TB/yr × 5 yr = 600 TB (typical mainstream)
+    rated_tbw_enterprise_hdd: int = 2750
+    rated_tbw_enterprise_ssd: int = 3650
+    rated_tbw_consumer_hdd: int = 275
+    rated_tbw_consumer_ssd: int = 600
+
+    # v0.8.0+ SSD wear ceilings. `wear_pct_used` is 0-100 (0 = factory,
+    # 100 = end of rated life). NVMe drives report it directly as
+    # `percentage_used`; SATA SSDs report `100 - remaining` via one of
+    # attrs 233/177/231/169. Only applies to SSDs — HDDs don't have a
+    # wear indicator so this rule is a no-op for them.
+    ssd_wear_ceiling_enabled: bool = True
+    ssd_wear_a_ceiling_pct: int = 20
+    ssd_wear_b_ceiling_pct: int = 50
+    ssd_wear_fail_pct: int = 90
+    # NVMe-only: if the drive's advertised available_spare_threshold is
+    # reached (i.e. `available_spare < threshold`), the firmware is
+    # telling the host the drive is near media-exhaustion. Auto-F.
+    fail_on_low_nvme_spare: bool = True
+
+    # v0.8.0+ Error-class auto-fail / ceiling rules. Each independently
+    # toggleable so operators can soften specific signals without
+    # disabling the whole category.
+    error_rules_enabled: bool = True
+    # SATA attr 184. Internal-integrity check failure. ANY value > 0 is a
+    # hard failure signal.
+    fail_on_end_to_end_error: bool = True
+    # NVMe critical_warning bitfield. Any bit set is a hard failure.
+    fail_on_nvme_critical_warning: bool = True
+    # NVMe media_errors count > 0 → cap at C (not auto-F by itself
+    # because recoverable errors can happen on drives that are otherwise
+    # fine; but a drive with any uncorrected media error isn't A-tier).
+    cap_c_on_nvme_media_errors: bool = True
+    # SATA attr 188 (command timeouts) — cap at B above this count.
+    command_timeout_b_ceiling: int = 5
+    # Self-test log: cap at C if any past long self-test failed even if
+    # current short test passes.
+    cap_c_on_past_self_test_failure: bool = True
+
 
 class DaemonConfig(BaseModel):
     host: str = "0.0.0.0"
