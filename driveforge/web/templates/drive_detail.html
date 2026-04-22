@@ -81,6 +81,51 @@
 </section>
 {% endif %}
 
+{# v0.7.0+ Active-pipeline panel. Only renders when this drive is
+   currently in state.active_phase — i.e. there's a live asyncio
+   task running its pipeline. Shows the phase + a sublabel hint
+   (what sub-step is running, e.g. "pass 3/8 · write 0xAA" during
+   badblocks) and gives the operator an Abort button right here
+   so they don't have to go back to the dashboard to cancel. The
+   button reuses the same /drives/{serial}/abort route as the
+   dashboard bay card; the route's redirect target follows Referer
+   so the flash banner lands back on this page after submit.
+
+   Hidden during secure_erase — same guard as the bay card,
+   because aborting mid-SCSI-FORMAT corrupts the drive. #}
+{% if active_phase %}
+<section class="panel active-pipeline-panel">
+  <h2 style="display: flex; align-items: center; gap: 12px;">
+    Pipeline running
+    <span class="pill active-phase-pill">{{ active_phase|replace("_", " ") }}</span>
+  </h2>
+  {% if active_sublabel %}
+  <p class="muted" style="margin: 0 0 12px 0;">{{ active_sublabel }}</p>
+  {% endif %}
+  {% if active_phase == "secure_erase" %}
+  <p class="muted small">
+    Abort is disabled during secure erase — interrupting the drive's
+    internal format can leave it in a corrupted state requiring
+    manual recovery. Wait for this phase to finish (secure erase
+    is fast — typically 30-90 min) or pull the drive if you need
+    to stop immediately.
+  </p>
+  {% else %}
+  {% set active_phase_display = active_phase|replace("_", " ") %}
+  <form method="post" action="/drives/{{ drive.serial }}/abort"
+        style="margin: 0;">
+    <button type="submit" class="btn danger"
+            onclick="return confirm('Abort {{ drive.serial }}? Current phase ({{ active_phase_display }}) will be cancelled and any partial progress lost. A banner at the top of the page will confirm the abort landed.')">
+      Abort pipeline
+    </button>
+    <span class="muted small" style="margin-left: 12px;">
+      Phase cancels + subprocesses receive SIGTERM → SIGKILL. Test run is marked interrupted.
+    </span>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if latest %}
 <section class="panel">
   <h2 style="display: flex; align-items: center; gap: 12px;">

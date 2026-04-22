@@ -468,18 +468,92 @@ class Orchestrator:
         logger.warning("abort_all cancelled %d drive task(s)", cancelled)
         return cancelled
 
-    async def abort_drive(self, serial: str) -> bool:
-        """Cancel one drive's pipeline + kill its subprocesses."""
+    async def abort_drive(self, serial: str) -> dict[str, object]:
+        """Cancel one drive's pipeline + kill its subprocesses.
+
+        v0.7.0+: returns a structured outcome dict instead of a bare
+        bool so the HTTP route can surface a specific flash banner
+        (previously the route redirected to `/` with no feedback on
+        either success or "not in _tasks", making the button feel dead
+        — the actual bug class that motivated this rework).
+
+        Outcome keys:
+          status:   "aborted" | "not_active" | "already_done"
+          killed:   int — number of subprocesses that got SIGTERM/KILL
+          phase:    str | None — the phase the drive was in at abort
+          note:     str — short human-readable one-liner for the banner
+
+        All branches now LOG explicitly. Pre-v0.7.0 the "not_active"
+        branch returned False + logged nothing, so diagnosing why
+        abort appeared to do nothing required narrowing from journal
+        absence — which is exactly what happened on NX-3200 during the
+        v0.7.0 kickoff session.
+        """
         task = self._tasks.get(serial)
-        if task is None or task.done():
-            return False
+        phase = self.state.active_phase.get(serial)
+
+        if task is None:
+            logger.info(
+                "abort_drive: %s is not in _tasks (no active pipeline); nothing to abort",
+                serial,
+            )
+            return {
+                "status": "not_active",
+                "killed": 0,
+                "phase": phase,
+                "note": f"{serial} isn't currently running a pipeline.",
+            }
+
+        if task.done():
+            logger.info(
+                "abort_drive: %s's task already completed — clearing stale entry",
+                serial,
+            )
+            self._tasks.pop(serial, None)
+            return {
+                "status": "already_done",
+                "killed": 0,
+                "phase": phase,
+                "note": f"{serial}'s pipeline had already finished.",
+            }
+
+        # Live task — proceed with abort.
         killed = process.kill_owner(serial)
         if killed:
-            logger.warning("abort_drive: killed %d subprocess(es) for %s", killed, serial)
+            logger.warning(
+                "abort_drive: SIGTERM → SIGKILL %d subprocess(es) for %s (phase=%s)",
+                killed, serial, phase,
+            )
+        else:
+            # No registered PIDs means the task is between subprocess
+            # invocations (e.g. in a post_smart DB write). Cancel will
+            # still tear it down cleanly.
+            logger.warning(
+                "abort_drive: %s has no registered subprocesses in phase=%s "
+                "(cancelling task directly)",
+                serial, phase,
+            )
+
+        # v0.7.0+: surface "aborting" on the dashboard so operators see
+        # the UI acknowledge the click. Cleared when the task's finally
+        # block runs + the drive leaves active_phase. If the teardown
+        # hangs (D-state subprocess), the sublabel persists until pull
+        # or kernel unstick — which is itself useful signal.
+        self.state.active_sublabel[serial] = "aborting — waiting for pipeline to tear down"
+
         task.cancel()
         await asyncio.sleep(0)
-        logger.warning("aborted drive %s", serial)
-        return True
+        logger.warning("aborted drive %s (phase=%s, killed=%d)", serial, phase, killed)
+        return {
+            "status": "aborted",
+            "killed": killed,
+            "phase": phase,
+            "note": (
+                f"Abort signalled for {serial}"
+                + (f" in {phase}" if phase else "")
+                + (f"; SIGTERM/SIGKILL to {killed} subprocess(es)." if killed else ".")
+            ),
+        }
 
     # ------------------------------------------------------------------ recovery
 

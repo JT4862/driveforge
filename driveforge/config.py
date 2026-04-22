@@ -28,9 +28,22 @@ class PrinterConfig(BaseModel):
     """Printer settings. None = no printer configured yet."""
 
     model: str | None = None
-    connection: str = "usb"  # usb | network | bluetooth
+    connection: str = "usb"  # usb | network | bluetooth | file
     backend_identifier: str | None = None  # e.g. "file:///tmp/labels/" in dev
     label_roll: str | None = None  # e.g. "DK-1209"
+    # v0.7.0+ Network-backend fields. Only used when connection=="network";
+    # `network_host` is an IPv4 / hostname the printer listens on, and
+    # `network_port` is the TCP port (Brother QLs with WiFi/Ethernet
+    # speak brother_ql's raw raster protocol on port 9100 by default
+    # — same convention as LPR/RAW). On save, the Settings handler
+    # synthesizes `backend_identifier = f"tcp://{host}:{port}"` from
+    # these so the lower-level brother_ql call site doesn't need to
+    # know about two sources of truth. Round-tripping these in
+    # PrinterConfig means the Settings form remembers them across
+    # edits (pre-v0.7.0 we'd have to re-parse them out of
+    # backend_identifier on every render).
+    network_host: str | None = None
+    network_port: int = 9100
     # v0.6.4+ auto-print on pipeline completion. When True and a
     # printer is configured, the orchestrator fires print_label
     # automatically at the end of every drive's pipeline (pass OR

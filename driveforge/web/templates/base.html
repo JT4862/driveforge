@@ -35,13 +35,23 @@
        running daemon is already on the latest tag. #}
     {% set __upd = cached_update() %}
     {% if __upd and __upd.update_available %}
+    {% set __gate = update_gate() %}
+    {# v0.7.0+: pill renders muted when pipelines are running, because
+       /settings/install-update will refuse until they're idle. Still
+       clickable — operators should be able to open the release notes
+       even while drives are under test, just not install. #}
     <a href="/settings"
-       class="update-available-pill"
-       title="DriveForge {{ __upd.latest_version }} is available. Click to view release notes and install."
+       class="update-available-pill{% if __gate.blocked %} update-available-pill--blocked{% endif %}"
+       title="{% if __gate.blocked %}DriveForge {{ __upd.latest_version }} is ready. Install blocked: {{ __gate.active_count }} drive(s) under test, {{ __gate.recovery_count }} in recovery. Click to view release notes — installation unlocks when pipelines are idle.{% else %}DriveForge {{ __upd.latest_version }} is available. Click to view release notes and install.{% endif %}"
        accesskey="u">
       <span class="update-dot" aria-hidden="true"></span>
       Update Available
       <span class="update-version">{{ __upd.latest_version }}</span>
+      {% if __gate.blocked %}
+      <span class="update-gate-note" aria-hidden="true">
+        &middot; {{ __gate.active_count + __gate.recovery_count }} running
+      </span>
+      {% endif %}
     </a>
     {% endif %}
   </header>
@@ -82,6 +92,34 @@
       <strong>Restart failed:</strong>
       <span>{{ request.query_params.get('udev_restart_error') }}</span>
     </div>
+  </div>
+  {% endif %}
+  {# v0.7.0+ Abort-outcome flash. Renders on whichever page the
+     /drives/<serial>/abort handler bounced to (dashboard or
+     drive-detail, picked via Referer). Four outcome keys match the
+     orchestrator's abort_drive return shape:
+       aborted         — normal success (task cancelled, subprocesses killed)
+       not_active      — serial wasn't in _tasks (the silent-failure case
+                         pre-v0.7.0 that made abort buttons feel dead)
+       already_done    — task was done() but still in _tasks (stale)
+       (anything else) — render as warn, shouldn't happen in practice #}
+  {% set _abort_status = request.query_params.get('aborted') %}
+  {% if _abort_status %}
+  {% set _abort_note = request.query_params.get('abort_note', '') %}
+  <div class="abort-flash-banner abort-flash-banner--{{ _abort_status }}" role="status">
+    {% if _abort_status == 'aborted' %}
+    <span class="abort-flash-icon" aria-hidden="true">✓</span>
+    <div class="abort-flash-text"><strong>Abort signalled.</strong> {{ _abort_note }}</div>
+    {% elif _abort_status == 'not_active' %}
+    <span class="abort-flash-icon" aria-hidden="true">ⓘ</span>
+    <div class="abort-flash-text"><strong>No active pipeline.</strong> {{ _abort_note }}</div>
+    {% elif _abort_status == 'already_done' %}
+    <span class="abort-flash-icon" aria-hidden="true">ⓘ</span>
+    <div class="abort-flash-text"><strong>Already completed.</strong> {{ _abort_note }}</div>
+    {% else %}
+    <span class="abort-flash-icon" aria-hidden="true">⚠</span>
+    <div class="abort-flash-text">{{ _abort_note or ("abort status: " ~ _abort_status) }}</div>
+    {% endif %}
   </div>
   {% endif %}
   {% endblock %}

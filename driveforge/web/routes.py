@@ -463,6 +463,14 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             # isn't currently flagged as frozen; populated when the
             # orchestrator registered it after a libata-freeze pattern.
             "frozen_remediation_state": state.frozen_remediation.get(serial),
+            # v0.7.0+ active-pipeline phase for this drive. None when
+            # the drive isn't in _tasks (most common case — the drive
+            # was tested earlier, the card is informational). The
+            # template renders an inline Abort button when non-None
+            # so operators don't have to go back to the dashboard to
+            # abort from here.
+            "active_phase": state.active_phase.get(serial),
+            "active_sublabel": state.active_sublabel.get(serial),
         },
     )
 
@@ -600,15 +608,41 @@ async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
     guardrail, not a hard enforcement. If you really want to terminate
     a stuck erase process (e.g. hdparm hung past its timeout) you can
     still POST to this endpoint via curl.
+
+    v0.7.0+: redirect carries the abort outcome via query params so
+    the dashboard / drive-detail page can render an explicit banner
+    ("Abort signalled for X" / "X isn't currently running"). Pre-v0.7.0
+    this redirected to `/` with no flash, so operators saw no feedback
+    either way and had to infer from journal absence that the click
+    had landed. Redirect target follows Referer when it points back at
+    a drive-detail page so the flash lands where the operator clicked
+    from; falls through to `/` otherwise (dashboard bay-card click).
     """
+    from urllib.parse import quote, urlparse
+
     orch = request.app.state.orchestrator
-    aborted = await orch.abort_drive(serial)
-    if not aborted:
-        # Serial isn't in _tasks — either already completed or never active.
-        # Redirect to dashboard regardless; the stale state resolves on next
-        # refresh. No error needed.
-        pass
-    return RedirectResponse(url="/", status_code=303)
+    outcome = await orch.abort_drive(serial)
+
+    # Pick redirect target. If Referer points at the drive-detail
+    # page for this serial, bounce back there so the operator sees
+    # the banner in context. Otherwise default to the dashboard.
+    referer = request.headers.get("Referer", "")
+    dest = "/"
+    if referer:
+        try:
+            parsed = urlparse(referer)
+            if parsed.path == f"/drives/{serial}":
+                dest = f"/drives/{serial}"
+        except Exception:  # noqa: BLE001
+            dest = "/"
+
+    sep = "&" if "?" in dest else "?"
+    params = (
+        f"aborted={outcome['status']}"
+        f"&abort_serial={quote(serial)}"
+        f"&abort_note={quote(str(outcome['note']))}"
+    )
+    return RedirectResponse(url=f"{dest}{sep}{params}", status_code=303)
 
 
 @router.post("/drives/{serial}/promote-to-full")
@@ -1101,6 +1135,14 @@ def settings_page(request: Request) -> HTMLResponse:
             "install_error": install_error,
             "install_started": install_started,
             "test_print_error": test_print_error,
+            # v0.7.0+ Safety-gate UX. Hand the template the live
+            # active-drive + recovery counts so it can render the
+            # Install Update button as disabled with a clear reason
+            # rather than letting the operator click and discover the
+            # server-side refusal. The server-side gate in
+            # `/settings/install-update` stays as belt-and-suspenders.
+            "active_phase_count": len(state.active_phase),
+            "recovery_count": len(state.recovery_serials),
         },
     )
 
@@ -1329,6 +1371,33 @@ async def save_printer(request: Request) -> RedirectResponse:
     # v0.6.4+: checkbox values are absent from the form submission when
     # unchecked, present when checked. Presence-check = enabled.
     p.auto_print = "auto_print" in form
+
+    # v0.7.0+: network-printer config. Always parse both fields so
+    # switching connection=usb → network → usb doesn't lose the
+    # host/port the operator already typed. Only synthesize
+    # backend_identifier from them when connection=network; for USB
+    # we leave backend_identifier as-is (auto-discovered at print
+    # time when empty).
+    p.network_host = (form.get("network_host") or "").strip() or None
+    try:
+        port_raw = (form.get("network_port") or "").strip()
+        p.network_port = int(port_raw) if port_raw else 9100
+    except ValueError:
+        # Operator typed non-numeric — fall back to default rather
+        # than hard-failing the save. UI validation catches the
+        # typo on the next render.
+        p.network_port = 9100
+    if p.connection == "network" and p.network_host:
+        p.backend_identifier = f"tcp://{p.network_host}:{p.network_port}"
+    elif p.connection != "network":
+        # Switching back to USB: clear any stale tcp:// identifier
+        # so pyusb's auto-discover path (in core/printer.py:print_label)
+        # fires correctly. USB operators who manually filled in a
+        # usb://VID:PID identifier aren't affected because we only
+        # clear tcp:// values.
+        if p.backend_identifier and p.backend_identifier.startswith("tcp://"):
+            p.backend_identifier = None
+
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/settings?saved=printer", status_code=303)
 

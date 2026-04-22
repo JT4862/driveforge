@@ -220,8 +220,18 @@
         Abort
       </button>
     {% else %}
+      {# v0.7.0+: clearer confirm copy. Spells out what gets lost
+         (partial progress on long phases like badblocks is the
+         usual regret) + the one follow-up signal we now surface
+         (flash banner at page top after submit).
+
+         `phase_display` is precomputed via `{% set %}` so the
+         onclick HTML attribute doesn't need to nest escapes inside
+         a Jinja filter call (Jinja's attribute-context parser
+         doesn't handle the backslash-escaped quotes). #}
+      {% set phase_display = card.phase|replace("_", " ") %}
       <button class="btn danger btn-small" type="submit"
-              onclick="return confirm('Abort this drive? Its current phase will be cancelled and the test run marked failed.')"
+              onclick="return confirm('Abort {{ card.serial }}? Current phase ({{ phase_display }}) will be cancelled and any partial progress lost. A banner at the top of the page will confirm the abort landed.')"
               title="Cancel this drive's pipeline.">
         Abort
       </button>

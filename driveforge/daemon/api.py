@@ -287,10 +287,14 @@ async def abort_all(request: Request) -> dict[str, Any]:
 @router.post("/drives/{serial}/abort")
 async def abort_drive(serial: str, request: Request) -> dict[str, Any]:
     orch = request.app.state.orchestrator
-    ok = await orch.abort_drive(serial)
-    if not ok:
+    # v0.7.0+ abort_drive now returns a structured outcome dict.
+    # Surface it raw to API consumers so they can distinguish
+    # "not active" from a real abort; preserve the historical 404 on
+    # "not active" for clients that pre-dated the structured return.
+    outcome = await orch.abort_drive(serial)
+    if outcome["status"] == "not_active":
         raise HTTPException(status_code=404, detail="drive not in-flight")
-    return {"aborted": serial}
+    return {"aborted": serial, "outcome": outcome}
 
 
 def _test_run_to_out(r: m.TestRun) -> TestRunOut:
