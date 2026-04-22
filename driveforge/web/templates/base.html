@@ -103,6 +103,27 @@
                          pre-v0.7.0 that made abort buttons feel dead)
        already_done    — task was done() but still in _tasks (stale)
        (anything else) — render as warn, shouldn't happen in practice #}
+  {# v0.8.0+ Regrade outcome flashes. Green on success, red on any
+     of the three refusal paths. Placed in base.html so drive-detail
+     and dashboard both render it automatically. #}
+  {% if request.query_params.get('regrade_ok') %}
+  <div class="abort-flash-banner abort-flash-banner--aborted" role="status">
+    <span class="abort-flash-icon" aria-hidden="true">✓</span>
+    <div class="abort-flash-text"><strong>Regraded.</strong> {{ request.query_params.get('regrade_ok') }}</div>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('regrade_error') %}
+  <div class="abort-flash-banner abort-flash-banner--err" role="alert">
+    <span class="abort-flash-icon" aria-hidden="true">⚠</span>
+    <div class="abort-flash-text"><strong>Regrade blocked.</strong> {{ request.query_params.get('regrade_error') }}</div>
+  </div>
+  {% endif %}
+  {% if request.query_params.get('regrade_batch_ok') %}
+  <div class="abort-flash-banner abort-flash-banner--aborted" role="status">
+    <span class="abort-flash-icon" aria-hidden="true">✓</span>
+    <div class="abort-flash-text"><strong>Batch regrade complete.</strong> {{ request.query_params.get('regrade_batch_ok') }}</div>
+  </div>
+  {% endif %}
   {% set _abort_status = request.query_params.get('aborted') %}
   {% if _abort_status %}
   {% set _abort_note = request.query_params.get('abort_note', '') %}

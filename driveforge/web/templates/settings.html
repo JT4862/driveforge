@@ -117,6 +117,146 @@
     <span>Thermal excursion — demote to C above this °C (blank to disable)</span>
     <input type="number" name="thermal_excursion_c" value="{{ settings.grading.thermal_excursion_c or '' }}" min="0">
   </label>
+
+  {# v0.8.0+ Buyer-transparency grading rules. Collapsible sections so
+     the main grading panel doesn't become a wall of inputs. Each
+     section has its own enable/disable toggle so operators can switch
+     off an entire category while tuning others. #}
+
+  <details class="grading-section" open>
+    <summary><strong>Age-based ceilings (power-on hours)</strong></summary>
+    <p class="muted small">
+      A drive can accumulate clean SMART counters while still being at the end
+      of its design life. These ceilings cap grade by age: demoted but not
+      auto-failed unless the hard threshold below is set.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="age_ceiling_enabled"{% if settings.grading.age_ceiling_enabled %} checked{% endif %}>
+      <span>Enable age-based ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above N hours (~4 yrs 24/7 = 35,040)</span>
+      <input type="number" name="poh_a_ceiling_hours" value="{{ settings.grading.poh_a_ceiling_hours }}" min="0">
+    </label>
+    <label class="field">
+      <span>Can't be B above N hours (~7 yrs 24/7 = 61,320)</span>
+      <input type="number" name="poh_b_ceiling_hours" value="{{ settings.grading.poh_b_ceiling_hours }}" min="0">
+    </label>
+    <label class="field">
+      <span>Auto-fail above N hours (blank to disable)</span>
+      <input type="number" name="poh_fail_hours" value="{{ settings.grading.poh_fail_hours or '' }}" min="0">
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>Workload ceilings (lifetime writes vs rated TBW)</strong></summary>
+    <p class="muted small">
+      Compares lifetime host writes against the drive's class-rated workload.
+      Classes are auto-detected from model + transport + rotation rate;
+      ambiguous drives default to the consumer tier for their media type
+      (tighter ceiling — safer for refurb grading).
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="workload_ceiling_enabled"{% if settings.grading.workload_ceiling_enabled %} checked{% endif %}>
+      <span>Enable workload ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above % of rated TBW</span>
+      <input type="number" name="workload_a_ceiling_pct" value="{{ settings.grading.workload_a_ceiling_pct }}" min="1" max="500">
+    </label>
+    <label class="field">
+      <span>Can't be B above % of rated TBW</span>
+      <input type="number" name="workload_b_ceiling_pct" value="{{ settings.grading.workload_b_ceiling_pct }}" min="1" max="500">
+    </label>
+    <label class="field">
+      <span>Auto-fail above % of rated TBW</span>
+      <input type="number" name="workload_fail_pct" value="{{ settings.grading.workload_fail_pct }}" min="1" max="1000">
+    </label>
+    <p class="muted small" style="margin-top: 14px;">
+      <strong>Rated lifetime writes per drive class (TB):</strong>
+      Sane defaults based on typical market 5-year design life (550 TB/yr
+      enterprise HDD, 55 TB/yr consumer HDD, etc). Adjust for your
+      specific SKUs if you know better.
+    </p>
+    <label class="field">
+      <span>Enterprise HDD rated TBW</span>
+      <input type="number" name="rated_tbw_enterprise_hdd" value="{{ settings.grading.rated_tbw_enterprise_hdd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Enterprise SSD rated TBW</span>
+      <input type="number" name="rated_tbw_enterprise_ssd" value="{{ settings.grading.rated_tbw_enterprise_ssd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Consumer HDD rated TBW</span>
+      <input type="number" name="rated_tbw_consumer_hdd" value="{{ settings.grading.rated_tbw_consumer_hdd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Consumer SSD rated TBW</span>
+      <input type="number" name="rated_tbw_consumer_ssd" value="{{ settings.grading.rated_tbw_consumer_ssd }}" min="1">
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>SSD wear ceilings</strong></summary>
+    <p class="muted small">
+      SSDs expose a 0–100% "wear indicator" (NVMe <code>percentage_used</code>
+      or SATA attrs 233/177/231/169). HDDs have no equivalent — these rules
+      no-op on spinners.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="ssd_wear_ceiling_enabled"{% if settings.grading.ssd_wear_ceiling_enabled %} checked{% endif %}>
+      <span>Enable SSD wear ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above % wear used</span>
+      <input type="number" name="ssd_wear_a_ceiling_pct" value="{{ settings.grading.ssd_wear_a_ceiling_pct }}" min="0" max="100">
+    </label>
+    <label class="field">
+      <span>Can't be B above % wear used</span>
+      <input type="number" name="ssd_wear_b_ceiling_pct" value="{{ settings.grading.ssd_wear_b_ceiling_pct }}" min="0" max="100">
+    </label>
+    <label class="field">
+      <span>Auto-fail above % wear used</span>
+      <input type="number" name="ssd_wear_fail_pct" value="{{ settings.grading.ssd_wear_fail_pct }}" min="0" max="100">
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_low_nvme_spare"{% if settings.grading.fail_on_low_nvme_spare %} checked{% endif %}>
+      <span>Auto-fail when NVMe <code>available_spare</code> drops below the drive's own threshold</span>
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>Error-based auto-fail / ceiling rules</strong></summary>
+    <p class="muted small">
+      Individual drive-reported error signals. All disableable individually
+      so operators can soften specific flags without turning off the category.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="error_rules_enabled"{% if settings.grading.error_rules_enabled %} checked{% endif %}>
+      <span>Enable error-based rules</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_end_to_end_error"{% if settings.grading.fail_on_end_to_end_error %} checked{% endif %}>
+      <span>Fail on SATA end-to-end error (attr 184) &gt; 0</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_nvme_critical_warning"{% if settings.grading.fail_on_nvme_critical_warning %} checked{% endif %}>
+      <span>Fail on any NVMe <code>critical_warning</code> bit set</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="cap_c_on_nvme_media_errors"{% if settings.grading.cap_c_on_nvme_media_errors %} checked{% endif %}>
+      <span>Cap at C when NVMe <code>media_errors</code> &gt; 0</span>
+    </label>
+    <label class="field">
+      <span>Cap at B when SATA command-timeout count (attr 188) exceeds</span>
+      <input type="number" name="command_timeout_b_ceiling" value="{{ settings.grading.command_timeout_b_ceiling }}" min="0">
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="cap_c_on_past_self_test_failure"{% if settings.grading.cap_c_on_past_self_test_failure %} checked{% endif %}>
+      <span>Cap at C when the drive's own self-test log shows a past failure</span>
+    </label>
+  </details>
+
   <div class="form-actions">
     <button type="submit" class="btn primary">Save grading</button>
   </div>

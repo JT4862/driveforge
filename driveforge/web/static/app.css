@@ -236,6 +236,138 @@ code { font-family: var(--mono); background: rgba(255,255,255,0.05); padding: 1p
   letter-spacing: 0.5px;
 }
 
+/* v0.8.0+ Collapsible grading-threshold sections in Settings. */
+.grading-section {
+  margin-top: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+.grading-section > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  font-size: 14px;
+}
+.grading-section[open] > summary {
+  border-bottom: 1px solid var(--panel-border);
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+}
+.grading-section .field {
+  margin-top: 10px;
+}
+
+/* v0.8.0+ Buyer-transparency report panels. Subtle tinted background
+   so they read as "supplemental context" rather than competing with
+   the main Latest Test Run panel. Amber accent on the rationale
+   section since that's where the "why this grade" signal lives. */
+.buyer-report-section {
+  background: rgba(255, 255, 255, 0.018);
+}
+.grading-rationale {
+  border-left: 3px solid rgba(240, 166, 64, 0.40);
+}
+.rationale-list {
+  padding-left: 18px;
+  line-height: 1.65;
+}
+.rationale-list li {
+  margin-bottom: 6px;
+}
+
+/* v0.8.0+ Print-only elements. Hidden on-screen; visible only when
+   the user prints (Cmd-P / Ctrl-P, save as PDF or send to printer).
+   The @media print block below switches the whole layout into a
+   document-formatted one-pager. */
+.print-only {
+  display: none;
+}
+
+@media print {
+  /* Hide the app chrome — navbar, tabs, banners, buttons. The printed
+     sheet is ONLY about the drive, not about DriveForge's UI. */
+  .topbar,
+  .footer,
+  .update-available-pill,
+  .udev-stall-banner,
+  .abort-flash-banner,
+  form,            /* Hide all <form> elements — Abort, Regrade, Print Label, etc. */
+  .active-pipeline-panel,
+  dialog {
+    display: none !important;
+  }
+
+  /* Reveal print-only blocks (header + disclaimer footer) */
+  .print-only {
+    display: block !important;
+  }
+
+  /* Reset body + content for paper */
+  body {
+    background: white !important;
+    color: black !important;
+    font-size: 10.5pt;
+  }
+  .content {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+  .panel {
+    border: 1px solid #ccc !important;
+    background: white !important;
+    page-break-inside: avoid;
+    margin-bottom: 10px !important;
+    padding: 10px !important;
+  }
+  h1, h2 {
+    color: black !important;
+  }
+  .muted {
+    color: #555 !important;
+  }
+  .bad {
+    color: #a00 !important;
+    font-weight: 600;
+  }
+  /* Grade glyph: keep the visual weight but in monochrome so it
+     prints clearly on any printer (home inkjets do strange things
+     with colored grade pills). */
+  .grade {
+    border: 2px solid black !important;
+    background: white !important;
+    color: black !important;
+    padding: 0 6px !important;
+  }
+  .grade-A, .grade-B, .grade-C, .grade-F { color: black !important; }
+
+  /* Print-header layout: DriveForge brand left, timestamp right */
+  .print-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 2px solid black;
+    padding-bottom: 6px;
+    margin-bottom: 12px;
+  }
+  .print-brand { font-size: 14pt; }
+  .print-meta { font-size: 9pt; color: #555; }
+
+  /* Print disclaimer footer */
+  .print-disclaimer {
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 1px solid #ccc;
+    font-size: 8.5pt;
+    line-height: 1.4;
+    color: #333;
+  }
+  .print-disclaimer hr { display: none; }
+  .print-disclaimer p { margin: 4px 0; }
+  .print-small { font-size: 8pt; color: #666; }
+}
+
 /* v0.6.9+ frozen-SSD remediation panel on the drive-detail page.
    Amber border + tinted background so it reads as "needs action"
    without looking like a critical failure. Escalated variant

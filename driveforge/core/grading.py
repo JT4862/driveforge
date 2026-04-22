@@ -62,6 +62,16 @@ def _rule(name: str, passed: bool, detail: str, *, fail_tier: Grade | None = Non
     return Rule(name=name, passed=passed, detail=detail, forces_grade=fail_tier if not passed else None)
 
 
+def _ceiling(name: str, detail: str, tier: Grade) -> Rule:
+    """v0.8.0+ ceiling rule — the rule PASSES (there's nothing wrong
+    with the drive) but CAPS the grade at `tier`. Distinct from `_rule`
+    which only applies a `forces_grade` when the rule fails. Ceilings
+    are the "you still have all your counters clean, but your POH /
+    workload / wear disqualifies you from Grade A" pattern.
+    """
+    return Rule(name=name, passed=True, detail=detail, forces_grade=tier)
+
+
 def grade_drive(
     pre: SmartSnapshot,
     post: SmartSnapshot,
@@ -72,6 +82,7 @@ def grade_drive(
     badblocks_errors: tuple[int, int, int] = (0, 0, 0),
     max_temperature_c: int | None = None,
     throughput: ThroughputStats | None = None,
+    drive_class: str | None = None,
 ) -> GradingResult:
     """Apply grading rules against pre/post snapshots + test outcomes.
 
@@ -269,6 +280,212 @@ def grade_drive(
                     fail_tier=Grade.FAIL if not stable else None,
                 )
             )
+
+    # =========================================================
+    # v0.8.0+ buyer-transparency grading rules. All new rules use
+    # `forces_grade=...` as a CEILING (the existing grade-resolution
+    # logic below takes max(forces_grade_across_all_rules), which
+    # means setting forces_grade=Grade.B reads as "can't be better
+    # than B"). Ceilings are honest about what they are: a drive
+    # with pristine error counters can still be capped at B or C
+    # by age / workload / wear — these reflect real-world reliability
+    # that SMART counters alone miss.
+    #
+    # Every new rule is individually disableable via GradingConfig
+    # toggles so operators can experiment or soften specific signals
+    # without turning off the whole category.
+
+    # --- Age-based ceilings (POH) ---
+    if config.age_ceiling_enabled and post.power_on_hours is not None:
+        poh = post.power_on_hours
+        years = poh / 8760.0
+        if config.poh_fail_hours is not None and poh > config.poh_fail_hours:
+            rules.append(_rule(
+                "age_ceiling_fail",
+                False,
+                f"{poh:,} POH ({years:.1f} yrs 24/7) exceeds fail threshold {config.poh_fail_hours:,}",
+                fail_tier=Grade.FAIL,
+            ))
+        elif poh > config.poh_b_ceiling_hours:
+            rules.append(_ceiling(
+                "age_ceiling_c",
+                f"{poh:,} POH ({years:.1f} yrs) exceeds B ceiling {config.poh_b_ceiling_hours:,} — capped at C",
+                Grade.C,
+            ))
+        elif poh > config.poh_a_ceiling_hours:
+            rules.append(_ceiling(
+                "age_ceiling_b",
+                f"{poh:,} POH ({years:.1f} yrs) exceeds A ceiling {config.poh_a_ceiling_hours:,} — capped at B",
+                Grade.B,
+            ))
+        else:
+            rules.append(Rule(
+                name="age_ceiling_a_ok",
+                passed=True,
+                detail=f"{poh:,} POH ({years:.1f} yrs) within A ceiling {config.poh_a_ceiling_hours:,}",
+            ))
+
+    # --- Workload ceilings (lifetime writes vs rated TBW) ---
+    if (
+        config.workload_ceiling_enabled
+        and post.lifetime_host_writes_bytes is not None
+        and drive_class is not None
+    ):
+        rated_tbw_map = {
+            "enterprise_hdd": config.rated_tbw_enterprise_hdd,
+            "enterprise_ssd": config.rated_tbw_enterprise_ssd,
+            "consumer_hdd": config.rated_tbw_consumer_hdd,
+            "consumer_ssd": config.rated_tbw_consumer_ssd,
+        }
+        rated_tb = rated_tbw_map.get(drive_class)
+        if rated_tb is not None and rated_tb > 0:
+            written_tb = post.lifetime_host_writes_bytes / 1_000_000_000_000
+            pct = (written_tb / rated_tb) * 100
+            if pct > config.workload_fail_pct:
+                rules.append(_rule(
+                    "workload_ceiling_fail",
+                    False,
+                    f"{written_tb:.1f} TB written = {pct:.0f}% of rated {rated_tb} TB "
+                    f"({drive_class}) — exceeds fail threshold {config.workload_fail_pct}%",
+                    fail_tier=Grade.FAIL,
+                ))
+            elif pct > config.workload_b_ceiling_pct:
+                rules.append(_ceiling(
+                    "workload_ceiling_c",
+                    f"{written_tb:.1f} TB written = {pct:.0f}% of rated {rated_tb} TB "
+                    f"({drive_class}) — exceeds B ceiling, capped at C",
+                    Grade.C,
+                ))
+            elif pct > config.workload_a_ceiling_pct:
+                rules.append(_ceiling(
+                    "workload_ceiling_b",
+                    f"{written_tb:.1f} TB written = {pct:.0f}% of rated {rated_tb} TB "
+                    f"({drive_class}) — exceeds A ceiling, capped at B",
+                    Grade.B,
+                ))
+            else:
+                rules.append(Rule(
+                    name="workload_ceiling_a_ok",
+                    passed=True,
+                    detail=f"{written_tb:.1f} TB written = {pct:.0f}% of rated {rated_tb} TB "
+                           f"({drive_class}) — within A ceiling",
+                ))
+
+    # --- SSD wear ceilings ---
+    if config.ssd_wear_ceiling_enabled and post.wear_pct_used is not None:
+        wear = post.wear_pct_used
+        if wear > config.ssd_wear_fail_pct:
+            rules.append(_rule(
+                "ssd_wear_fail",
+                False,
+                f"SSD wear {wear}% exceeds fail threshold {config.ssd_wear_fail_pct}%",
+                fail_tier=Grade.FAIL,
+            ))
+        elif wear > config.ssd_wear_b_ceiling_pct:
+            rules.append(_ceiling(
+                "ssd_wear_ceiling_c",
+                f"SSD wear {wear}% exceeds B ceiling {config.ssd_wear_b_ceiling_pct}% — capped at C",
+                Grade.C,
+            ))
+        elif wear > config.ssd_wear_a_ceiling_pct:
+            rules.append(_ceiling(
+                "ssd_wear_ceiling_b",
+                f"SSD wear {wear}% exceeds A ceiling {config.ssd_wear_a_ceiling_pct}% — capped at B",
+                Grade.B,
+            ))
+        else:
+            rules.append(Rule(
+                name="ssd_wear_a_ok",
+                passed=True,
+                detail=f"SSD wear {wear}% within A ceiling {config.ssd_wear_a_ceiling_pct}%",
+            ))
+
+    # --- NVMe low-spare auto-fail ---
+    # Firmware is telling us the drive is running out of error-recovery
+    # headroom. Any such drive must F regardless of other signals.
+    if (
+        config.fail_on_low_nvme_spare
+        and post.available_spare_pct is not None
+        and post.available_spare_threshold_pct is not None
+        and post.available_spare_pct < post.available_spare_threshold_pct
+    ):
+        rules.append(_rule(
+            "nvme_spare_above_threshold",
+            False,
+            f"NVMe available_spare={post.available_spare_pct}% below "
+            f"drive-reported threshold={post.available_spare_threshold_pct}%",
+            fail_tier=Grade.FAIL,
+        ))
+
+    # --- Error-class auto-fail / ceiling rules ---
+    if config.error_rules_enabled:
+        # SATA end-to-end error (attr 184) — silent corruption detected.
+        if config.fail_on_end_to_end_error:
+            e2e = post.end_to_end_error_count
+            if e2e is not None and e2e > 0:
+                rules.append(_rule(
+                    "no_end_to_end_errors",
+                    False,
+                    f"end_to_end_error_count={e2e} — drive detected silent data corruption",
+                    fail_tier=Grade.FAIL,
+                ))
+
+        # NVMe critical_warning — any bit = firmware alert
+        if config.fail_on_nvme_critical_warning:
+            cw = post.nvme_critical_warning
+            if cw is not None and cw != 0:
+                rules.append(_rule(
+                    "nvme_no_critical_warning",
+                    False,
+                    f"nvme critical_warning bitfield=0x{cw:02x} (drive firmware alert)",
+                    fail_tier=Grade.FAIL,
+                ))
+
+        # NVMe media_errors — any uncorrected = cap at C
+        if config.cap_c_on_nvme_media_errors:
+            me = post.nvme_media_errors
+            if me is not None and me > 0:
+                rules.append(_ceiling(
+                    "nvme_no_media_errors",
+                    f"nvme media_errors={me} — capped at C",
+                    Grade.C,
+                ))
+
+        # SATA command timeout count — > threshold = cap at B
+        if config.command_timeout_b_ceiling is not None:
+            ct = post.command_timeout_count
+            if ct is not None and ct > config.command_timeout_b_ceiling:
+                rules.append(_ceiling(
+                    "command_timeout_ok",
+                    f"command_timeout_count={ct} exceeds ceiling "
+                    f"{config.command_timeout_b_ceiling} — capped at B",
+                    Grade.B,
+                ))
+
+        # Self-test log history — past long-test failure caps at C
+        # even if the short test we just ran passed.
+        if config.cap_c_on_past_self_test_failure and post.self_test_has_past_failure:
+            failed_at = post.self_test_last_failed_at_hour
+            rules.append(_ceiling(
+                "no_past_self_test_failure",
+                f"drive's own self-test log shows a past failure"
+                + (f" at POH={failed_at:,}" if failed_at else "")
+                + " — capped at C",
+                Grade.C,
+            ))
+
+    # --- UDMA CRC — explicitly NOT counted against the drive ---
+    # High CRC count means the CABLE / backplane is bad, not the
+    # drive. Surface as an advisory rule (always passes) so the
+    # buyer-facing report can show "check cabling" without penalizing
+    # a drive that's otherwise fine.
+    if post.udma_crc_error_count is not None and post.udma_crc_error_count > 0:
+        rules.append(Rule(
+            name="udma_crc_cabling_advisory",
+            passed=True,
+            detail=f"udma_crc_error_count={post.udma_crc_error_count} — points at cabling/connector, "
+                   f"NOT drive fault. Does not affect grade.",
+        ))
 
     # --- Resolve final grade ---
     worst: Grade = Grade.A

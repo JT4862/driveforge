@@ -20,6 +20,7 @@ import subprocess
 import traceback
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from driveforge.core import badblocks, blinker, erase, grading, process, smart, telemetry, timing, webhook
 from driveforge.core import drive as drive_mod
@@ -1199,6 +1200,25 @@ class Orchestrator:
         # Phase 8: grading
         await self._advance(run_id, "grading", drive)
         max_temp = self._max_temp_for_run(run_id)
+        # v0.8.0+: classify drive for workload-ceiling rule. Uses model
+        # + transport + rotation_rate + optional operator overrides at
+        # /etc/driveforge/drive_class_overrides.yaml. Falls through to
+        # consumer-tier defaults on unknown models (tighter workload
+        # ceiling by default; safer for refurb grading).
+        from driveforge.core import drive_class as drive_class_mod
+        dclass = drive_class_mod.classify(
+            model=drive.model,
+            transport=(
+                drive.transport.value
+                if hasattr(drive.transport, "value")
+                else str(drive.transport)
+            ),
+            rotation_rate=drive.rotation_rate,
+            # /etc/driveforge/drive_class_overrides.yaml — optional;
+            # classifier gracefully falls through when the file is
+            # absent or unparseable. Config-dir sibling of grading.yaml.
+            overrides_path=Path("/etc/driveforge/drive_class_overrides.yaml"),
+        )
         result = grading.grade_drive(
             pre=pre_snap,
             post=post_snap,
@@ -1208,6 +1228,7 @@ class Orchestrator:
             badblocks_errors=bb_errors,
             max_temperature_c=max_temp,
             throughput=bb_throughput,
+            drive_class=dclass,
         )
         await self._finalize_run(run_id, drive, post_snap, result, bb_throughput)
         # v0.5.5+ quick-pass fail action: prompt the operator or auto-promote
@@ -1955,6 +1976,41 @@ class Orchestrator:
             run.smart_status_passed = post_snap.smart_status_passed
             run.rules = [rule.model_dump() for rule in result.rules]
             run.report_url = f"/reports/{drive.serial}"
+
+            # v0.8.0+ buyer-transparency fields: lifetime I/O, wear,
+            # error-class counters, self-test-log summary. All sourced
+            # from the post-SMART snapshot the `grade_drive` call above
+            # just scored. NULL on drives that don't report the signal,
+            # same as the snapshot itself.
+            run.lifetime_host_reads_bytes = post_snap.lifetime_host_reads_bytes
+            run.lifetime_host_writes_bytes = post_snap.lifetime_host_writes_bytes
+            run.wear_pct_used = post_snap.wear_pct_used
+            run.available_spare_pct = post_snap.available_spare_pct
+            run.end_to_end_error_count = post_snap.end_to_end_error_count
+            run.command_timeout_count = post_snap.command_timeout_count
+            run.reallocation_event_count = post_snap.reallocation_event_count
+            run.nvme_critical_warning = post_snap.nvme_critical_warning
+            run.nvme_media_errors = post_snap.nvme_media_errors
+            run.self_test_has_past_failure = post_snap.self_test_has_past_failure
+            # Drive class (classifier output fed to grade_drive earlier
+            # in _execute_pipeline). Re-classify here so _finalize_run
+            # works standalone (e.g. called from a regrade path that
+            # skipped the earlier phases).
+            try:
+                from driveforge.core import drive_class as drive_class_mod
+                run.drive_class = drive_class_mod.classify(
+                    model=drive.model,
+                    transport=(
+                        drive.transport.value
+                        if hasattr(drive.transport, "value")
+                        else str(drive.transport)
+                    ),
+                    rotation_rate=drive.rotation_rate,
+                    overrides_path=Path("/etc/driveforge/drive_class_overrides.yaml"),
+                )
+            except Exception:  # noqa: BLE001
+                # Classifier must never block a finalize.
+                logger.exception("drive_class classify failed for %s", drive.serial)
             # v0.5.6+ throughput stats. NULL when the run didn't go
             # through badblocks (quick-pass), or diskstats wasn't
             # available for this device.

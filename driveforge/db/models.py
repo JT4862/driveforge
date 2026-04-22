@@ -141,6 +141,39 @@ class TestRun(Base):
     # sanitization method.
     sanitization_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # v0.8.0+ lifetime I/O + wear + error-class signals for the
+    # buyer-transparency report + new ceiling grading rules. All
+    # sourced from the post-SMART snapshot at pipeline finalization.
+    # See driveforge.core.smart.SmartSnapshot for field semantics.
+    # NULL on pre-v0.8.0 rows and on drives whose transport doesn't
+    # report the signal.
+    lifetime_host_reads_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lifetime_host_writes_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    wear_pct_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_spare_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Error-class counters
+    end_to_end_error_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    command_timeout_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reallocation_event_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # NVMe-only
+    nvme_critical_warning: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    nvme_media_errors: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Self-test log summary
+    self_test_has_past_failure: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # v0.8.0+ drive-class classification ("enterprise_hdd" / "enterprise_ssd"
+    # / "consumer_hdd" / "consumer_ssd"). Captured at finalize time so the
+    # grading rationale can reference it honestly + operators can see
+    # which rated-TBW bucket the drive fell into.
+    drive_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # v0.8.0+ Regrade support. Phase="regrade" runs copy historical pipeline
+    # results from this source run rather than re-running destructive tests.
+    # NULL on original pipeline runs; FK to the sourced TestRun.id for regrade rows.
+    regrade_of_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("test_runs.id"), nullable=True, default=None
+    )
+
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")
     smart_snapshots: Mapped[list["SmartSnapshot"]] = relationship(

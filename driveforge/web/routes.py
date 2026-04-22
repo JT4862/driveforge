@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
+import io
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-
-import io
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -471,6 +472,23 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             # abort from here.
             "active_phase": state.active_phase.get(serial),
             "active_sublabel": state.active_sublabel.get(serial),
+            # v0.8.0+: expose Settings so the buyer-report template can
+            # reference rated_tbw_* thresholds when rendering the "X% of
+            # rated TBW" inline context on the Wear & lifetime I/O
+            # section. Also powers the class-dependent rated-TB lookup.
+            "settings": state.settings,
+            # v0.8.0+: the set of serials currently present on the HBA
+            # that AREN'T in active_phase. The Regrade button renders
+            # only for drives in this set (must be physically present +
+            # not currently running a pipeline).
+            "installed_serials": {
+                s for s in state.device_basenames
+                if s not in state.active_phase
+            },
+            # v0.8.0+: "Report generated: <ts>" line on the print-only
+            # header. Fresh on every pageload so the printed sheet
+            # carries a real timestamp.
+            "report_generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
         },
     )
 
@@ -778,6 +796,260 @@ async def frozen_remediation_mark_unrecoverable(
     frozen_remediation.clear(state.frozen_remediation, serial)
     return RedirectResponse(
         url=f"/drives/{serial}?frozen=marked-unrecoverable",
+        status_code=303,
+    )
+
+
+@router.post("/drives/{serial}/regrade")
+async def regrade_drive(serial: str, request: Request) -> RedirectResponse:
+    """v0.8.0+: re-apply current grading rules to a drive that's
+    already been through a full pipeline.
+
+    Non-destructive — reads fresh SMART and reuses the source TestRun's
+    preserved pipeline outputs (badblocks errors, throughput stats,
+    self-test results). Rules with ceiling semantics (POH / workload /
+    SSD wear) see updated counters; grade can drop (drive has aged
+    past a threshold) or stay the same (still within ceilings).
+    Never promotes — a drive originally graded B can end up B or C,
+    never A, unless the thresholds themselves have loosened.
+
+    Creates a new `TestRun(phase="regrade")` with `regrade_of_run_id`
+    pointing at the source, so the history column reflects the
+    transition. Auto-prints if enabled.
+
+    Refuses if:
+      - drive is not currently present (no device path to read from)
+      - drive is in `state.active_phase` (a pipeline is running;
+        regrade would stomp its SMART-read queue)
+      - no prior A/B/C TestRun exists (nothing to regrade from;
+        operator needs to run a full pipeline first)
+
+    Flash banner surfaces all three refusal modes explicitly.
+    """
+    from urllib.parse import quote
+    from driveforge.core import drive_class as drive_class_mod
+    from driveforge.core import drive as drive_mod
+    from driveforge.core import grading, smart as smart_mod
+
+    state = get_state()
+
+    # Refusal 1: drive actively running
+    if serial in state.active_phase:
+        return RedirectResponse(
+            url=(f"/drives/{serial}?regrade_error="
+                 + quote("drive is currently running a pipeline; abort or wait for it to finish")),
+            status_code=303,
+        )
+
+    # Refusal 2: drive not physically present
+    device_basename = state.device_basenames.get(serial)
+    if not device_basename:
+        return RedirectResponse(
+            url=(f"/drives/{serial}?regrade_error="
+                 + quote("drive is not currently plugged in — re-insert to regrade")),
+            status_code=303,
+        )
+    device_path = f"/dev/{device_basename}"
+
+    # Refusal 3: no prior completed A/B/C run to regrade from
+    with state.session_factory() as session:
+        source_run = (
+            session.query(m.TestRun)
+            .filter_by(drive_serial=serial)
+            .filter(m.TestRun.grade.in_(["A", "B", "C"]))
+            .filter(m.TestRun.completed_at.isnot(None))
+            .order_by(m.TestRun.completed_at.desc())
+            .first()
+        )
+        if source_run is None:
+            return RedirectResponse(
+                url=(f"/drives/{serial}?regrade_error="
+                     + quote("no prior A/B/C pipeline run to regrade from — run a full pipeline first")),
+                status_code=303,
+            )
+        source_run_id = source_run.id
+
+        # Also pull the Drive row so the classifier has its fields.
+        drive_row = session.get(m.Drive, serial)
+        if drive_row is None:
+            return RedirectResponse(
+                url=(f"/drives/{serial}?regrade_error="
+                     + quote("drive missing from DB unexpectedly — re-enroll via a full pipeline")),
+                status_code=303,
+            )
+
+    # Capture fresh SMART (async, ~5 s — v0.6.9 migration gave us this)
+    try:
+        post_snap = await smart_mod.snapshot_async(device_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("regrade: SMART snapshot failed for %s", serial)
+        return RedirectResponse(
+            url=(f"/drives/{serial}?regrade_error="
+                 + quote(f"failed to read fresh SMART: {exc}")),
+            status_code=303,
+        )
+
+    # Re-classify — operator may have added an override since original
+    # grading. Cheap (pure Python + YAML read).
+    transport = (
+        drive_row.transport.value
+        if hasattr(drive_row.transport, "value")
+        else str(drive_row.transport)
+    )
+    dclass = drive_class_mod.classify(
+        model=drive_row.model,
+        transport=transport,
+        rotation_rate=getattr(drive_row, "rotation_rate", None),
+        overrides_path=Path("/etc/driveforge/drive_class_overrides.yaml"),
+    )
+
+    # Build `pre` snapshot from the source run. We only need the fields
+    # that degradation-detection rules read — reconstruct a minimal
+    # SmartSnapshot with the source's post-SMART counters as the "pre"
+    # baseline for THIS regrade. Semantically: "did counters get worse
+    # since the original pipeline finished?"
+    pre_snap = smart_mod.SmartSnapshot(
+        device=device_path,
+        captured_at=source_run.completed_at or datetime.now(UTC),
+        reallocated_sectors=source_run.reallocated_sectors,
+        current_pending_sector=source_run.current_pending_sector,
+        offline_uncorrectable=source_run.offline_uncorrectable,
+        power_on_hours=source_run.power_on_hours_at_test,
+    )
+
+    # Reconstruct ThroughputStats from the source (grading reads it to
+    # apply within-pass-variance / pass-to-pass rules — we want those
+    # to still fire consistently based on the original burn-in, not
+    # falsely "pass" just because we're not running badblocks now).
+    throughput = None
+    if source_run.throughput_mean_mbps is not None:
+        from driveforge.core.throughput import ThroughputStats
+        throughput = ThroughputStats(
+            mean_mbps=source_run.throughput_mean_mbps,
+            p5_mbps=source_run.throughput_p5_mbps or 0,
+            p95_mbps=source_run.throughput_p95_mbps or 0,
+            per_pass_means=list(source_run.throughput_pass_means or []),
+        )
+
+    # Grade with the composite (source pipeline results + fresh SMART)
+    result = grading.grade_drive(
+        pre=pre_snap,
+        post=post_snap,
+        config=state.settings.grading,
+        short_test_passed=True,  # source already passed; else it wouldn't be A/B/C
+        long_test_passed=True,
+        badblocks_errors=(0, 0, 0),  # source passed — not re-running badblocks
+        max_temperature_c=None,
+        throughput=throughput,
+        drive_class=dclass,
+    )
+
+    # Persist new TestRun
+    now = datetime.now(UTC)
+    with state.session_factory() as session:
+        new_run = m.TestRun(
+            drive_serial=serial,
+            batch_id=None,
+            phase="regrade",
+            started_at=now,
+            completed_at=now,
+            grade=result.grade.value,
+            rules=[r.model_dump() for r in result.rules],
+            report_url=f"/reports/{serial}",
+            power_on_hours_at_test=post_snap.power_on_hours,
+            reallocated_sectors=post_snap.reallocated_sectors,
+            current_pending_sector=post_snap.current_pending_sector,
+            offline_uncorrectable=post_snap.offline_uncorrectable,
+            smart_status_passed=post_snap.smart_status_passed,
+            # Preserved from the source pipeline — regrade doesn't re-run these
+            throughput_mean_mbps=source_run.throughput_mean_mbps,
+            throughput_p5_mbps=source_run.throughput_p5_mbps,
+            throughput_p95_mbps=source_run.throughput_p95_mbps,
+            throughput_pass_means=source_run.throughput_pass_means,
+            sanitization_method=source_run.sanitization_method,
+            # v0.8.0 buyer-transparency fields from the fresh snapshot
+            lifetime_host_reads_bytes=post_snap.lifetime_host_reads_bytes,
+            lifetime_host_writes_bytes=post_snap.lifetime_host_writes_bytes,
+            wear_pct_used=post_snap.wear_pct_used,
+            available_spare_pct=post_snap.available_spare_pct,
+            end_to_end_error_count=post_snap.end_to_end_error_count,
+            command_timeout_count=post_snap.command_timeout_count,
+            reallocation_event_count=post_snap.reallocation_event_count,
+            nvme_critical_warning=post_snap.nvme_critical_warning,
+            nvme_media_errors=post_snap.nvme_media_errors,
+            self_test_has_past_failure=post_snap.self_test_has_past_failure,
+            drive_class=dclass,
+            regrade_of_run_id=source_run_id,
+        )
+        session.add(new_run)
+        session.commit()
+        session.refresh(new_run)
+
+    # Auto-print the new cert if configured. Failure is not fatal —
+    # the DB row is already committed with the new grade.
+    try:
+        from driveforge.core import printer as printer_mod
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            state.drive_command_executor,
+            functools.partial(
+                printer_mod.auto_print_cert_for_run,
+                state,
+                drive_row,
+                new_run,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("regrade: auto-print failed for %s (non-fatal)", serial)
+
+    return RedirectResponse(
+        url=(f"/drives/{serial}?regrade_ok="
+             + quote(f"regraded to {result.grade.value} (was {source_run.grade})")),
+        status_code=303,
+    )
+
+
+@router.post("/regrade-all-idle")
+async def regrade_all_idle(request: Request) -> RedirectResponse:
+    """v0.8.0+: batch regrade every installed-and-idle drive. Saves
+    operators from clicking through N drive-detail pages one at a
+    time. Dispatches to the same regrade path per drive; serializes
+    (not parallel) to keep the HBA SG queue sane during the bulk
+    SMART reads. Failures per-drive are logged but don't abort the
+    batch."""
+    state = get_state()
+    idle_serials = [
+        s for s in list(state.device_basenames)
+        if s not in state.active_phase and s not in state.recovery_serials
+    ]
+    count = 0
+    for serial in idle_serials:
+        # Check prereq: a completed A/B/C run must exist
+        with state.session_factory() as session:
+            has_prior = (
+                session.query(m.TestRun)
+                .filter_by(drive_serial=serial)
+                .filter(m.TestRun.grade.in_(["A", "B", "C"]))
+                .filter(m.TestRun.completed_at.isnot(None))
+                .first()
+            )
+        if has_prior is None:
+            continue
+
+        # Synthesize a request object-like shim for the internal call.
+        # Easier: just call the route function directly — it returns a
+        # RedirectResponse we can ignore. All per-drive error handling
+        # is internal to `regrade_drive`.
+        try:
+            await regrade_drive(serial, request)
+            count += 1
+        except Exception:  # noqa: BLE001
+            logger.exception("batch regrade: failed for %s", serial)
+
+    from urllib.parse import quote
+    return RedirectResponse(
+        url=("/?regrade_batch_ok="
+             + quote(f"regraded {count} drive(s)")),
         status_code=303,
     )
 
@@ -1344,18 +1616,62 @@ async def save_grading(request: Request) -> RedirectResponse:
     state = get_state()
     form = await request.form()
     g = state.settings.grading
-    for key in (
-        "grade_a_reallocated_max",
-        "grade_b_reallocated_max",
-        "grade_c_reallocated_max",
-    ):
+
+    # Helper to read an optional int field. Blank or missing → leave
+    # the stored value alone (form submission doesn't carry the value
+    # we want to preserve); empty-string on a nullable field → None.
+    def _int_or_none(key: str) -> int | None:
+        v = (form.get(key) or "").strip()
+        return int(v) if v else None
+
+    def _int_keep(key: str) -> None:
+        """Parse a required int from `form[key]`; leave g unchanged on
+        blank/missing. Avoids smashing legitimate values with 0 when the
+        browser omits a field."""
         v = form.get(key)
         if v is not None and str(v).strip() != "":
             setattr(g, key, int(v))
+
+    # Existing (pre-v0.8.0) fields
+    for k in ("grade_a_reallocated_max", "grade_b_reallocated_max", "grade_c_reallocated_max"):
+        _int_keep(k)
     g.fail_on_pending_sectors = form.get("fail_on_pending_sectors") == "on"
     g.fail_on_offline_uncorrectable = form.get("fail_on_offline_uncorrectable") == "on"
-    temp = (form.get("thermal_excursion_c") or "").strip()
-    g.thermal_excursion_c = int(temp) if temp else None
+    g.thermal_excursion_c = _int_or_none("thermal_excursion_c")
+
+    # v0.8.0+ age ceilings
+    g.age_ceiling_enabled = form.get("age_ceiling_enabled") == "on"
+    _int_keep("poh_a_ceiling_hours")
+    _int_keep("poh_b_ceiling_hours")
+    g.poh_fail_hours = _int_or_none("poh_fail_hours")
+
+    # v0.8.0+ workload ceilings + rated-TBW table
+    g.workload_ceiling_enabled = form.get("workload_ceiling_enabled") == "on"
+    for k in (
+        "workload_a_ceiling_pct",
+        "workload_b_ceiling_pct",
+        "workload_fail_pct",
+        "rated_tbw_enterprise_hdd",
+        "rated_tbw_enterprise_ssd",
+        "rated_tbw_consumer_hdd",
+        "rated_tbw_consumer_ssd",
+    ):
+        _int_keep(k)
+
+    # v0.8.0+ SSD wear ceilings
+    g.ssd_wear_ceiling_enabled = form.get("ssd_wear_ceiling_enabled") == "on"
+    for k in ("ssd_wear_a_ceiling_pct", "ssd_wear_b_ceiling_pct", "ssd_wear_fail_pct"):
+        _int_keep(k)
+    g.fail_on_low_nvme_spare = form.get("fail_on_low_nvme_spare") == "on"
+
+    # v0.8.0+ error-class rules
+    g.error_rules_enabled = form.get("error_rules_enabled") == "on"
+    g.fail_on_end_to_end_error = form.get("fail_on_end_to_end_error") == "on"
+    g.fail_on_nvme_critical_warning = form.get("fail_on_nvme_critical_warning") == "on"
+    g.cap_c_on_nvme_media_errors = form.get("cap_c_on_nvme_media_errors") == "on"
+    _int_keep("command_timeout_b_ceiling")
+    g.cap_c_on_past_self_test_failure = form.get("cap_c_on_past_self_test_failure") == "on"
+
     await _save_settings_or_ignore(request)
     return RedirectResponse(url="/settings?saved=grading", status_code=303)
 
