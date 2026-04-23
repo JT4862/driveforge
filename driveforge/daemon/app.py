@@ -628,14 +628,34 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         except Exception:  # noqa: BLE001
             logger.exception("startup recovery dispatch failed (non-fatal)")
         hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
+        # v0.10.1+ agent-side fleet client. Connects to the operator and
+        # streams drive state. No-ops when role != "agent"; the client's
+        # own `run()` method bails early on misconfig so we don't need
+        # a role check here.
+        fleet_client_task: asyncio.Task | None = None
+        fleet_client_instance = None
+        if settings.fleet.role == "agent":
+            from driveforge.daemon.fleet_client import FleetClient
+            fleet_client_instance = FleetClient(state)
+            state.fleet_client = fleet_client_instance  # type: ignore[attr-defined]
+            fleet_client_task = asyncio.create_task(fleet_client_instance.run())
         logger.info(
-            "driveforge-daemon ready on %s:%d (dev_mode=%s)",
+            "driveforge-daemon ready on %s:%d (dev_mode=%s, role=%s)",
             settings.daemon.host,
             settings.daemon.port,
             settings.dev_mode,
+            settings.fleet.role,
         )
         yield
-        for task in (io_task, hotplug_task, update_check_task, udev_health_task):
+        # Graceful shutdown of the fleet client first so it emits a
+        # clean close frame to the operator instead of the operator
+        # seeing a TCP RST.
+        if fleet_client_instance is not None:
+            await fleet_client_instance.stop()
+        fleet_tasks: tuple[asyncio.Task, ...] = (
+            (fleet_client_task,) if fleet_client_task is not None else ()
+        )
+        for task in (io_task, hotplug_task, update_check_task, udev_health_task, *fleet_tasks):
             task.cancel()
             try:
                 await task
@@ -674,6 +694,13 @@ def make_app(settings: cfg.Settings) -> FastAPI:
     app.include_router(api_router)
     app.include_router(setup_router)
     app.include_router(web_router)
+    # v0.10.1+ fleet WebSocket endpoint. Router is role-agnostic at
+    # mount time (always mounted); the handler itself refuses
+    # connections when fleet.role != "operator". Keeping the mount
+    # unconditional means flipping role in Settings doesn't require
+    # re-mounting routes at runtime.
+    from driveforge.daemon.fleet_server import router as fleet_router
+    app.include_router(fleet_router)
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     # Expose templates for web routes

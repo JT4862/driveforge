@@ -273,7 +273,81 @@ def _installed_card(state, session, drive: "drive_mod.Drive") -> dict:
     }
 
 
-def _drive_view(state, session) -> dict:
+def _remote_active_card(agent_state, drive_state) -> dict:
+    """v0.10.1+ — render a card for a remote agent's active drive.
+
+    Mirrors `_active_card()` shape so the dashboard template can
+    iterate `view.active` without branching on local-vs-remote. The
+    `host_id` + `host_display` fields are what trigger the host-badge
+    render in the card template.
+    """
+    import time as _time
+    phase = drive_state.phase or "queued"
+    phase_changed_at = drive_state.phase_change_ts_epoch
+    phase_just_changed = (
+        phase_changed_at is not None
+        and (_time.monotonic() - phase_changed_at) < 2.5
+    )
+    return {
+        "state": "active",
+        "key": f"{agent_state.agent_id}:{drive_state.serial}",
+        "serial": drive_state.serial,
+        "model": drive_state.model,
+        "manufacturer": drive_state.manufacturer,
+        "capacity_tb": round(drive_state.capacity_bytes / 1_000_000_000_000, 2) if drive_state.capacity_bytes else 0.0,
+        "phase": phase,
+        "phase_class": _PHASE_CLASS.get(phase, "info"),
+        "phase_icon": _PHASE_ICONS.get(phase, ""),
+        "drive_temp_c": drive_state.drive_temp_c,
+        "drive_temp_band": _temp_band(drive_state.drive_temp_c),
+        "spark_points": None,  # remote drives don't forward history yet
+        "spark_peak": None,
+        "phase_just_changed": phase_just_changed,
+        "recovery_mode": False,  # remote recovery state not forwarded in v0.10.1
+        "percent": drive_state.percent or 0.0,
+        "sublabel": drive_state.sublabel,
+        "io_rate": drive_state.io_rate,
+        "elapsed_label": "",  # operator doesn't know run start time for remote runs yet
+        "eta_label": None,
+        # v0.10.1+ host identity
+        "host_id": agent_state.agent_id,
+        "host_display": agent_state.display_name,
+        "host_offline": not agent_state.is_online(_time.monotonic()),
+    }
+
+
+def _remote_installed_card(agent_state, drive_state) -> dict:
+    """v0.10.1+ — installed-section card for a remote agent's idle drive."""
+    import time as _time
+    return {
+        "state": "installed",
+        "key": f"{agent_state.agent_id}:{drive_state.serial}",
+        "serial": drive_state.serial,
+        "model": drive_state.model,
+        "manufacturer": drive_state.manufacturer,
+        "capacity_tb": round(drive_state.capacity_bytes / 1_000_000_000_000, 2) if drive_state.capacity_bytes else 0.0,
+        "transport": drive_state.transport,
+        # Remote installed drives don't carry last-grade / triage yet
+        # (those arrive with v0.10.3 cert forwarding). For v0.10.1 we
+        # just show the drive is present on the remote agent.
+        "last_grade": None,
+        "last_tested": None,
+        "last_phase": None,
+        "last_quick": False,
+        "last_triage": None,
+        "remapped_during_run": None,
+        "last_error": None,
+        "drive_age_label": None,
+        "just_completed": False,
+        "identifying": False,
+        "promote_prompt": False,
+        "host_id": agent_state.agent_id,
+        "host_display": agent_state.display_name,
+        "host_offline": not agent_state.is_online(_time.monotonic()),
+    }
+
+
+def _drive_view(state, session, *, host_filter: str | None = None) -> dict:
     """Compose the drive-centric dashboard view.
 
     Returns two flat lists:
@@ -282,11 +356,20 @@ def _drive_view(state, session) -> dict:
       - installed: one card per drive currently present on the host that
         is NOT active. Ordered by serial.
 
+    v0.10.1+ operator role: remote-agent drives are merged into both
+    lists after local drives. `host_filter` restricts the view to one
+    host_id ("local" for the operator's own drives, an agent_id for
+    a specific agent, or None for everything).
+
     No enclosures, no slot groupings, no empty placeholders. Drives that
     are pulled disappear from the view automatically on the next refresh.
     """
     # One-shot lsblk to get the currently-present drives.
-    discovered = {d.serial: d for d in drive_mod.discover()}
+    # v0.10.1+: agent-role daemons skip local discovery if they're
+    # serving nothing — but the standalone / operator default is to
+    # always include the operator's own local drives, because an
+    # operator is also a pipeline runner.
+    show_local = host_filter in (None, "local")
 
     # Active section: preserve orchestrator insertion order (dict iteration).
     # v0.6.5+: snapshot the keys into a list before iterating — orchestrator
@@ -296,23 +379,47 @@ def _drive_view(state, session) -> dict:
     # iteration", 500'ing the dashboard request. list() takes the snapshot
     # atomically under the GIL.
     active_cards: list[dict] = []
-    for serial in list(state.active_phase):
-        card = _active_card(state, session, serial)
-        if card is not None:
-            active_cards.append(card)
+    discovered: dict = {}
+    if show_local:
+        discovered = {d.serial: d for d in drive_mod.discover()}
+        for serial in list(state.active_phase):
+            card = _active_card(state, session, serial)
+            if card is not None:
+                active_cards.append(card)
     active_serials = {c["serial"] for c in active_cards}
 
-    # Installed section: every currently-present drive that isn't active.
+    # Installed section: every currently-present local drive that isn't active.
     installed_cards: list[dict] = []
-    for serial in sorted(discovered.keys()):
-        if serial in active_serials:
-            continue
-        installed_cards.append(_installed_card(state, session, discovered[serial]))
+    if show_local:
+        for serial in sorted(discovered.keys()):
+            if serial in active_serials:
+                continue
+            installed_cards.append(_installed_card(state, session, discovered[serial]))
+
+    # v0.10.1+ fleet aggregation — remote agent drives.
+    # Operator renders each agent's drives inline with its own. The
+    # host badge on the card lets operators visually separate them.
+    remote_count = 0
+    if state.settings.fleet.role == "operator":
+        from driveforge.daemon import fleet_server
+        for ra in fleet_server.all_known_agents(state):
+            if host_filter not in (None, ra.agent_id):
+                continue
+            for drive_state in ra.drives.values():
+                remote_count += 1
+                if drive_state.phase:
+                    active_cards.append(_remote_active_card(ra, drive_state))
+                else:
+                    installed_cards.append(_remote_installed_card(ra, drive_state))
 
     return {
         "active": active_cards,
         "installed": installed_cards,
-        "total_present": len(discovered),
+        "total_present": len(discovered) + remote_count,
+        # v0.10.1+ host filter state — templates render a dropdown /
+        # chip when the fleet has any remote agents.
+        "host_filter": host_filter,
+        "fleet_role": state.settings.fleet.role,
     }
 
 
@@ -354,16 +461,50 @@ def _chassis_snapshot(state) -> dict | None:
     }
 
 
+def _available_hosts(state) -> list[dict]:
+    """v0.10.1+ — list of hosts the dashboard's filter chip can
+    switch between. Empty on standalone/agent roles (no fleet UI).
+    On operators with no enrolled agents this returns a single
+    "local" entry which the template collapses to a no-op.
+    """
+    if state.settings.fleet.role != "operator":
+        return []
+    from driveforge.daemon import fleet_server
+    entries: list[dict] = [{
+        "id": "local",
+        "display": state.settings.fleet.display_name or "this operator",
+        "drives": len(state.active_phase),
+        "online": True,
+    }]
+    import time as _time
+    now = _time.monotonic()
+    for ra in fleet_server.all_known_agents(state):
+        entries.append({
+            "id": ra.agent_id,
+            "display": ra.display_name,
+            "drives": len(ra.drives),
+            "online": ra.is_online(now),
+        })
+    return entries
+
+
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
+    host_filter = request.query_params.get("host") or None
     with state.session_factory() as session:
-        view = _drive_view(state, session)
+        view = _drive_view(state, session, host_filter=host_filter)
     chassis = _chassis_snapshot(state)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"view": view, "chassis": chassis, "settings": state.settings},
+        {
+            "view": view,
+            "chassis": chassis,
+            "settings": state.settings,
+            "available_hosts": _available_hosts(state),
+            "current_host_filter": host_filter,
+        },
     )
 
 
@@ -384,8 +525,9 @@ async def set_auto_enroll(request: Request) -> RedirectResponse:
 def bays_partial(request: Request) -> HTMLResponse:
     """HTMX polling endpoint for live dashboard refresh."""
     state = get_state()
+    host_filter = request.query_params.get("host") or None
     with state.session_factory() as session:
-        view = _drive_view(state, session)
+        view = _drive_view(state, session, host_filter=host_filter)
     return templates.TemplateResponse(request, "_bays.html", {"view": view})
 
 

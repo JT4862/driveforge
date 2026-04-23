@@ -61,7 +61,30 @@
   </div>
 </section>
 
-<section id="bay-grid" hx-get="/_partials/bays" hx-trigger="every 3s" hx-swap="innerHTML">
+{# v0.10.1+ host filter chip row. Renders only on operator-role
+   nodes that have enrolled agents. Lets operator scope the view to
+   "local drives only" or "just the R720's drives" without losing
+   the always-running fleet-wide view at ?host=(none). #}
+{% if available_hosts and available_hosts|length > 1 %}
+<section class="host-filter-row">
+  <span class="host-filter-label">View:</span>
+  <a href="/" class="host-pill{% if not current_host_filter %} active{% endif %}">
+    All hosts
+    <span class="host-pill-count">{{ view.total_present }}</span>
+  </a>
+  {% for host in available_hosts %}
+  <a href="/?host={{ host.id }}"
+     class="host-pill{% if current_host_filter == host.id %} active{% endif %}{% if not host.online %} offline{% endif %}"
+     title="{% if host.online %}Live{% else %}Last-seen state; agent currently offline{% endif %}">
+    <span class="host-dot{% if not host.online %} host-dot--offline{% endif %}" aria-hidden="true"></span>
+    {{ host.display }}
+    <span class="host-pill-count">{{ host.drives }}</span>
+  </a>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section id="bay-grid" hx-get="/_partials/bays{% if current_host_filter %}?host={{ current_host_filter }}{% endif %}" hx-trigger="every 3s" hx-swap="innerHTML">
   {% include "_bays.html" %}
 </section>
 {% endblock %}
