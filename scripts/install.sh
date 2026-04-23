@@ -254,6 +254,70 @@ log "Installing default config..."
   "$(dirname "$0")/../config/grading.yaml.example" /etc/driveforge/grading.yaml
 ok "defaults written to /etc/driveforge/"
 
+# ---------------------------------------------------------------- hostname
+# v0.10.0+: uniquify the hostname on first install so multiple DriveForge
+# boxes on the same LAN don't all claim "driveforge.local" via mDNS. avahi
+# has runtime collision detection but auto-suffixes with no operator
+# visibility; better to pick a stable, collision-free name up front.
+#
+# Strategy:
+#   - Only run when the hostname is still the preseed default
+#     ("driveforge") AND we haven't done this before (marker file).
+#   - Derive a 6-hex suffix from the primary NIC's MAC address. Stable
+#     across reinstalls of the same hardware (same MAC), unique across
+#     boxes (different MAC).
+#   - Update /etc/hostname, /etc/hosts, and run `hostnamectl` so
+#     avahi picks up the change immediately.
+#   - Operator can always override via Settings → Hostname UI later;
+#     the marker file ensures we don't undo their rename on future
+#     install.sh re-runs (in-app updates call install.sh).
+HOSTNAME_UNIQ_MARKER=/var/lib/driveforge/.hostname-uniquified
+if [[ "$(hostname)" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; then
+  log "Uniquifying hostname (avoids driveforge.local mDNS collisions)..."
+  # Pick the iface on the default route. Fallback to first /sys entry that
+  # isn't lo or a virtual bridge if `ip route` yields nothing yet
+  # (install.sh may run before first DHCP lease on some images).
+  primary_iface=""
+  if command -v ip >/dev/null 2>&1; then
+    primary_iface="$(ip -o route get 1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") print $(i+1); exit}')"
+  fi
+  if [[ -z "$primary_iface" ]]; then
+    for iface in /sys/class/net/*; do
+      name="$(basename "$iface")"
+      [[ "$name" == "lo" ]] && continue
+      [[ -d "$iface/bridge" ]] && continue
+      [[ -d "$iface/bonding" ]] && continue
+      primary_iface="$name"
+      break
+    done
+  fi
+  mac_suffix=""
+  if [[ -n "$primary_iface" && -r "/sys/class/net/$primary_iface/address" ]]; then
+    mac_suffix="$(tr -d ':' < "/sys/class/net/$primary_iface/address" | tail -c 7 | head -c 6)"
+  fi
+  if [[ -n "$mac_suffix" ]]; then
+    new_hostname="driveforge-${mac_suffix}"
+    log "  → ${new_hostname}"
+    hostnamectl set-hostname "$new_hostname" || warn "hostnamectl set-hostname failed (non-fatal)"
+    # Patch /etc/hosts so local resolution matches. Debian's preseed usually
+    # installs `127.0.1.1 driveforge`; replace that exact line.
+    if grep -qE '^127\.0\.1\.1\s+driveforge\b' /etc/hosts; then
+      sed -i -E "s/^(127\.0\.1\.1\s+)driveforge\b/\1${new_hostname}/" /etc/hosts
+    elif ! grep -qE "^127\.0\.1\.1\s+${new_hostname}\b" /etc/hosts; then
+      echo "127.0.1.1	${new_hostname}" >> /etc/hosts
+    fi
+    # avahi watches /etc/hostname; a SIGHUP is the polite way to reload.
+    if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+      systemctl reload avahi-daemon 2>/dev/null || systemctl restart avahi-daemon 2>/dev/null || true
+    fi
+    touch "$HOSTNAME_UNIQ_MARKER"
+    ok "hostname set to ${new_hostname}"
+  else
+    warn "couldn't derive MAC suffix — leaving hostname as 'driveforge'"
+    warn "rename it in Settings → Hostname if you're running more than one DriveForge box on this LAN"
+  fi
+fi
+
 log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/

@@ -2026,6 +2026,95 @@ async def save_daemon(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/settings?saved=daemon{suffix}", status_code=303)
 
 
+# ---------------------------------------------------------------- fleet
+#
+# v0.10.0 fleet management UI. Lives under /settings/agents. Three
+# handlers:
+#   GET  /settings/agents              — list enrolled agents + token form
+#   POST /settings/agents/new-token    — mint a fresh one-shot token, render
+#                                        it to the operator once
+#   POST /settings/agents/<id>/revoke  — stamp revoked_at on an agent row
+# Role-gate is rendered in the template itself so standalone + agent
+# operators still get a friendly "fleet mode not enabled here" page
+# instead of a 404, which makes the Settings layout predictable.
+
+
+@router.get("/settings/agents", response_class=HTMLResponse)
+def agents_page(request: Request) -> HTMLResponse:
+    state = get_state()
+    new_token = request.query_params.get("new_token")
+    agents: list[m.Agent] = []
+    if state.settings.fleet.role == "operator":
+        from driveforge.core import fleet as fleet_mod
+        with state.session_factory() as session:
+            agents = fleet_mod.list_agents(session)
+    # Synthesize the operator URL for the token-display command. Prefer
+    # the configured integrations.cloudflare_tunnel_hostname if set
+    # (public hostname), else fall back to <hostname>.local:<port>.
+    # Agents dial this from the same LAN, so .local is usually right.
+    from driveforge.core import hostname as hostname_mod
+    host = (
+        state.settings.integrations.cloudflare_tunnel_hostname
+        or f"{hostname_mod.current_hostname() or 'driveforge'}.local"
+    )
+    scheme = "https" if state.settings.integrations.cloudflare_tunnel_hostname else "http"
+    port_suffix = "" if scheme == "https" else f":{state.settings.daemon.port}"
+    operator_url = f"{scheme}://{host}{port_suffix}"
+    return templates.TemplateResponse(
+        request,
+        "settings_agents.html",
+        {
+            "settings": state.settings,
+            "agents": agents,
+            "new_token": new_token,
+            "operator_url": operator_url,
+            "token_ttl_minutes": state.settings.fleet.enrollment_token_ttl_seconds // 60,
+        },
+    )
+
+
+@router.post("/settings/agents/new-token")
+def agents_new_token(request: Request) -> RedirectResponse:
+    """Generate a one-shot enrollment token and redirect back to the
+    Agents page with the raw token in the query string so the template
+    can display it exactly once.
+
+    The token is presented in the URL — not ideal from a
+    browser-history-leak standpoint, but:
+      (a) the token is one-shot, so a leaked-history copy is useless
+          once the agent has consumed it
+      (b) the token TTL is 15 minutes by default
+      (c) the alternative (session storage) adds infra for marginal
+          benefit at homelab scale.
+    Operator is expected to consume the token immediately on the agent
+    console."""
+    from urllib.parse import quote
+    state = get_state()
+    if state.settings.fleet.role != "operator":
+        raise HTTPException(status_code=400, detail="fleet role is not operator")
+    from driveforge.core import fleet as fleet_mod
+    with state.session_factory() as session:
+        issue = fleet_mod.issue_enrollment_token(
+            session,
+            ttl_seconds=state.settings.fleet.enrollment_token_ttl_seconds,
+        )
+    return RedirectResponse(
+        url=f"/settings/agents?new_token={quote(issue.raw_token)}",
+        status_code=303,
+    )
+
+
+@router.post("/settings/agents/{agent_id}/revoke")
+def agents_revoke(agent_id: str) -> RedirectResponse:
+    state = get_state()
+    if state.settings.fleet.role != "operator":
+        raise HTTPException(status_code=400, detail="fleet role is not operator")
+    from driveforge.core import fleet as fleet_mod
+    with state.session_factory() as session:
+        fleet_mod.revoke_agent(session, agent_id)
+    return RedirectResponse(url="/settings/agents", status_code=303)
+
+
 @router.post("/settings/wizard-replay")
 async def replay_wizard(request: Request) -> RedirectResponse:
     state = get_state()

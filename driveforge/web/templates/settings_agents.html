@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Fleet agents · DriveForge{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <header class="panel-head">
+    <h1>Fleet agents</h1>
+    <p class="muted">
+      Agents are remote DriveForge nodes that report their drives to this
+      operator. This node is running in
+      <strong>{{ settings.fleet.role }}</strong> mode.
+    </p>
+  </header>
+
+  {% if settings.fleet.role == "standalone" %}
+  <div class="info-banner">
+    <p>
+      Fleet mode is disabled on this node. To aggregate drives from
+      additional servers, flip <code>fleet.role</code> to
+      <code>operator</code> in Settings → Daemon and restart the service,
+      then return here to enroll agents.
+    </p>
+  </div>
+  {% elif settings.fleet.role == "agent" %}
+  <div class="info-banner">
+    <p>
+      This node is an <strong>agent</strong>, reporting to
+      <code>{{ settings.fleet.operator_url or "(no operator configured)" }}</code>.
+      Agent management is done on the operator's Settings page, not here.
+    </p>
+  </div>
+  {% else %}
+
+  {# Operator mode — show token generator + agent list + revoke form. #}
+
+  {% if new_token %}
+  {# Show the raw token exactly once, immediately after it's generated. #}
+  <div class="token-display">
+    <h2>New enrollment token</h2>
+    <p class="muted">
+      Copy this command and run it on the agent console. Token expires
+      in {{ token_ttl_minutes }} minutes and may only be used once.
+    </p>
+    <pre class="token-code" aria-label="Agent enrollment command"><code>sudo driveforge fleet join {{ operator_url }} {{ new_token }}</code></pre>
+    <p class="muted">
+      This is the only time the token is displayed. If you lose it,
+      generate a new one.
+    </p>
+  </div>
+  {% endif %}
+
+  <form method="post" action="/settings/agents/new-token" class="inline-form">
+    <button type="submit" class="btn">Generate enrollment token</button>
+  </form>
+
+  <h2 class="section-head">Enrolled agents</h2>
+
+  {% if agents %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Hostname</th>
+        <th>Version</th>
+        <th>Enrolled</th>
+        <th>Last seen</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in agents %}
+      <tr{% if a.revoked_at %} class="revoked"{% endif %}>
+        <td>{{ a.display_name }}</td>
+        <td><code>{{ a.hostname or "—" }}</code></td>
+        <td>{{ a.version or "—" }}</td>
+        <td title="{{ a.enrolled_at }}">{{ a.enrolled_at.strftime("%Y-%m-%d") }}</td>
+        <td>
+          {% if a.last_seen_at %}
+            <span title="{{ a.last_seen_at }}">{{ a.last_seen_at.strftime("%Y-%m-%d %H:%M") }}</span>
+          {% else %}
+            <span class="muted">never</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if a.revoked_at %}
+            <span class="badge badge-muted">revoked</span>
+          {% else %}
+            <span class="badge badge-ok">active</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if not a.revoked_at %}
+          <form method="post" action="/settings/agents/{{ a.id }}/revoke" class="inline-form"
+                onsubmit="return confirm('Revoke agent {{ a.display_name }}? Its connection will drop and it can no longer send drive state. Historical records stay.');">
+            <button type="submit" class="btn btn-danger">Revoke</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No agents enrolled yet. Generate a token above to add one.</p>
+  {% endif %}
+
+  {% endif %}
+</section>
+{% endblock %}

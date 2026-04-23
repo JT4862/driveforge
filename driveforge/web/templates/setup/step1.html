@@ -5,21 +5,87 @@
   the daemon can start testing drives on your hardware.
 </p>
 
-<p>
-  Every optional integration can be skipped now and configured later in
-  Settings. DriveForge works end to end with local-only features — no
-  external services are required.
-</p>
+<form method="post" action="/setup/1" class="setup-form">
 
-<ul class="setup-what">
-  <li>Auto-detect attached drives and the server's network info</li>
-  <li>Pick a thermal printer (or skip — DriveForge auto-configures when one is plugged in later)</li>
-  <li>Review grading thresholds (defaults are fine for most homelab use)</li>
-  <li>Connect optional integrations (outbound webhook, Cloudflare Tunnel) or skip</li>
-</ul>
+  {# v0.10.0+ Role selection. Most installs are standalone; operator
+     mode unlocks fleet aggregation when the user has more than one
+     DriveForge box. Agent mode is configured via the
+     `driveforge fleet join` CLI on the agent itself, not here — so
+     it's intentionally absent from this form. #}
+  <fieldset class="role-select">
+    <legend>How will this DriveForge install be used?</legend>
 
-<form method="post" action="/setup/1" class="setup-actions">
-  <span></span>
-  <button type="submit" class="btn primary">Begin &rarr;</button>
+    <label class="role-option">
+      <input type="radio" name="role" value="standalone"
+             {% if current_role == "standalone" %}checked{% endif %}>
+      <span class="role-head">Standalone</span>
+      <span class="role-sub">
+        One box, one dashboard. Pick this if you only have one server
+        running DriveForge. (You can switch to operator mode later from
+        Settings if you add more boxes.)
+      </span>
+    </label>
+
+    <label class="role-option">
+      <input type="radio" name="role" value="operator"
+             {% if current_role == "operator" %}checked{% endif %}>
+      <span class="role-head">Operator <span class="pill">fleet</span></span>
+      <span class="role-sub">
+        The main dashboard for a fleet. This node aggregates drives from
+        one or more agent nodes AND runs its own local pipeline. Enroll
+        agents from Settings &rarr; Agents after the wizard.
+      </span>
+    </label>
+  </fieldset>
+
+  <p class="muted small">
+    Setting up an agent? Install DriveForge on the agent box the normal
+    way (leave this wizard in standalone mode), then on the operator
+    node go to Settings &rarr; Agents, generate an enrollment token, and
+    paste the <code>driveforge fleet join …</code> one-liner on the
+    agent's console. Agents don't need the web UI.
+  </p>
+
+  {# v0.10.0+ Hostname confirmation. install.sh uniquifies the hostname
+     on first install (driveforge-<mac-suffix>), but operators usually
+     want something friendlier like "driveforge-r720". Showing the
+     auto-generated name here + letting them rename in one step fixes
+     the historical "everything is driveforge.local on my LAN" papercut. #}
+  <fieldset class="hostname-confirm">
+    <legend>Hostname</legend>
+    <label class="field">
+      <span>This DriveForge instance is called</span>
+      <input type="text" name="hostname" value="{{ current_hostname }}"
+             maxlength="63"
+             pattern="[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+             required>
+    </label>
+    <p class="muted small">
+      Published as <code>{{ current_hostname }}.local</code> via mDNS.
+      The installer generated a unique name from this box's MAC address
+      so it doesn't collide with other DriveForge boxes on your LAN.
+      Rename it now to something friendlier (e.g.
+      <code>driveforge-r720</code>) if you'd like; you can also change
+      it later from Settings. Letters, digits, and hyphens only.
+    </p>
+  </fieldset>
+
+  <p>
+    Every optional integration can be skipped now and configured later in
+    Settings. DriveForge works end to end with local-only features — no
+    external services are required.
+  </p>
+
+  <ul class="setup-what">
+    <li>Auto-detect attached drives and the server's network info</li>
+    <li>Pick a thermal printer (or skip — DriveForge auto-configures when one is plugged in later)</li>
+    <li>Review grading thresholds (defaults are fine for most homelab use)</li>
+    <li>Connect optional integrations (outbound webhook, Cloudflare Tunnel) or skip</li>
+  </ul>
+
+  <div class="setup-actions">
+    <span></span>
+    <button type="submit" class="btn primary">Begin &rarr;</button>
+  </div>
 </form>
 {% endblock %}
