@@ -240,24 +240,82 @@ def touch_agent_last_seen(session: Session, agent_id: str) -> None:
 
 
 def write_agent_token(path: Path, composite_token: str) -> None:
-    """Write the long-lived agent token to disk with mode 600.
+    """Write the long-lived agent token to disk with mode 600 and,
+    when running as root on Linux, chown to the daemon user so the
+    unprivileged daemon process can read its own token.
 
-    The daemon user must be able to read this path; the default
-    location `/etc/driveforge/agent.token` is created by install.sh
-    owned `driveforge:driveforge`. Tests pass a tmp_path override.
+    Discovered in v0.10.5 walkthrough: the CLI writes via `sudo
+    driveforge fleet join` (root uid), so without an explicit chown
+    the token lands `root:root 0600` and the `driveforge` systemd
+    unit (User=driveforge) can't read it. The fleet client's
+    `read_agent_token()` silently raises PermissionError inside the
+    lifespan task, which asyncio.create_task swallows — leading to
+    the symptom "enrollment succeeded, daemon restarted, but
+    `fleet status` shows connected=false and no journal log about
+    connecting."
+
+    Fix: after writing, if we're root AND the `driveforge` user
+    exists, chown to `driveforge:driveforge`. Non-Linux / non-root /
+    non-systemd setups (dev, macOS, custom service accounts) fall
+    through with the file as-is; callers there are responsible for
+    ownership.
+
+    Tests pass a tmp_path override that won't be readable via the
+    daemon path anyway — they just verify mode 600 + content, which
+    still works after the chown is skipped on non-root test runs.
     """
+    import os
+    import pwd
+
     path.parent.mkdir(parents=True, exist_ok=True)
     # Write via a tmp file + rename for atomicity.
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(composite_token, encoding="utf-8")
     tmp.chmod(0o600)
+    # v0.10.6+ chown when we have the privilege and the target user
+    # exists. Keep failures non-fatal so a misconfigured install
+    # doesn't crash enrollment; the daemon's next startup logs a
+    # clear error and the operator can chown manually.
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        try:
+            daemon_user = pwd.getpwnam("driveforge")
+            os.chown(str(tmp), daemon_user.pw_uid, daemon_user.pw_gid)
+        except KeyError:
+            # `driveforge` user not present — dev box, non-standard
+            # install, whatever. Fall through; file stays root-owned.
+            pass
+        except OSError:
+            # Odd filesystem or EPERM despite euid==0 (container?).
+            # Log via stderr-ish path isn't worth here; caller gets
+            # back a file they at least own + can read.
+            pass
     tmp.replace(path)
 
 
+class AgentTokenUnreadable(Exception):
+    """Raised by `read_agent_token` when the file exists but the
+    current process can't read it (permission / ownership issue).
+
+    v0.10.6+ distinguishes this from the "file absent" case (returns
+    None) so the fleet client can log a clear, actionable error
+    instead of silently exiting the lifespan task."""
+
+
 def read_agent_token(path: Path) -> str | None:
-    """Read the long-lived agent token from disk. Returns None if the
-    file doesn't exist (agent not yet enrolled) or is empty."""
+    """Read the long-lived agent token from disk.
+
+    Returns None when the file doesn't exist (agent not yet
+    enrolled) or is empty. Raises AgentTokenUnreadable when the
+    file exists but can't be read (wrong ownership, selinux label,
+    etc.) — caller logs + bails cleanly.
+    """
     if not path.exists():
         return None
-    content = path.read_text(encoding="utf-8").strip()
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except PermissionError as exc:
+        raise AgentTokenUnreadable(
+            f"cannot read {path}: {exc}. The daemon user needs read "
+            f"access — try: sudo chown driveforge:driveforge {path}"
+        ) from exc
     return content or None

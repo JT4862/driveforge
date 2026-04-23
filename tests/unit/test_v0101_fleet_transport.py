@@ -477,13 +477,20 @@ def test_dashboard_hides_host_filter_when_no_agents(tmp_path) -> None:
 # ---------------------------------------------------- FleetClient
 
 
-def test_fleet_client_builds_snapshot_from_state(tmp_path) -> None:
+def test_fleet_client_builds_snapshot_from_state(tmp_path, monkeypatch) -> None:
     """The client's snapshot builder must mirror the agent's live
     per-serial state — otherwise the operator sees stale / empty
-    drive data."""
+    drive data.
+
+    v0.10.6: the snapshot now iterates lsblk-discovered drives ∪
+    active_phase. We stub discover() to empty so this test covers
+    the active_phase-fallback path (drive running before lsblk
+    catches up, or test machine has unrelated drives attached)."""
     _bootstrap_app(tmp_path, role="agent")
+    from driveforge.core import drive as drive_mod_
     from driveforge.daemon.fleet_client import FleetClient
     from driveforge.daemon.state import get_state
+    monkeypatch.setattr(drive_mod_, "discover", lambda: [])
     state = get_state()
     # Seed DB + live state for one active drive
     with state.session_factory() as session:
