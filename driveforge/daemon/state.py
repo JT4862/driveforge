@@ -261,6 +261,23 @@ class RemoteAgentState:
     # NOT "the agent hasn't sent anything yet" (that case is just
     # absence from `DaemonState.remote_agents`).
     drives: dict[str, "object"] = field(default_factory=dict)  # dict[serial, DriveState]
+    # v0.10.2+ outbound command queue. Operator POST handlers enqueue
+    # commands (StartPipelineCmd / AbortCmd / IdentifyCmd / RegradeCmd)
+    # as JSON-dumped strings; the WebSocket session's sender task
+    # drains them and writes to the wire. Using a queue (not a direct
+    # ws.send) means POST handlers never touch the socket directly;
+    # if the agent is momentarily disconnected, queued commands wait
+    # until reconnect rather than erroring.
+    # Field default via `default=None` + lazy init in the fleet_server
+    # session — asyncio.Queue() must be created inside a running
+    # event loop to bind to the correct one, so constructing it in
+    # a dataclass default would crash when the queue is used from
+    # a different loop.
+    outbound_queue: "object | None" = None  # asyncio.Queue[str] | None
+    # Latest CommandResultMsg replies per cmd_id, for surfacing to
+    # the dashboard's flash area on subsequent requests. Capped at
+    # the last 64 by insertion order.
+    recent_command_results: list["object"] = field(default_factory=list)
 
     def is_online(self, now_monotonic: float, *, timeout_s: float = 120.0) -> bool:
         """An agent is considered online if we've received any frame
