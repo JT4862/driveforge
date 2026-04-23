@@ -88,43 +88,80 @@
   </div>
 </form>
 
-{# v0.10.0+ fleet entry point. Compact panel that summarizes the
-   current role and links into /settings/agents for the full UI. Kept
-   out of the main Settings grid so standalone users (the majority)
-   don't see fleet UI they don't need. #}
+{# v0.10.0+ fleet entry point. v0.10.5+ gained an actual role
+   selector form — previously this panel just described the current
+   state + linked to /settings/agents, which meant operators had to
+   either re-run the setup wizard OR hand-edit YAML to flip roles
+   post-install. Now the form lives here; flipping role requires a
+   daemon restart (lifespan hooks are evaluated once at boot) so the
+   post-save banner nudges the operator toward that. #}
 <section class="panel">
   <div class="panel-head">
     <h2>Fleet</h2>
+    {% if saved_panel == "fleet_role" %}<span class="pill saved">saved</span>{% endif %}
+    {% if saved_panel == "fleet_role_invalid" %}<span class="pill" style="background: rgba(255,102,102,0.18); color: var(--fail);">invalid role</span>{% endif %}
   </div>
-  {% if settings.fleet.role == "standalone" %}
-  <p class="muted">
-    This DriveForge install runs standalone — one box, one dashboard.
-    To aggregate drives from other DriveForge nodes onto this
-    dashboard, flip the role to <strong>operator</strong> in the
-    Daemon panel below and restart the service, then visit the Agents
-    page to enroll them.
-  </p>
-  <p class="form-actions">
-    <a href="/settings/agents" class="btn">Open fleet page</a>
-  </p>
-  {% elif settings.fleet.role == "operator" %}
-  <p class="muted">
-    This node is the fleet <strong>operator</strong>. Its own drives
-    appear in the dashboard alongside drives from any enrolled
-    agents.
-  </p>
-  <p class="form-actions">
-    <a href="/settings/agents" class="btn primary">Manage agents</a>
-  </p>
-  {% else %}
+
+  {% if settings.fleet.role == "agent" %}
+  {# Agent nodes can't self-promote to operator via the web UI —
+     the long-lived operator credential they hold only authenticates
+     them as an agent. Detach first via CLI, then re-enroll or flip. #}
   <p class="muted">
     This node is a fleet <strong>agent</strong>, reporting to
     <code>{{ settings.fleet.operator_url or "(not configured)" }}</code>.
-    Manage fleet membership on the operator's dashboard.
+    Manage fleet membership on the operator's dashboard, or run
+    <code>sudo driveforge fleet leave</code> on this box to detach
+    and revert to standalone.
   </p>
   <p class="form-actions">
     <a href="/settings/agents" class="btn">Open fleet page</a>
   </p>
+  {% else %}
+  <form method="post" action="/settings/fleet-role">
+    <fieldset class="role-select" style="border: none; padding: 0; margin: 0;">
+      <legend class="muted small" style="margin-bottom: 8px;">Role for this DriveForge install</legend>
+
+      <label class="role-option" style="display: block; margin-bottom: 10px;">
+        <input type="radio" name="role" value="standalone"
+               {% if settings.fleet.role == "standalone" %}checked{% endif %}>
+        <strong>Standalone</strong>
+        <span class="muted small" style="display: block; margin-left: 22px;">
+          One box, one dashboard. Default for single-box installs.
+        </span>
+      </label>
+
+      <label class="role-option" style="display: block; margin-bottom: 10px;">
+        <input type="radio" name="role" value="operator"
+               {% if settings.fleet.role == "operator" %}checked{% endif %}>
+        <strong>Operator</strong>
+        <span class="muted small" style="display: block; margin-left: 22px;">
+          This node aggregates drives from one or more agent nodes
+          AND runs its own local pipeline. Enroll agents from
+          Settings &rarr; Agents after flipping + restarting.
+        </span>
+      </label>
+    </fieldset>
+
+    <p class="muted small" style="margin-top: 12px;">
+      <strong>Agent mode</strong> isn't set here — agents are born by
+      running <code>sudo driveforge fleet join &lt;operator_url&gt; &lt;token&gt;</code>
+      on the agent's console with a token minted on the operator's
+      Agents page.
+    </p>
+    <p class="muted small">
+      Switching role requires a daemon restart to take effect. The
+      <em>Install update now</em> button on this page restarts the
+      daemon; otherwise <code>sudo systemctl restart driveforge-daemon</code>
+      from a shell works.
+    </p>
+
+    <div class="form-actions" style="display: flex; gap: 10px; align-items: center;">
+      <button type="submit" class="btn primary">Save role</button>
+      {% if settings.fleet.role == "operator" %}
+      <a href="/settings/agents" class="btn">Manage agents &rarr;</a>
+      {% endif %}
+    </div>
+  </form>
   {% endif %}
 </section>
 
