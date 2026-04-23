@@ -46,6 +46,10 @@ HEARTBEAT_INTERVAL_S = 30.0
 INITIAL_BACKOFF_S = 1.0
 MAX_BACKOFF_S = 60.0
 CONNECT_TIMEOUT_S = 15.0
+# v0.10.3+: how often to scan for TestRuns flagged
+# `pending_fleet_forward=True`. Cheap SQLite query against an
+# indexed column — 10 s is plenty.
+FORWARD_INTERVAL_S = 10.0
 
 
 @dataclass
@@ -62,6 +66,8 @@ class ClientStatus:
     snapshots_sent: int = 0
     heartbeats_sent: int = 0
     reconnect_attempts: int = 0
+    # v0.10.3+ — pipeline completions forwarded to operator.
+    completions_sent: int = 0
 
 
 def _http_url_to_ws_url(http_url: str) -> str:
@@ -206,12 +212,13 @@ class FleetClient:
             ack_data.get("operator_version", "unknown"),
         )
 
-        # Run sender + receiver concurrently.
+        # Run sender + receiver + completion-forward concurrently.
         sender = asyncio.create_task(self._send_loop(ws))
         receiver = asyncio.create_task(self._receive_loop(ws))
+        forward = asyncio.create_task(self._forward_completions_loop(ws))
         try:
             done, pending = await asyncio.wait(
-                {sender, receiver},
+                {sender, receiver, forward},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
@@ -255,7 +262,11 @@ class FleetClient:
         IdentifyCmd / RegradeCmd frames at any time. Dispatch runs
         in a background task so one slow command doesn't block
         receipt of the next. Each command produces a CommandResultMsg
-        reply sent upstream with `success` + optional `detail`."""
+        reply sent upstream with `success` + optional `detail`.
+
+        v0.10.3+ — operator also sends RunCompletedAckMsg to
+        acknowledge receipt of a forwarded pipeline completion; the
+        ack clears the agent's WAL flag on that TestRun."""
         import json
         async for raw_text in ws:
             try:
@@ -268,8 +279,93 @@ class FleetClient:
                 # Fire-and-forget dispatch so a slow abort doesn't
                 # block the next incoming command.
                 asyncio.create_task(self._dispatch_command(ws, msg_type, raw))
+            elif msg_type == "run_completed_ack":
+                self._handle_completion_ack(raw)
             else:
                 logger.debug("fleet-client: dropping unknown msg type=%r", msg_type)
+
+    def _handle_completion_ack(self, raw: dict) -> None:
+        """Clear pending_fleet_forward on the TestRun matching the
+        acked completion_id. If the operator reported failure (retry
+        later), leave the WAL flag set so the next forward-loop pass
+        re-sends."""
+        try:
+            ack = proto.RunCompletedAckMsg.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fleet-client: bad run_completed_ack: %s", exc)
+            return
+        if not ack.success:
+            logger.warning(
+                "fleet-client: operator refused completion %s: %s — will retry",
+                ack.completion_id, ack.detail,
+            )
+            return
+        from driveforge.db import models as m
+        with self.state.session_factory() as session:
+            run = (
+                session.query(m.TestRun)
+                .filter_by(fleet_completion_id=ack.completion_id)
+                .first()
+            )
+            if run is not None:
+                run.pending_fleet_forward = False
+                session.commit()
+                logger.info(
+                    "fleet-client: ack received for completion %s (run %d)",
+                    ack.completion_id, run.id,
+                )
+
+    async def _forward_completions_loop(self, ws: Any) -> None:
+        """Periodically scan for TestRuns flagged `pending_fleet_forward=True`
+        and send them upstream. Runs at FORWARD_INTERVAL_S cadence;
+        also runs once immediately at session start so any WAL
+        entries queued during a disconnect window get flushed
+        quickly.
+
+        Exits only on socket failure (caller restarts the session).
+        """
+        # Initial flush — send anything queued while we were
+        # disconnected.
+        try:
+            await self._send_pending_completions(ws)
+        except Exception:  # noqa: BLE001
+            logger.exception("fleet-client: initial completion flush errored")
+
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=FORWARD_INTERVAL_S)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._send_pending_completions(ws)
+            except Exception:  # noqa: BLE001
+                logger.exception("fleet-client: completion forward errored")
+
+    async def _send_pending_completions(self, ws: Any) -> None:
+        """Scan `test_runs WHERE pending_fleet_forward=True` and
+        emit one RunCompletedMsg per row. Flag is cleared by
+        `_handle_completion_ack` on operator ack, not here —
+        send-without-ack is safe thanks to the operator-side
+        idempotency on `fleet_completion_id`."""
+        from driveforge.db import models as m
+        with self.state.session_factory() as session:
+            pending = (
+                session.query(m.TestRun, m.Drive)
+                .join(m.Drive, m.TestRun.drive_serial == m.Drive.serial)
+                .filter(m.TestRun.pending_fleet_forward.is_(True))
+                .order_by(m.TestRun.completed_at.asc())
+                .limit(32)  # cap per tick to avoid flooding the socket
+                .all()
+            )
+            batch = [(_build_run_completed_msg(run, drive)) for run, drive in pending]
+        for msg in batch:
+            await ws.send(msg.model_dump_json())
+            self.status.completions_sent += 1
+            logger.info(
+                "fleet-client: forwarded completion %s (serial=%s, grade=%s)",
+                msg.completion_id, msg.drive.serial, msg.run.grade,
+            )
 
     async def _dispatch_command(self, ws: Any, msg_type: str, raw: dict) -> None:
         """Apply an operator command against this agent's local
@@ -475,3 +571,68 @@ class _FatalProtocolError(Exception):
     the reconnect loop retries with backoff — those don't raise this
     class.
     """
+
+
+def _build_run_completed_msg(run: Any, drive: Any) -> proto.RunCompletedMsg:
+    """Serialize a (TestRun, Drive) pair into a RunCompletedMsg for
+    upstream forwarding. All TestRun columns the operator might want
+    for rendering the cert label OR the buyer-transparency report
+    go across the wire; this is roughly the projection the webhook
+    payload uses, in pydantic form."""
+    run_data = proto.CompletedRunData(
+        run_id=run.id,
+        drive_serial=run.drive_serial,
+        batch_id=run.batch_id,
+        bay=run.bay,
+        phase=run.phase,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        grade=run.grade,
+        triage_result=run.triage_result,
+        power_on_hours_at_test=run.power_on_hours_at_test,
+        reallocated_sectors=run.reallocated_sectors,
+        current_pending_sector=run.current_pending_sector,
+        offline_uncorrectable=run.offline_uncorrectable,
+        pre_reallocated_sectors=run.pre_reallocated_sectors,
+        pre_current_pending_sector=run.pre_current_pending_sector,
+        smart_status_passed=run.smart_status_passed,
+        rules=run.rules,
+        report_url=run.report_url,
+        label_printed=run.label_printed,
+        quick_mode=run.quick_mode,
+        throughput_mean_mbps=run.throughput_mean_mbps,
+        throughput_p5_mbps=run.throughput_p5_mbps,
+        throughput_p95_mbps=run.throughput_p95_mbps,
+        throughput_pass_means=(
+            list(run.throughput_pass_means) if run.throughput_pass_means else None
+        ),
+        error_message=run.error_message,
+        log_tail=run.log_tail,
+        interrupted_at_phase=run.interrupted_at_phase,
+        sanitization_method=run.sanitization_method,
+        lifetime_host_reads_bytes=run.lifetime_host_reads_bytes,
+        lifetime_host_writes_bytes=run.lifetime_host_writes_bytes,
+        wear_pct_used=run.wear_pct_used,
+        available_spare_pct=run.available_spare_pct,
+        end_to_end_error_count=run.end_to_end_error_count,
+        command_timeout_count=run.command_timeout_count,
+        reallocation_event_count=run.reallocation_event_count,
+        nvme_critical_warning=run.nvme_critical_warning,
+        nvme_media_errors=run.nvme_media_errors,
+        self_test_has_past_failure=run.self_test_has_past_failure,
+        drive_class=run.drive_class,
+    )
+    drive_data = proto.CompletedDriveData(
+        serial=drive.serial,
+        model=drive.model,
+        manufacturer=drive.manufacturer,
+        capacity_bytes=drive.capacity_bytes,
+        transport=drive.transport,
+        rotational=drive.rotational,
+        firmware_version=drive.firmware_version,
+    )
+    return proto.RunCompletedMsg(
+        completion_id=run.fleet_completion_id,
+        drive=drive_data,
+        run=run_data,
+    )

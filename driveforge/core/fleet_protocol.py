@@ -199,17 +199,118 @@ class CommandResultMsg(BaseModel):
     detail: str | None = None
 
 
+# v0.10.3+ pipeline completion forwarding.
+#
+# When an agent's pipeline finishes (pass OR fail tier — anything
+# that would normally hit the local auto-print path), the agent
+# forwards a `RunCompletedMsg` to the operator. Operator upserts
+# Drive + TestRun rows into its own DB (host_id = agent_id) and
+# fires its own auto-print against the fleet's printer.
+#
+# A simple WAL pattern guarantees exactly-once delivery across
+# network blips: the agent's DB column `test_runs.pending_fleet_forward`
+# is flipped to True on completion; a forward loop scans for pending
+# rows, sends them, and flips to False only after receiving
+# `RunCompletedAckMsg`. Operator-side receipt is idempotent (upsert
+# keyed on `completion_id` so a replay after an ack-in-flight drop
+# does nothing new).
+
+
+class CompletedRunData(BaseModel):
+    """Serialized TestRun contents — everything we need to recreate
+    the row on the operator side AND synthesize the cert label.
+    Intentionally flat; not a reference to the agent's DB row."""
+    run_id: int  # agent-side TestRun.id, for idempotency correlation
+    drive_serial: str
+    batch_id: str | None = None
+    bay: int | None = None
+    phase: str
+    started_at: datetime
+    completed_at: datetime
+    grade: str | None
+    triage_result: str | None = None
+    power_on_hours_at_test: int | None = None
+    reallocated_sectors: int | None = None
+    current_pending_sector: int | None = None
+    offline_uncorrectable: int | None = None
+    pre_reallocated_sectors: int | None = None
+    pre_current_pending_sector: int | None = None
+    smart_status_passed: bool | None = None
+    rules: list[dict] | None = None
+    report_url: str | None = None
+    label_printed: bool = False
+    quick_mode: bool = False
+    throughput_mean_mbps: float | None = None
+    throughput_p5_mbps: float | None = None
+    throughput_p95_mbps: float | None = None
+    throughput_pass_means: list[float] | None = None
+    error_message: str | None = None
+    log_tail: str | None = None
+    interrupted_at_phase: str | None = None
+    sanitization_method: str | None = None
+    # v0.8.0 fields
+    lifetime_host_reads_bytes: int | None = None
+    lifetime_host_writes_bytes: int | None = None
+    wear_pct_used: int | None = None
+    available_spare_pct: int | None = None
+    end_to_end_error_count: int | None = None
+    command_timeout_count: int | None = None
+    reallocation_event_count: int | None = None
+    nvme_critical_warning: int | None = None
+    nvme_media_errors: int | None = None
+    self_test_has_past_failure: bool | None = None
+    drive_class: str | None = None
+
+
+class CompletedDriveData(BaseModel):
+    """Drive identity, upserted on the operator side. Mirrors the
+    `drives` row columns. Capacity + transport + model are the
+    critical ones for label rendering."""
+    serial: str
+    model: str
+    manufacturer: str | None = None
+    capacity_bytes: int
+    transport: str
+    rotational: bool | None = None
+    firmware_version: str | None = None
+
+
+class RunCompletedMsg(BaseModel):
+    msg: Literal["run_completed"] = "run_completed"
+    # Stable idempotency key. Agent mints this once per completion;
+    # replays after a reconnect carry the same id so the operator
+    # can deduplicate via "has this completion_id already been
+    # committed?" check.
+    completion_id: str
+    drive: CompletedDriveData
+    run: CompletedRunData
+
+
+class RunCompletedAckMsg(BaseModel):
+    msg: Literal["run_completed_ack"] = "run_completed_ack"
+    completion_id: str
+    # If operator couldn't persist (e.g. DB error), this carries
+    # the reason and the agent keeps the WAL entry for a later
+    # retry instead of pruning it.
+    success: bool = True
+    detail: str | None = None
+
+
 # ---------------------------------- helpers
 
 
 # Union type for inbound (agent → operator) decoding. Used by the
 # server handler to dispatch on `msg`.
-AgentToOperatorMsg = HelloMsg | DriveSnapshotMsg | HeartbeatMsg | CommandResultMsg
+AgentToOperatorMsg = (
+    HelloMsg | DriveSnapshotMsg | HeartbeatMsg | CommandResultMsg
+    | RunCompletedMsg
+)
 
 # Union for the reverse direction.
 OperatorToAgentMsg = (
     HelloAckMsg | AckMsg
     | StartPipelineCmd | AbortCmd | IdentifyCmd | RegradeCmd
+    | RunCompletedAckMsg
 )
 
 
