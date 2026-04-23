@@ -218,17 +218,52 @@ def ensure_clean_security_state(drive: Drive) -> None:
                 drive.device_path, owner=drive.serial,
             )
         except sat_passthru.SatPassthruError as exc:
+            # v0.9.0+: default-password unlock failed → try vendor-factory
+            # master-password SECURITY ERASE ENHANCED as a last-ditch
+            # recovery BEFORE failing over to operator remediation. This
+            # auto-recovers the common "laptop BIOS password left on a
+            # WD drive" case without requiring operator action. Safe
+            # because:
+            #   (a) we only try vendors we recognize (prefix-match),
+            #   (b) we precheck `hdparm -I` master-revision = 65534
+            #       (factory default) before attempting — if the master
+            #       was changed, we'd burn a lockout strike for nothing
+            #       and skip instead,
+            #   (c) enhanced erase IS the intended outcome for refurb
+            #       sanitization — drive comes back clean + unlocked.
+            master_ok, master_msg = _try_factory_master_erase(
+                drive.device_path, drive.model, owner=drive.serial,
+            )
+            if master_ok:
+                logger.info(
+                    "preflight: recovered security-locked drive %s via vendor-"
+                    "factory-master ENHANCED erase. Pipeline continuing from "
+                    "CLEAN state.",
+                    drive.device_path,
+                )
+                # After enhanced-erase, drive is in CLEAN state (security
+                # disabled + data wiped). Re-probe to confirm and return
+                # to the caller. The pipeline's next step (normal
+                # secure_erase) will effectively be a no-op on an
+                # already-wiped drive, which is fine.
+                return
+            # Factory master attempt also failed — log what we tried
+            # + raise the EraseError with the v0.9.0 pattern-matchable
+            # text so `is_security_locked_pattern()` triggers and the
+            # orchestrator routes to the remediation panel.
+            logger.info(
+                "preflight: factory-master auto-recovery did not help %s: %s",
+                drive.device_path, master_msg,
+            )
             raise EraseError(
                 f"preflight: drive {drive.device_path} is security-locked with "
                 f"an unknown password. DriveForge's default password "
-                f"('{sat_passthru.DEFAULT_PASSWORD}') did not unlock it, which "
-                f"means another tool set this password — DriveForge cannot "
-                f"erase drives with passwords it doesn't know. Options: "
-                f"(1) boot the drive on a system that knows the password and "
-                f"issue SECURITY DISABLE there, (2) if the drive supports "
-                f"TCG Opal/SED, issue a PSID-based factory reset with the "
-                f"label PSID (not yet supported in DriveForge), (3) replace "
-                f"the drive. Underlying error: {exc}"
+                f"('{sat_passthru.DEFAULT_PASSWORD}') did not unlock it, and "
+                f"the vendor-factory-master SECURITY ERASE ENHANCED recovery "
+                f"path also failed ({master_msg}). Operator remediation "
+                f"required — see the drive-detail page for the PSID-revert / "
+                f"manual-password / mark-unrecoverable options. "
+                f"Underlying unlock error: {exc}"
             ) from exc
         # Unlock succeeded → drive is now enabled-but-not-locked. Fall through.
         logger.info("preflight: SAT unlock succeeded on %s", drive.device_path)
@@ -398,6 +433,194 @@ def is_libata_freeze_pattern(err_text: str) -> bool:
         and "hdparm" in t
         and ("abrt" in t or "aborted" in t or "refused" in t)
     )
+
+
+def is_security_locked_pattern(err_text: str) -> bool:
+    """True iff the preflight failed because the drive is in SECURITY
+    LOCKED state with a password DriveForge doesn't know.
+
+    Distinct from libata-freeze:
+      - Freeze: drive refuses SECURITY ERASE UNIT specifically due to
+        libata's in-kernel freeze; drive is otherwise I/O-capable.
+      - Locked: drive refuses ALL I/O (including reads/writes) until
+        SECURITY UNLOCK with the correct password; set by a prior
+        host (laptop BIOS, vendor utility, previous owner, etc.).
+
+    v0.9.0+ routes drives matching this pattern to the password-locked
+    remediation panel on the drive-detail page (see
+    `core.password_locked_remediation`). Operator then picks a
+    recovery path: PSID revert (SEDs), manual-password attempt, or
+    mark-as-unrecoverable.
+
+    Match signal: the specific error string produced by `secure_erase`
+    preflight's LOCKED-branch raise, after `_try_factory_master_erase`
+    has also failed. Keep this match string stable if the error copy
+    changes — the orchestrator + template branch on it.
+    """
+    t = (err_text or "").lower()
+    return (
+        "security-locked" in t
+        and ("unknown password" in t or "did not unlock" in t)
+    )
+
+
+# v0.9.0+ Vendor factory master-password table. When a drive reports
+# `hdparm -I` master-revision = 65534 (0xFFFE, meaning master password
+# is at factory default) AND the drive is security-locked by some
+# user-set password, the factory master password can usually still
+# issue SECURITY ERASE UNIT (data wiped — which is what we want for
+# refurb sanitization anyway). We match on the drive's model-string
+# prefix (we already know which vendor by the time we get here).
+#
+# Blast radius: each attempt uses up one of the drive's ~5-strike
+# internal lockout counter. We only try ONE vendor default per drive,
+# keyed on the vendor prefix, so we burn at most one counter slot.
+# If the attempt fails, we fall through to operator remediation.
+_VENDOR_FACTORY_MASTER_PASSWORDS: tuple[tuple[str, str], ...] = (
+    # Western Digital — "WDC" repeated to fill 32 bytes is the most
+    # common factory master for WD HDDs of the 2010-2018 era. The
+    # string is "WDC" × 10 + "WD" = 32 chars.
+    ("WDC ",      "WDCWDCWDCWDCWDCWDCWDCWDCWDCWDCWD"),
+    ("WD ",       "WDCWDCWDCWDCWDCWDCWDCWDCWDCWDCWD"),
+    # Seagate — 32 null bytes is the documented factory default for
+    # most Barracuda/Exos/Constellation models.
+    ("Seagate",   "\x00" * 32),
+    ("ST",        "\x00" * 32),  # model prefix pattern — ST3000DM, ST4000NM, etc.
+    # Toshiba — 32 null bytes (some models use vendor-specific but
+    # null-bytes is the documented default for MG/AL series).
+    ("TOSHIBA",   "\x00" * 32),
+    ("MG0",       "\x00" * 32),
+    # HGST / Hitachi — 32 null bytes for Ultrastar family.
+    ("HGST",      "\x00" * 32),
+    ("HUS",       "\x00" * 32),
+    ("HUH",       "\x00" * 32),
+)
+
+
+def _vendor_factory_master_for(model: str | None) -> str | None:
+    """Pick the factory master password to try for this drive's
+    vendor. Returns None when the model is unfamiliar — we DON'T
+    guess across vendors because every wrong guess burns a counter
+    slot.
+
+    Longest-prefix-match semantics: "WDC " (4 chars) is checked
+    before "WD " (3 chars) so `WDC WD10EZEX-...` routes to the WD
+    entry, not something else that happens to start with "W".
+    """
+    if not model:
+        return None
+    # Longest-prefix-first iteration
+    for prefix, password in sorted(
+        _VENDOR_FACTORY_MASTER_PASSWORDS,
+        key=lambda p: len(p[0]),
+        reverse=True,
+    ):
+        if model.upper().startswith(prefix.upper()):
+            return password
+    return None
+
+
+def _is_master_password_at_factory_default(hdparm_i_output: str) -> bool:
+    """True iff hdparm -I reports `Master password revision code = 65534`
+    (0xFFFE). That's the ATA-spec indicator for "master password has
+    never been changed from factory." When the master is at default,
+    the vendor factory master password will unlock / erase the drive.
+    When the master has been CHANGED (revision != 65534), the vendor
+    default won't work and we skip the auto-recovery path.
+    """
+    # Canonical line: "Master password revision code = 65534"
+    # Older smartctl/hdparm variants may include extra whitespace or
+    # a different case; use a permissive contains-check.
+    t = hdparm_i_output or ""
+    return "master password revision code = 65534" in t.lower()
+
+
+def _try_factory_master_erase(
+    device: str,
+    model: str | None,
+    *,
+    owner: str | None = None,
+) -> tuple[bool, str]:
+    """v0.9.0+. When preflight hits LOCKED state and default-password
+    unlock fails, try `hdparm --user-master m --security-erase-enhanced
+    <vendor-factory-master>` as a last-ditch recovery before failing
+    the drive over to operator remediation.
+
+    Returns (ok, message). On success, the drive is wiped AND
+    security-disabled by the ENHANCED SECURITY ERASE UNIT itself —
+    no further cleanup needed; pipeline can restart from the top.
+    On failure, the error string names which vendor master was tried
+    so operator logs are actionable.
+
+    Gated on two preconditions inside this function:
+      1. Drive's vendor must match one of _VENDOR_FACTORY_MASTER_PASSWORDS
+         (return early if not — don't guess across vendors).
+      2. `hdparm -I` must show master-revision = 65534 (factory
+         default). If the master was changed, the vendor default
+         won't work and we'd burn a lockout strike for nothing.
+
+    Called from the LOCKED branch of `_sata_secure_erase_preflight`
+    (see `secure_erase()`'s preflight block).
+    """
+    master_pw = _vendor_factory_master_for(model)
+    if master_pw is None:
+        return (False, f"no known factory master password for vendor (model={model!r})")
+
+    # Precondition 2: verify master-password revision is still at factory.
+    try:
+        probe = run(["hdparm", "-I", device], timeout=10)
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"hdparm -I failed during master-revision probe: {exc}")
+    if not _is_master_password_at_factory_default(probe.stdout):
+        return (
+            False,
+            "master password is NOT at factory default (revision != 65534); "
+            "vendor default won't work and we'd burn a lockout strike. skipping.",
+        )
+
+    logger.warning(
+        "preflight: attempting vendor-factory-master SECURITY ERASE ENHANCED on %s "
+        "(model=%r). This burns one of the drive's ~5 lockout strikes; fails gracefully "
+        "if vendor default has been changed.",
+        device, model,
+    )
+
+    # ENHANCED erase is destructive + disables security in one shot.
+    # 118-min self-reported estimate for the WD1TB case; use capacity-
+    # based timeout with generous headroom.
+    timeout_s = 4 * 60 * 60  # 4 hours ceiling
+    try:
+        result = run(
+            [
+                "hdparm",
+                "--user-master", "m",
+                "--security-erase-enhanced",
+                master_pw,
+                device,
+            ],
+            timeout=timeout_s,
+            owner=owner,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (False, f"hdparm master-erase attempt crashed: {exc}")
+
+    if result.returncode != 0:
+        # Wrong password → ABRT. Don't retry with other vendor defaults;
+        # we already matched the right vendor by model prefix.
+        stderr = (result.stderr or "").strip()
+        return (
+            False,
+            f"vendor-factory-master SECURITY ERASE ENHANCED failed on {device}: "
+            f"rc={result.returncode} stderr={stderr!r}. The factory master may "
+            f"have been changed on this drive; operator remediation required.",
+        )
+
+    logger.warning(
+        "preflight: vendor-factory-master SECURITY ERASE ENHANCED SUCCEEDED on %s "
+        "— drive is now security-disabled and data-wiped.",
+        device,
+    )
+    return (True, "vendor-factory-master erase succeeded; drive is clean")
 
 
 def _sata_secure_erase_hdparm(

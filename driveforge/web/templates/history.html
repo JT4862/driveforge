@@ -3,8 +3,34 @@
 {% block content %}
 <section class="page-head">
   <h1>History</h1>
-  <div class="subtitle">Up to 500 most recently completed test runs.</div>
+  <div class="subtitle">
+    Up to 500 most recently completed test runs.
+    {% if search_query %}
+      Filtered to serials containing <code>{{ search_query }}</code>.
+      <a href="/history">clear filter</a>
+    {% endif %}
+  </div>
 </section>
+
+{# v0.9.0+ serial-substring search. Operators typically reference
+   drives by the last 4-5 chars of the serial ("the one ending 2452").
+   Form GETs back to /history?q=... so the filter is bookmarkable +
+   survives browser refresh. autofocus so the input is ready-to-type
+   on page load. #}
+<form method="get" action="/history" class="history-search"
+      style="margin-bottom: 16px; display: flex; gap: 10px; align-items: center;">
+  <label style="display: flex; gap: 8px; align-items: center; flex: 1;">
+    <span class="muted small">Search serial</span>
+    <input type="text" name="q" value="{{ search_query or '' }}"
+           placeholder="e.g. 2452, WCC3F5XC, WD-"
+           autofocus autocomplete="off"
+           style="flex: 1; max-width: 400px; padding: 6px 10px; font-family: var(--mono);">
+  </label>
+  <button type="submit" class="btn">Search</button>
+  {% if search_query %}
+  <a href="/history" class="btn btn-link">Clear</a>
+  {% endif %}
+</form>
 
 {% if rows %}
 <table class="runs">

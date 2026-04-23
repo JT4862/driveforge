@@ -178,6 +178,76 @@ def _sustained_read_burst(
 _BURST_DURATION_SEC = 0.5
 
 
+def _diagnose_blinker_io_failure(device_path: str, exc: OSError) -> str:
+    """v0.9.0+. Distinguish "drive pulled" from "drive present but
+    refused I/O" when the blinker's sustained-read-burst fails.
+
+    Pre-v0.9.0 the blinker treated any OSError as "drive likely
+    pulled" and exited silently. That's wrong for two common cases:
+
+      1. Security-locked drive (set by a prior host's password) —
+         drive node is present, kernel sees it fine, but the drive
+         firmware refuses all read I/O until SECURITY UNLOCK. Every
+         read returns EIO.
+      2. D-state drive (sg_raw / smartctl / hdparm wedged on a slow
+         or unresponsive drive) — the drive's command queue is full,
+         the kernel serializes ATA/SCSI commands through it, and
+         reads queue indefinitely then fail with EIO.
+
+    In both cases the operator clicked Ident expecting a locate-LED
+    pattern; the blinker exits almost immediately, log says "drive
+    likely pulled" (wrong), and operator has no diagnostic info.
+
+    This helper checks whether the kernel still has the device
+    enumerated (`/dev/sdX` present OR `/sys/block/sdX` present). If
+    yes, the drive IS there — just not I/O-able — so we log the
+    specific condition instead of the generic pulled message.
+
+    Return value is a human-readable reason string, suitable for
+    logging directly. Callers should still `return False` from the
+    cycle (the strobe can't actually flicker the LED on a locked or
+    D-state drive regardless of diagnosis — but at least the log
+    tells operators what's happening).
+    """
+    from pathlib import Path
+
+    # device_path for block devices: /dev/sda, /dev/sdc, etc.
+    # For NVMe: /dev/nvme0n1. Extract basename.
+    basename = Path(device_path).name
+
+    dev_exists = Path(device_path).exists()
+    # sysfs paths differ between SCSI/ATA block and NVMe
+    if basename.startswith("nvme"):
+        # /sys/class/nvme/nvme0 for /dev/nvme0n1
+        ctrl_name = basename.split("n")[0]  # "nvme0n1" → "nvme0"
+        sysfs_exists = Path(f"/sys/class/nvme/{ctrl_name}").exists()
+    else:
+        sysfs_exists = Path(f"/sys/block/{basename}").exists()
+
+    if not dev_exists and not sysfs_exists:
+        # Kernel has no trace of this device anymore — actually pulled.
+        return f"{exc} (drive pulled — kernel has no device node)"
+
+    if not dev_exists:
+        # Block device missing but sysfs entry present. Stale
+        # enumeration; device is half-gone. Treat as pulled but
+        # note the inconsistency so operator can debug if it recurs.
+        return (
+            f"{exc} (device node missing but /sys/block/{basename} "
+            f"present — stale enumeration, treat as pulled)"
+        )
+
+    # Device node present → drive is physically there, just not
+    # I/O-able. Most likely causes: security-locked (prior host set
+    # a password), D-state sg_raw/smartctl, or hardware failure in
+    # progress. Caller exits the blinker cycle either way, but log
+    # tells operators this isn't a pull event.
+    return (
+        f"{exc} (drive is present at {device_path} but refused I/O — "
+        f"likely security-locked, D-state, or hardware failure)"
+    )
+
+
 async def _pass_heartbeat_cycle(device_path: str, idx_ref: list[int]) -> bool:
     """Pass heartbeat: three 300 ms bursts + 2 s dark.
 
@@ -198,8 +268,8 @@ async def _pass_heartbeat_cycle(device_path: str, idx_ref: list[int]) -> bool:
             idx_ref[0] += count
         except OSError as exc:
             logger.info(
-                "blinker exiting for %s: %s (drive likely pulled)",
-                device_path, exc,
+                "blinker exiting for %s: %s",
+                device_path, _diagnose_blinker_io_failure(device_path, exc),
             )
             return False
         # Inter-flash dark gap — short enough that the three flashes read
@@ -232,8 +302,8 @@ async def _identify_cycle(device_path: str, idx_ref: list[int]) -> bool:
         idx_ref[0] += count
     except OSError as exc:
         logger.info(
-            "identify blinker exiting for %s: %s (drive likely pulled)",
-            device_path, exc,
+            "identify blinker exiting for %s: %s",
+            device_path, _diagnose_blinker_io_failure(device_path, exc),
         )
         return False
     await asyncio.sleep(_IDENT_OFF_SEC)
@@ -254,8 +324,8 @@ async def _lighthouse_cycle(device_path: str, idx_ref: list[int]) -> bool:
         idx_ref[0] += count
     except OSError as exc:
         logger.info(
-            "blinker exiting for %s: %s (drive likely pulled)",
-            device_path, exc,
+            "blinker exiting for %s: %s",
+            device_path, _diagnose_blinker_io_failure(device_path, exc),
         )
         return False
     await asyncio.sleep(_FAIL_OFF_DURATION_SEC)

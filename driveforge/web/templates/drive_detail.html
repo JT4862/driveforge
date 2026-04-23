@@ -95,6 +95,87 @@
 </section>
 {% endif %}
 
+{# v0.9.0+ Password-locked remediation panel. Sibling of the frozen-
+   SSD panel above; renders when secure_erase preflight found the
+   drive in SECURITY LOCKED state and neither the default password
+   nor the vendor-factory-master auto-recovery could clear it.
+   Three operator actions: PSID-revert guidance (SED path, manual
+   via sedutil-cli), manual-password unlock (free-text field wired
+   to /drives/<serial>/password-locked/try-unlock), and
+   mark-as-unrecoverable (stamps F, clears state). #}
+{% if password_locked_state %}
+<section class="panel frozen-remediation-panel{% if password_locked_state.status.value == 'retried' %} frozen-remediation-panel--escalated{% endif %}">
+  <h2 style="display:flex; align-items:center; gap:12px;">
+    {% if password_locked_state.status.value == 'retried' %}
+      &#9888; Drive still security-locked after retry
+    {% else %}
+      &#9888; Drive security-locked by unknown password
+    {% endif %}
+  </h2>
+  <p>
+    {% if password_locked_state.status.value == 'retried' %}
+      Manual unlock attempts so far: <strong>{{ password_locked_state.manual_attempts }}</strong>.
+      Estimated attempts remaining before the drive locks out
+      permanently: <strong>{{ password_locked_state.attempts_remaining_estimate }}</strong>.
+      If you're not confident about the password, consider PSID
+      revert (if this is an SED) or Mark as unrecoverable.
+    {% else %}
+      DriveForge's default password did not unlock this drive, and
+      the vendor factory master-password auto-recovery also failed.
+      That means some prior host (laptop BIOS, vendor utility,
+      previous owner) set a password DriveForge doesn't know.
+      The drive refuses all read/write I/O until unlocked — so
+      badblocks-only fallback is not available either.
+    {% endif %}
+  </p>
+  {% if password_locked_state.last_attempt_note %}
+  <div class="banner warn-banner" style="margin: 10px 0;">
+    <strong>Last manual attempt:</strong> {{ password_locked_state.last_attempt_note }}
+  </div>
+  {% endif %}
+
+  <ol class="frozen-remediation-steps">
+    {% for step in password_locked_state.steps %}
+    <li>
+      <strong>{{ step.title }}</strong>
+      <p class="muted">{{ step.detail }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <div class="frozen-remediation-actions" style="flex-direction: column; align-items: stretch; gap: 16px;">
+    {# Manual-password try-unlock form. Free-text field + single
+       submit button; server side enforces the actual hdparm call. #}
+    <form method="post" action="/drives/{{ drive.serial }}/password-locked/try-unlock"
+          style="margin:0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+      <label style="display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 220px;">
+        <span class="muted small">Password to try</span>
+        <input type="text" name="password" required autocomplete="off"
+               placeholder="enter the password that was set, then click Try unlock"
+               style="padding: 6px 10px; font-family: var(--mono);">
+      </label>
+      <button type="submit" class="btn"
+              onclick="return confirm('Try password unlock on {{ drive.serial }}? Burns one of the drive\u2019s ~5 lockout strikes. Drives typically lock out permanently after 5 wrong tries.');">
+        Try unlock
+      </button>
+    </form>
+
+    {# Mark-unrecoverable — same escape hatch as frozen panel. #}
+    <form method="post" action="/drives/{{ drive.serial }}/password-locked/mark-unrecoverable"
+          style="margin: 0;"
+          onsubmit="return confirm('Mark {{ drive.serial }} as unrecoverable? This stamps an F grade so auto-enroll will skip this serial on future inserts. The drive is NOT sanitized by this action — it must be physically destroyed to meet NIST 800-88 Clear.');">
+      <button type="submit" class="btn btn-danger">Mark as unrecoverable</button>
+    </form>
+
+    <span class="muted small">
+      First seen {{ password_locked_state.first_seen_at.strftime('%Y-%m-%d %H:%M') }} UTC
+      {% if password_locked_state.retry_count %} &middot; {{ password_locked_state.retry_count }} retry attempt{% if password_locked_state.retry_count != 1 %}s{% endif %}{% endif %}
+      {% if password_locked_state.manual_attempts %} &middot; {{ password_locked_state.manual_attempts }} manual password attempt{% if password_locked_state.manual_attempts != 1 %}s{% endif %}{% endif %}
+    </span>
+  </div>
+</section>
+{% endif %}
+
 {# v0.7.0+ Active-pipeline panel. Only renders when this drive is
    currently in state.active_phase — i.e. there's a live asyncio
    task running its pipeline. Shows the phase + a sublabel hint

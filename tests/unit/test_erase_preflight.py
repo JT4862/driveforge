@@ -269,9 +269,14 @@ def test_preflight_frozen_raises_clear_error(monkeypatch) -> None:
 
 
 def test_preflight_locked_with_unknown_password_raises_clear_error(monkeypatch) -> None:
-    """LOCKED with a password we don't know → UNLOCK fails → raise
-    EraseError with remediation options (boot on another system, SED
-    PSID, replace)."""
+    """LOCKED with a password we don't know → UNLOCK fails → v0.9.0
+    auto-recovery (vendor factory master password) is attempted +
+    also fails (TEST-MODEL isn't in any vendor prefix table) → raise
+    EraseError with the v0.9.0 remediation-panel-routing text.
+
+    `is_security_locked_pattern()` is the downstream detector; this
+    test confirms the raise surface still matches that detector's
+    substring check."""
     drive = _drive()
     def failing_unlock(device, **kwargs):
         raise sat_passthru.SatPassthruError(
@@ -289,10 +294,15 @@ def test_preflight_locked_with_unknown_password_raises_clear_error(monkeypatch) 
     with pytest.raises(erase.EraseError) as exc_info:
         erase.ensure_clean_security_state(drive)
     msg = str(exc_info.value)
-    # Remediation options must be surfaced — key phrases the operator
-    # needs to read:
+    # v0.9.0 remediation-panel routing signals. is_security_locked_pattern()
+    # matches on these substrings; the orchestrator registers the drive
+    # in state.password_locked when it sees them.
+    assert "security-locked" in msg.lower()
     assert "unknown password" in msg.lower()
-    assert "boot the drive" in msg.lower() or "replace the drive" in msg.lower()
+    assert "did not unlock" in msg.lower()
+    # And the pattern detector itself must agree this message triggers
+    # the remediation panel routing.
+    assert erase.is_security_locked_pattern(msg)
 
 
 def test_preflight_enabled_with_undisable_able_password_raises(monkeypatch) -> None:
