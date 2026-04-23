@@ -352,6 +352,57 @@ class FleetEnrollResponse(BaseModel):
     operator_version: str
 
 
+@router.get("/fleet/local-status")
+def fleet_local_status() -> dict[str, Any]:
+    """v0.10.4+ — live fleet status for the local daemon. Called by
+    `driveforge fleet status` CLI. Role-aware response:
+
+    - agent → fields from `state.fleet_client.status` (connected,
+      last_error, counters)
+    - operator → aggregate (agents_total, online, connected, refusals)
+    - standalone → just {"role": "standalone"}
+
+    No auth — localhost-only by convention (CLI binds to 127.0.0.1
+    default). If this ends up being reachable from the LAN, all it
+    reveals is fleet-level counters, no tokens or drive identity.
+    """
+    state = get_state()
+    fcfg = state.settings.fleet
+    out: dict[str, Any] = {"role": fcfg.role}
+    if fcfg.role == "agent":
+        client = getattr(state, "fleet_client", None)
+        if client is None:
+            out.update({"connected": False, "last_error": "client not running"})
+            return out
+        s = client.status
+        out.update({
+            "connected": s.connected,
+            "last_error": s.last_error,
+            "snapshots_sent": s.snapshots_sent,
+            "heartbeats_sent": s.heartbeats_sent,
+            "completions_sent": getattr(s, "completions_sent", 0),
+            "reconnect_attempts": s.reconnect_attempts,
+        })
+    elif fcfg.role == "operator":
+        import time as _time
+        now = _time.monotonic()
+        agents_total = len(state.remote_agents)
+        online = 0
+        connected = 0
+        for ra in state.remote_agents.values():
+            if ra.is_online(now):
+                online += 1
+            if ra.ws is not None:
+                connected += 1
+        out.update({
+            "agents_total": agents_total,
+            "agents_online": online,
+            "agents_connected": connected,
+            "recent_refusals": len(state.fleet_refusals),
+        })
+    return out
+
+
 @router.post("/fleet/enroll", response_model=FleetEnrollResponse)
 def fleet_enroll(req: FleetEnrollRequest) -> FleetEnrollResponse:
     """Consume a one-shot enrollment token, mint a long-lived agent

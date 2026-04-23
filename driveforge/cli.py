@@ -97,8 +97,19 @@ def fleet() -> None:
 
 @fleet.command("status")
 @click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
-def fleet_status(config_path: Path | None) -> None:
-    """Show this node's fleet role + related config."""
+@click.option(
+    "--daemon-host", default="127.0.0.1",
+    help="Local daemon host for live status probe (default 127.0.0.1).",
+)
+def fleet_status(config_path: Path | None, daemon_host: str) -> None:
+    """Show this node's fleet role + live runtime stats.
+
+    Reads config from disk for role / operator_url / token path, then
+    probes the local daemon's `/api/fleet/local-status` endpoint
+    (v0.10.4+) for live numbers: connected bool, snapshots +
+    heartbeats + completions sent, reconnect attempts, last_error.
+    Falls back to config-only output when the daemon isn't running.
+    """
     settings = cfg.load(config_path)
     fleet_cfg = settings.fleet
     click.echo(f"role:            {fleet_cfg.role}")
@@ -111,6 +122,37 @@ def fleet_status(config_path: Path | None) -> None:
         click.echo(f"token present:   {'yes' if token else 'no'}")
     elif fleet_cfg.role == "operator":
         click.echo(f"listen_port:     {fleet_cfg.listen_port}")
+
+    # v0.10.4+ live probe. Best-effort: if daemon isn't running or
+    # endpoint isn't available, surface the reason and return.
+    try:
+        import httpx
+        port = settings.daemon.port
+        resp = httpx.get(
+            f"http://{daemon_host}:{port}/api/fleet/local-status",
+            timeout=2.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"live status:     unavailable ({type(exc).__name__})")
+        return
+    if resp.status_code != 200:
+        click.echo(f"live status:     unavailable (HTTP {resp.status_code})")
+        return
+    body = resp.json()
+    click.echo("")
+    click.echo("--- live ---")
+    if fleet_cfg.role == "agent":
+        click.echo(f"connected:         {body.get('connected')}")
+        click.echo(f"last_error:        {body.get('last_error') or '(none)'}")
+        click.echo(f"snapshots_sent:    {body.get('snapshots_sent', 0)}")
+        click.echo(f"heartbeats_sent:   {body.get('heartbeats_sent', 0)}")
+        click.echo(f"completions_sent:  {body.get('completions_sent', 0)}")
+        click.echo(f"reconnect_attempts:{body.get('reconnect_attempts', 0)}")
+    elif fleet_cfg.role == "operator":
+        click.echo(f"agents_total:      {body.get('agents_total', 0)}")
+        click.echo(f"agents_online:     {body.get('agents_online', 0)}")
+        click.echo(f"agents_connected:  {body.get('agents_connected', 0)}")
+        click.echo(f"recent_refusals:   {body.get('recent_refusals', 0)}")
 
 
 @fleet.command("join")
