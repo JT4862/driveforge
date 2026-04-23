@@ -88,6 +88,46 @@
   </div>
 </form>
 
+{# v0.10.0+ fleet entry point. Compact panel that summarizes the
+   current role and links into /settings/agents for the full UI. Kept
+   out of the main Settings grid so standalone users (the majority)
+   don't see fleet UI they don't need. #}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Fleet</h2>
+  </div>
+  {% if settings.fleet.role == "standalone" %}
+  <p class="muted">
+    This DriveForge install runs standalone — one box, one dashboard.
+    To aggregate drives from other DriveForge nodes onto this
+    dashboard, flip the role to <strong>operator</strong> in the
+    Daemon panel below and restart the service, then visit the Agents
+    page to enroll them.
+  </p>
+  <p class="form-actions">
+    <a href="/settings/agents" class="btn">Open fleet page</a>
+  </p>
+  {% elif settings.fleet.role == "operator" %}
+  <p class="muted">
+    This node is the fleet <strong>operator</strong>. Its own drives
+    appear in the dashboard alongside drives from any enrolled
+    agents.
+  </p>
+  <p class="form-actions">
+    <a href="/settings/agents" class="btn primary">Manage agents</a>
+  </p>
+  {% else %}
+  <p class="muted">
+    This node is a fleet <strong>agent</strong>, reporting to
+    <code>{{ settings.fleet.operator_url or "(not configured)" }}</code>.
+    Manage fleet membership on the operator's dashboard.
+  </p>
+  <p class="form-actions">
+    <a href="/settings/agents" class="btn">Open fleet page</a>
+  </p>
+  {% endif %}
+</section>
+
 <form class="panel" method="post" action="/settings/grading">
   <div class="panel-head">
     <h2>Grading thresholds</h2>

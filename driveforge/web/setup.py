@@ -75,7 +75,16 @@ def setup_step(request: Request, step: int) -> HTMLResponse:
         "title": STEP_TITLES.get(step, "Setup"),
         "settings": state.settings,
     }
-    if step == 2:
+    if step == 1:
+        # v0.10.0+ welcome step also collects role + hostname
+        # confirmation. Role choice lands in settings.fleet.role on
+        # submit; hostname applied via hostname_mod on submit only if
+        # the operator actually changed it. Pre-filling the current
+        # hostname shows off whatever install.sh uniquified to.
+        from driveforge.core import hostname as hostname_mod
+        ctx["current_hostname"] = hostname_mod.current_hostname() or "driveforge"
+        ctx["current_role"] = state.settings.fleet.role
+    elif step == 2:
         ctx["drives"] = drive_mod.discover()
         ctx["network"] = _network_snapshot()
         # Fresh capability probe on each wizard view so the operator sees
@@ -109,7 +118,28 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
     form = await request.form()
     settings = state.settings
 
-    if step == 3:
+    if step == 1:
+        # v0.10.0+ Role + hostname. Role is required ("standalone" is
+        # the default if the form element is somehow missing); hostname
+        # is only applied when it actually changed, so we don't re-run
+        # hostnamectl on every wizard click. Agents are NOT configured
+        # through the wizard — see `driveforge fleet join` CLI.
+        role = (form.get("role") or "standalone").strip()
+        if role in ("standalone", "operator"):
+            settings.fleet.role = role
+        # Hostname. `apply_hostname` no-ops when the requested name
+        # equals the current one, so this is safe on every submit.
+        raw_hostname = (form.get("hostname") or "").strip()
+        if raw_hostname:
+            from driveforge.core import hostname as hostname_mod
+            try:
+                hostname_mod.apply_hostname(raw_hostname, dev_mode=settings.dev_mode)
+            except hostname_mod.HostnameError:
+                # Soft-fail the hostname change during the wizard —
+                # operator can always fix it from Settings → Hostname.
+                # Don't block wizard progress on a naming error.
+                pass
+    elif step == 3:
         model = (form.get("printer_model") or "").strip()
         settings.printer.model = model or None
         settings.printer.label_roll = (form.get("label_roll") or "").strip() or None

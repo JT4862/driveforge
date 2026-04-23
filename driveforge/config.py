@@ -174,6 +174,70 @@ class GradingConfig(BaseModel):
     cap_c_on_past_self_test_failure: bool = True
 
 
+class FleetConfig(BaseModel):
+    """Multi-node fleet config (v0.10.0+).
+
+    DriveForge's default shape is single-node ("standalone"): one daemon
+    + one web UI per box, drives attached locally. The fleet feature
+    lets a single *operator* node aggregate drives from one or more
+    *agent* nodes — useful when someone repurposes a couple of old
+    servers as drive-wipe hands, each with limited CPU/RAM that
+    couldn't justify its own web-UI instance.
+
+    Three roles:
+
+    - `standalone` (default) — pre-v0.10.0 behavior. No fleet
+      endpoints, no enrollment, no remote aggregation. Upgrading from
+      v0.9.x leaves this untouched; the fleet feature is opt-in.
+    - `operator` — serves the web UI, aggregates drives from any
+      enrolled agents, prints cert labels for the whole fleet. Also
+      runs its OWN local pipeline (operator == standalone + fleet
+      aggregation) so single-box deployments never see the fleet
+      concept.
+    - `agent` — headless; registers with an operator, reports local
+      drives + progress, executes commands the operator sends back.
+      No web UI served. Falls back to standalone behavior (just
+      without a UI) if the operator is unreachable for a long
+      time.
+
+    Fleet transport (v0.10.1+) will be a persistent WebSocket from
+    agent → operator on `listen_port`. v0.10.0 only wires the config
+    + enrollment + DB plumbing.
+    """
+
+    # Role this daemon plays. Default "standalone" means "no fleet
+    # features" — same as pre-v0.10.0.
+    role: str = "standalone"  # "standalone" | "operator" | "agent"
+
+    # Agent-only: where the operator lives. Accepts http(s)://host:port
+    # or ws(s)://host:port — the fleet transport normalizes both.
+    # Ignored when role != "agent".
+    operator_url: str | None = None
+
+    # Agent-only: filesystem path to the long-lived API token issued
+    # at enrollment. Mode 600, owned by the daemon user. Ignored when
+    # role != "agent".
+    api_token_path: Path = Path("/etc/driveforge/agent.token")
+
+    # Operator-only: TCP port the fleet WebSocket server binds to.
+    # Deliberately distinct from the web UI port so firewall rules
+    # can scope agent traffic separately from operator-dashboard
+    # traffic. Ignored when role != "operator".
+    listen_port: int = 8443
+
+    # Human-readable name for this host on the operator's dashboard.
+    # Defaults to the system hostname at daemon start if unset.
+    # Example: "r720", "nx3200", "xvault-west". Shown on drive-card
+    # host badges + the Agents settings page.
+    display_name: str | None = None
+
+    # Enrollment-token TTL. Tokens are one-use + short-lived; 15 min
+    # is plenty of time for an operator to paste the command on an
+    # agent console. Operator generates a fresh token each time via
+    # Settings → Agents → "Add agent".
+    enrollment_token_ttl_seconds: int = 900
+
+
 class DaemonConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8080
@@ -240,6 +304,7 @@ class Settings(BaseSettings):
     printer: PrinterConfig = Field(default_factory=PrinterConfig)
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     grading: GradingConfig = Field(default_factory=GradingConfig)
+    fleet: FleetConfig = Field(default_factory=FleetConfig)
 
     # First-run state. Flipped to True when the wizard completes; user can
     # flip back to False from Settings to replay the wizard.

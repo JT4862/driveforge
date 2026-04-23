@@ -51,6 +51,12 @@ class Drive(Base):
     rotational: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     firmware_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # v0.10.0+ fleet aggregation. NULL = local to this daemon (operator's
+    # own drives OR any standalone install's drives). Non-NULL = the
+    # agent this drive was last reported from. Only ever populated on
+    # the operator; agents leave this NULL.
+    last_host_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    last_host_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     test_runs: Mapped[list["TestRun"]] = relationship(back_populates="drive", cascade="all, delete-orphan")
 
@@ -174,6 +180,14 @@ class TestRun(Base):
         ForeignKey("test_runs.id"), nullable=True, default=None
     )
 
+    # v0.10.0+ fleet aggregation. NULL = run executed on this local
+    # daemon (standalone OR operator's own drives). Non-NULL = run
+    # executed on a remote agent; value is the agents.id string. Set
+    # on the operator when the agent forwards cert + run metadata
+    # upstream. Drives the "where was this run executed?" column on
+    # the history page.
+    host_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")
     smart_snapshots: Mapped[list["SmartSnapshot"]] = relationship(
@@ -206,8 +220,61 @@ class TelemetrySample(Base):
     phase: Mapped[str] = mapped_column(String(32))
     drive_temp_c: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chassis_power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # v0.10.0+ host that produced the sample. NULL = local.
+    host_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
     test_run: Mapped[TestRun | None] = relationship(back_populates="telemetry")
+
+
+class Agent(Base):
+    """Registered fleet agent (v0.10.0+).
+
+    Present on the *operator* node's DB only. Each row is a remote
+    DriveForge daemon that joined this operator's fleet via the
+    enrollment flow. The `api_token_hash` is the SHA-256 of the
+    bearer token the agent presents on its WebSocket handshake;
+    the raw token lives only on the agent side.
+
+    `revoked_at` != NULL means the operator clicked Revoke on this
+    agent; further handshake attempts from that token are rejected.
+    The row is retained (not deleted) so historical drive/run rows
+    with `host_id = agent.id` stay joinable for the drive-detail
+    history view.
+    """
+
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(64))
+    hostname: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    api_token_hash: Mapped[str] = mapped_column(String(128))
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional note the operator types on the Agents page (e.g. "rack 2 bench").
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class EnrollmentToken(Base):
+    """One-shot enrollment token (v0.10.0+).
+
+    Generated on the operator via Settings → Agents → "Add agent".
+    Short-lived (default 15 min via `fleet.enrollment_token_ttl_seconds`),
+    single-use. On successful enrollment the row is marked `consumed_at`
+    and the resulting agent_id is stored for audit — but the token
+    string itself is hashed, never stored in cleartext, so a DB dump
+    doesn't leak a stolen-token attack window.
+    """
+
+    __tablename__ = "enrollment_tokens"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_by_agent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class WebhookDelivery(Base):

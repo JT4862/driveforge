@@ -328,3 +328,64 @@ def _test_run_to_out(r: m.TestRun) -> TestRunOut:
         quick_mode=bool(r.quick_mode),
         error_message=r.error_message,
     )
+
+
+# ---------------------------------------------------------------- fleet
+#
+# v0.10.0 operator-side enrollment endpoint. The agent-side CLI
+# (`driveforge fleet join`) posts here during bootstrap. No auth
+# beyond the enrollment token itself — the token IS the auth. Only
+# serves when `settings.fleet.role == "operator"`; standalone +
+# agent daemons return 404.
+
+
+class FleetEnrollRequest(BaseModel):
+    token: str
+    display_name: str
+    hostname: str | None = None
+    version: str | None = None
+
+
+class FleetEnrollResponse(BaseModel):
+    agent_id: str
+    api_token: str
+    operator_version: str
+
+
+@router.post("/fleet/enroll", response_model=FleetEnrollResponse)
+def fleet_enroll(req: FleetEnrollRequest) -> FleetEnrollResponse:
+    """Consume a one-shot enrollment token, mint a long-lived agent
+    token, create the Agent row. Called by the agent during
+    `driveforge fleet join`.
+
+    Returns 400 on any token-validation failure (unknown / expired /
+    consumed / malformed) with a generic-ish message — the agent-side
+    CLI surfaces the HTTP body to the operator who's running the
+    enrollment, but we don't want to leak whether a specific token
+    existed vs was just expired.
+    """
+    state = get_state()
+    if state.settings.fleet.role != "operator":
+        # Standalone + agent roles don't expose the enrollment path.
+        raise HTTPException(status_code=404, detail="fleet enrollment not enabled")
+
+    from driveforge.core import fleet as fleet_mod
+    from driveforge.version import __version__ as DRIVEFORGE_VERSION
+
+    with state.session_factory() as session:
+        try:
+            result = fleet_mod.consume_enrollment_token(
+                session,
+                composite_token=req.token,
+                display_name=req.display_name.strip() or "unnamed-agent",
+                hostname=req.hostname,
+                version=req.version,
+            )
+        except fleet_mod.EnrollmentError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return FleetEnrollResponse(
+        agent_id=result.agent_id,
+        api_token=result.api_token,
+        operator_version=DRIVEFORGE_VERSION,
+    )
