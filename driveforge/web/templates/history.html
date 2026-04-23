@@ -34,7 +34,19 @@
 
 {% if rows %}
 <table class="runs">
-  <thead><tr><th>Completed</th><th>Serial</th><th>Drive</th><th>Capacity</th><th>Grade</th><th title="Power-on hours — total hours the drive has been running">Hours on</th><th>Duration</th><th>Mode</th><th>Batch</th><th>Report</th></tr></thead>
+  <thead><tr>
+    <th>Completed</th>
+    <th>Serial</th>
+    <th>Drive</th>
+    <th>Capacity</th>
+    <th>Grade</th>
+    <th title="Power-on hours — total hours the drive has been running">Hours on</th>
+    <th>Duration</th>
+    <th>Mode</th>
+    <th>Batch</th>
+    {% if show_host_column %}<th title="Which fleet node executed this run">Host</th>{% endif %}
+    <th>Report</th>
+  </tr></thead>
   <tbody>
     {% for r in rows %}
     <tr>
@@ -47,6 +59,15 @@
       <td>{{ r.duration or "—" }}</td>
       <td>{% if r.quick_mode %}<span class="pill">quick</span>{% else %}<span class="pill">full</span>{% endif %}</td>
       <td>{% if r.batch_id %}<a href="/batches/{{ r.batch_id }}">{{ r.batch_id[:8] }}</a>{% else %}—{% endif %}</td>
+      {% if show_host_column %}
+      <td>
+        {% if r.host_display %}
+          <span class="pill" title="Run executed on agent {{ r.host_display }}">{{ r.host_display }}</span>
+        {% else %}
+          <span class="muted small">local</span>
+        {% endif %}
+      </td>
+      {% endif %}
       <td>{% if r.has_report %}<a href="/reports/{{ r.drive_serial }}" title="Public cert report">📄</a>{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}

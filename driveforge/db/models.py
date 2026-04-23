@@ -188,6 +188,24 @@ class TestRun(Base):
     # the history page.
     host_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
+    # v0.10.3+ fleet-completion WAL (agent side only). Default False
+    # so legacy rows + operator-local rows never trigger forwarding.
+    # Agent's `_finalize_run` / `_record_failure` flip this to True
+    # when role=="agent"; the fleet client's forward loop sends a
+    # RunCompletedMsg, and flips back to False on RunCompletedAckMsg.
+    pending_fleet_forward: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+    )
+    # v0.10.3+ idempotency key for fleet completion forwarding.
+    # Minted by the agent once per run; replays after reconnect
+    # carry the same id so the operator deduplicates via upsert.
+    # On the operator side, this is the key it looks up to decide
+    # whether a given RunCompletedMsg has already been applied.
+    # Indexed for the operator's lookup path.
+    fleet_completion_id: Mapped[str | None] = mapped_column(
+        String(48), nullable=True, index=True,
+    )
+
     drive: Mapped[Drive] = relationship(back_populates="test_runs")
     batch: Mapped[Batch | None] = relationship(back_populates="test_runs")
     smart_snapshots: Mapped[list["SmartSnapshot"]] = relationship(

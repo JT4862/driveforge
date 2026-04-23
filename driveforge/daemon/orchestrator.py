@@ -1033,6 +1033,18 @@ class Orchestrator:
             run.grade = grade
             run.error_message = f"[{phase}] {detail}"[:4000]
             run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
+            # v0.10.3+ fleet completion WAL — match the _finalize_run
+            # path. Only forward non-abort outcomes (grade=F or
+            # grade=error); plain aborts stay local since they produce
+            # no cert anyway.
+            if (
+                self.state.settings.fleet.role == "agent"
+                and grade is not None
+            ):
+                import secrets as _secrets
+                run.pending_fleet_forward = True
+                if not run.fleet_completion_id:
+                    run.fleet_completion_id = _secrets.token_hex(16)
             session.commit()
 
             # v0.6.5+: auto-print on early-phase F. v0.6.4 only auto-printed
@@ -2071,6 +2083,15 @@ class Orchestrator:
             else:
                 run.grade = result.grade.value
                 run.triage_result = None
+            # v0.10.3+ fleet completion WAL. When this daemon runs as
+            # an agent, flag the run for upstream forwarding with a
+            # stable idempotency id. The fleet_client's forward loop
+            # picks it up + sends RunCompletedMsg; ack clears the flag.
+            if self.state.settings.fleet.role == "agent":
+                import secrets as _secrets
+                run.pending_fleet_forward = True
+                if not run.fleet_completion_id:
+                    run.fleet_completion_id = _secrets.token_hex(16)
             session.commit()
 
             # v0.6.9+: a successful pipeline completion clears any

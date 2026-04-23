@@ -1841,6 +1841,13 @@ def history(request: Request) -> HTMLResponse:
             .limit(500)
             .all()
         )
+        # v0.10.3+ host column. Build agent_id → display_name map
+        # in one query so rendering doesn't fan out per row. Local
+        # runs (host_id IS NULL) render as "local".
+        agent_display_by_id = {
+            a.id: a.display_name
+            for a in session.query(m.Agent).all()
+        }
         rows = []
         for r in runs:
             duration = None
@@ -1849,6 +1856,11 @@ def history(request: Request) -> HTMLResponse:
                 completed = r.completed_at if r.completed_at.tzinfo else r.completed_at.replace(tzinfo=UTC)
                 duration = _format_duration(int((completed - started).total_seconds()))
             capacity_tb = round(r.drive.capacity_bytes / 1_000_000_000_000, 2) if r.drive else None
+            host_display = (
+                agent_display_by_id.get(r.host_id, r.host_id)
+                if r.host_id
+                else None  # None = local / standalone run
+            )
             rows.append(
                 {
                     "completed_at": r.completed_at,
@@ -1861,10 +1873,22 @@ def history(request: Request) -> HTMLResponse:
                     "quick_mode": bool(r.quick_mode),
                     "duration": duration,
                     "has_report": bool(r.report_url),
+                    # v0.10.3+ — which node executed this run.
+                    # None = local (this operator / standalone).
+                    "host_id": r.host_id,
+                    "host_display": host_display,
                 }
             )
+    # Render the host column only when at least one row has a non-NULL
+    # host_id (standalone installs with no fleet history shouldn't see
+    # a dead column).
+    show_host_column = any(row["host_id"] for row in rows)
     return templates.TemplateResponse(
-        request, "history.html", {"rows": rows, "search_query": query},
+        request, "history.html",
+        {
+            "rows": rows, "search_query": query,
+            "show_host_column": show_host_column,
+        },
     )
 
 
