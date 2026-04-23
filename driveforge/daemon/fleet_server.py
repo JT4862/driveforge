@@ -158,8 +158,12 @@ async def _handle_session(
         return
 
     # Acknowledge + record display_name / version / last_seen.
+    # v0.10.2+: outbound queue is created inside the handler (inside
+    # the event loop) so it binds to the right loop even in
+    # multi-worker uvicorn deployments.
     from driveforge.version import __version__ as DRIVEFORGE_VERSION
     now = time.monotonic()
+    outbound: asyncio.Queue = asyncio.Queue(maxsize=256)
     state.remote_agents[agent_id] = RemoteAgentState(
         agent_id=agent_id,
         display_name=hello.display_name or stored_display,
@@ -169,6 +173,7 @@ async def _handle_session(
         connected_at=now,
         last_message_at=now,
         drives={},
+        outbound_queue=outbound,
     )
     with state.session_factory() as session:
         # Persist version + display-name drift for the Agents page.
@@ -188,7 +193,33 @@ async def _handle_session(
         operator_version=DRIVEFORGE_VERSION,
     ).model_dump(mode="json"))
 
-    # Steady-state message loop.
+    # v0.10.2+ run sender + receiver concurrently. Sender drains the
+    # outbound command queue; receiver handles inbound frames.
+    sender_task = asyncio.create_task(_sender_loop(ws, outbound))
+    try:
+        await _receiver_loop(ws, state, agent_id)
+    finally:
+        sender_task.cancel()
+        try:
+            await sender_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _sender_loop(ws: WebSocket, outbound: asyncio.Queue) -> None:
+    """Drain outbound_queue and write each JSON-encoded command to
+    the WebSocket. One task per active session."""
+    while True:
+        payload = await outbound.get()
+        try:
+            await ws.send_text(payload)
+        except Exception:  # noqa: BLE001
+            logger.exception("fleet: sender_loop error; aborting session")
+            return
+
+
+async def _receiver_loop(ws: WebSocket, state: Any, agent_id: str) -> None:
+    """Steady-state inbound-message loop."""
     while True:
         raw = await ws.receive_json()
         msg_type = raw.get("msg") if isinstance(raw, dict) else None
@@ -204,11 +235,46 @@ async def _handle_session(
             ra = state.remote_agents.get(agent_id)
             if ra is not None:
                 ra.last_message_at = time.monotonic()
+        elif msg_type == "command_result":
+            try:
+                result = proto.CommandResultMsg.model_validate(raw)
+            except ValidationError as exc:
+                logger.warning("fleet: bad command_result from %s: %s", agent_id, exc)
+                continue
+            _record_command_result(state, agent_id, result)
         else:
             # Forward-compat: unknown message types are logged + dropped.
             # Don't disconnect — a newer agent may speak a protocol minor
             # revision that adds messages this operator doesn't know.
             logger.debug("fleet: dropping unknown msg type=%r from %s", msg_type, agent_id)
+
+
+def _record_command_result(state: Any, agent_id: str, result: proto.CommandResultMsg) -> None:
+    """Stash a command reply on the agent's RemoteAgentState for
+    operator-side surfacing. Capped buffer; oldest drops off.
+
+    Dashboard flash area polls this on the next request and renders
+    a warning banner for failures — e.g. "abort refused on SERIAL:
+    drive in secure_erase phase"."""
+    ra = state.remote_agents.get(agent_id)
+    if ra is None:
+        return
+    buf = ra.recent_command_results
+    buf.append(result)
+    # Cap at 64 — arbitrary bound, plenty for a few dozen rapid
+    # commands while keeping memory bounded.
+    if len(buf) > 64:
+        del buf[0:len(buf) - 64]
+    if not result.success:
+        logger.warning(
+            "fleet: command_result FAILED agent=%s cmd=%s cmd_id=%s detail=%s",
+            agent_id, result.command, result.cmd_id, result.detail,
+        )
+    else:
+        logger.info(
+            "fleet: command_result ok agent=%s cmd=%s cmd_id=%s",
+            agent_id, result.command, result.cmd_id,
+        )
 
 
 def _apply_snapshot(state: Any, agent_id: str, snap: proto.DriveSnapshotMsg) -> None:
@@ -253,3 +319,76 @@ def all_known_agents(state: Any) -> list[RemoteAgentState]:
     their last-seen drives on the dashboard with a muted host
     badge."""
     return list(state.remote_agents.values())
+
+
+# ---------------------------- v0.10.2+ command dispatch
+
+
+def find_agent_for_serial(state: Any, serial: str) -> str | None:
+    """Return the agent_id that most recently reported this serial,
+    or None if no agent has it.
+
+    The dashboard's POST handlers (abort, identify, regrade, start
+    batch) call this to decide whether to dispatch locally or forward
+    to an agent. O(number of agents × drives per agent), trivially
+    cheap at homelab fleet scale — can cache later if needed."""
+    for agent_id, ra in state.remote_agents.items():
+        if serial in ra.drives:
+            return agent_id
+    return None
+
+
+class CommandDispatchError(Exception):
+    """Raised when a command can't be enqueued — agent unknown,
+    offline too long, or outbound queue full (agent pathologically
+    slow to drain)."""
+
+
+async def send_command_to_agent(
+    state: Any, agent_id: str, command: Any,
+) -> None:
+    """Enqueue a command for the target agent. Serializes to JSON
+    and drops on the session's outbound queue. Fire-and-forget —
+    the caller doesn't wait for the CommandResultMsg reply; that
+    arrives asynchronously and lands in `recent_command_results`.
+
+    Raises CommandDispatchError if the agent has no active session
+    (no outbound queue — the session hasn't started OR was torn
+    down). Callers should catch + surface a user-facing error
+    ("agent X is offline — command not sent").
+    """
+    ra = state.remote_agents.get(agent_id)
+    if ra is None:
+        raise CommandDispatchError(f"agent {agent_id} not connected")
+    if ra.outbound_queue is None:
+        raise CommandDispatchError(f"agent {agent_id} has no outbound queue (mid-handshake?)")
+    # Queue full = agent can't drain. This only happens if the agent's
+    # event loop is wedged or the connection is saturated; both are
+    # weird enough that raising is the right behavior.
+    try:
+        ra.outbound_queue.put_nowait(command.model_dump_json())
+    except asyncio.QueueFull as exc:
+        raise CommandDispatchError(
+            f"agent {agent_id} outbound queue full (256 items)"
+        ) from exc
+
+
+def drain_command_failures(state: Any) -> list[Any]:
+    """Pop any failed CommandResultMsg entries across all agents for
+    display in the next dashboard render. Called by the dashboard
+    route once per request; list is consumed (not peeked) so each
+    failure flashes exactly once.
+
+    Success results stay in the per-agent buffer for debugging /
+    audit; only failures are surfaced to the operator.
+    """
+    failures: list[Any] = []
+    for ra in state.remote_agents.values():
+        keep: list[Any] = []
+        for r in ra.recent_command_results:
+            if not r.success:
+                failures.append((ra, r))
+            else:
+                keep.append(r)
+        ra.recent_command_results = keep
+    return failures

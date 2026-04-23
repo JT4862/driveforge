@@ -96,6 +96,11 @@ class DriveState(BaseModel):
     # When the current phase started, for the dashboard's pulse
     # animation. Operator renders relative to its own clock.
     phase_change_ts_epoch: float | None = None
+    # v0.10.2+ — is the agent currently running an LED identify
+    # blinker on this drive? Exposed so the operator's toggle button
+    # on remote drives reflects the true agent state (rather than the
+    # operator guessing from a self-maintained shadow map).
+    identifying: bool = False
 
 
 class DriveSnapshotMsg(BaseModel):
@@ -133,15 +138,79 @@ class AckMsg(BaseModel):
     ack_for: str  # name of the message being acked (for logs / debugging)
 
 
+# v0.10.2+ operator-issued commands. Each carries a `cmd_id` the
+# agent echoes in its CommandResultMsg so the operator can correlate
+# request + reply. Delivery is fire-and-forget from the operator's
+# POST handler's perspective — the operator doesn't block on the
+# reply; the drive's next snapshot (≤3s later) shows the result.
+# CommandResultMsg is useful for logging + surfacing explicit
+# failures that wouldn't otherwise reflect in the drive state
+# (e.g. "abort refused: drive in secure_erase phase").
+
+
+class StartPipelineCmd(BaseModel):
+    msg: Literal["start_pipeline"] = "start_pipeline"
+    cmd_id: str
+    serial: str
+    quick_mode: bool = False
+    source: str | None = None
+
+
+class AbortCmd(BaseModel):
+    msg: Literal["abort"] = "abort"
+    cmd_id: str
+    serial: str
+
+
+class IdentifyCmd(BaseModel):
+    """Toggle the LED identify blinker on a drive.
+
+    `on=True` → start the rapid-strobe (or kick an already-running
+    blinker's 5-minute deadline, per the current local behavior).
+    `on=False` → stop any running identify blinker.
+    """
+    msg: Literal["identify"] = "identify"
+    cmd_id: str
+    serial: str
+    on: bool
+
+
+class RegradeCmd(BaseModel):
+    """Re-apply current grading thresholds against a drive's prior
+    completed A/B/C run. Non-destructive. v0.10.2+ wire format; the
+    agent-side dispatcher executes the regrade handler's body
+    locally."""
+    msg: Literal["regrade"] = "regrade"
+    cmd_id: str
+    serial: str
+
+
+# ----------------------------------------------- agent → operator (replies)
+
+
+class CommandResultMsg(BaseModel):
+    """Reply to any operator command. `success=False` → `detail`
+    explains the refusal; operator surfaces it in the dashboard
+    flash area on the next request."""
+    msg: Literal["command_result"] = "command_result"
+    cmd_id: str
+    command: str  # "start_pipeline" | "abort" | "identify" | "regrade"
+    success: bool
+    detail: str | None = None
+
+
 # ---------------------------------- helpers
 
 
 # Union type for inbound (agent → operator) decoding. Used by the
 # server handler to dispatch on `msg`.
-AgentToOperatorMsg = HelloMsg | DriveSnapshotMsg | HeartbeatMsg
+AgentToOperatorMsg = HelloMsg | DriveSnapshotMsg | HeartbeatMsg | CommandResultMsg
 
 # Union for the reverse direction.
-OperatorToAgentMsg = HelloAckMsg | AckMsg
+OperatorToAgentMsg = (
+    HelloAckMsg | AckMsg
+    | StartPipelineCmd | AbortCmd | IdentifyCmd | RegradeCmd
+)
 
 
 def is_protocol_compatible(their_version: str, our_version: str = PROTOCOL_VERSION) -> bool:

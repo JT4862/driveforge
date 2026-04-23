@@ -61,6 +61,17 @@
   </div>
 </section>
 
+{# v0.10.2+ fleet command failures. One banner per failure; drained
+   on render so each one flashes exactly once. #}
+{% if fleet_errors %}
+{% for err in fleet_errors %}
+<div class="banner warn-banner">
+  &#9888; Fleet command <code>{{ err.command }}</code> on
+  <strong>{{ err.host }}</strong> failed: {{ err.detail }}
+</div>
+{% endfor %}
+{% endif %}
+
 {# v0.10.1+ host filter chip row. Renders only on operator-role
    nodes that have enrolled agents. Lets operator scope the view to
    "local drives only" or "just the R720's drives" without losing

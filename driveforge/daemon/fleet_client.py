@@ -249,13 +249,133 @@ class FleetClient:
                 continue
 
     async def _receive_loop(self, ws: Any) -> None:
-        """Drain inbound messages. v0.10.1 operator doesn't send
-        anything after hello_ack — this loop mainly exists to detect
-        the operator closing the connection."""
-        async for _raw in ws:
-            # v0.10.2+ will dispatch commands here. For v0.10.1 we
-            # just keep the socket readable so WS pings/pongs work.
-            continue
+        """Drain inbound messages and dispatch operator commands.
+
+        v0.10.2+ — operator may send StartPipelineCmd / AbortCmd /
+        IdentifyCmd / RegradeCmd frames at any time. Dispatch runs
+        in a background task so one slow command doesn't block
+        receipt of the next. Each command produces a CommandResultMsg
+        reply sent upstream with `success` + optional `detail`."""
+        import json
+        async for raw_text in ws:
+            try:
+                raw = json.loads(raw_text) if isinstance(raw_text, (str, bytes)) else raw_text
+            except (TypeError, ValueError):
+                logger.warning("fleet-client: dropping non-JSON frame")
+                continue
+            msg_type = raw.get("msg") if isinstance(raw, dict) else None
+            if msg_type in {"start_pipeline", "abort", "identify", "regrade"}:
+                # Fire-and-forget dispatch so a slow abort doesn't
+                # block the next incoming command.
+                asyncio.create_task(self._dispatch_command(ws, msg_type, raw))
+            else:
+                logger.debug("fleet-client: dropping unknown msg type=%r", msg_type)
+
+    async def _dispatch_command(self, ws: Any, msg_type: str, raw: dict) -> None:
+        """Apply an operator command against this agent's local
+        orchestrator + DB. Always emits a CommandResultMsg — success
+        or failure — so the operator's audit log is complete."""
+        try:
+            cmd_id, success, detail = await self._apply_command(msg_type, raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("fleet-client: command dispatch error msg=%s", msg_type)
+            cmd_id = (raw.get("cmd_id") if isinstance(raw, dict) else None) or "?"
+            success = False
+            detail = f"{type(exc).__name__}: {exc}"
+
+        result = proto.CommandResultMsg(
+            cmd_id=cmd_id, command=msg_type, success=success, detail=detail,
+        )
+        try:
+            await ws.send(result.model_dump_json())
+        except Exception:  # noqa: BLE001
+            # Socket died mid-reply. The operator will notice via a
+            # snapshot staleness / disconnect; no recovery action here.
+            logger.debug("fleet-client: couldn't send command_result; socket closed")
+
+    async def _apply_command(
+        self, msg_type: str, raw: dict,
+    ) -> tuple[str, bool, str | None]:
+        """Validate + execute one command. Returns (cmd_id, success,
+        detail). Caller wraps unexpected exceptions into a failure
+        result."""
+        from driveforge.core import drive as drive_mod
+        from driveforge.db import models as m
+
+        state = self.state
+        orch = getattr(state, "orchestrator", None)
+        if orch is None:
+            cmd_id = raw.get("cmd_id", "?")
+            return cmd_id, False, "local orchestrator not ready"
+
+        if msg_type == "start_pipeline":
+            cmd = proto.StartPipelineCmd.model_validate(raw)
+            # Rebuild the drive_mod.Drive instance the orchestrator
+            # expects. Prefer a freshly-discovered drive (has the
+            # live device_path lsblk is currently using); fall back
+            # to the DB row if the drive isn't on lsblk output yet
+            # (transient enumeration race).
+            found = None
+            for d in drive_mod.discover():
+                if d.serial == cmd.serial:
+                    found = d
+                    break
+            if found is None:
+                return cmd.cmd_id, False, f"drive {cmd.serial} not present on this agent"
+            try:
+                await orch.start_batch(
+                    [found], source=cmd.source or "fleet-operator", quick=cmd.quick_mode,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return cmd.cmd_id, False, f"start_batch failed: {exc}"
+            return cmd.cmd_id, True, None
+
+        if msg_type == "abort":
+            cmd = proto.AbortCmd.model_validate(raw)
+            outcome = await orch.abort_drive(cmd.serial)
+            status = outcome.get("status") if isinstance(outcome, dict) else None
+            if status == "aborted":
+                return cmd.cmd_id, True, outcome.get("note")
+            # not_active / already_done / unknown → soft failure
+            return cmd.cmd_id, False, f"abort {status}: {outcome.get('note')}"
+
+        if msg_type == "identify":
+            cmd = proto.IdentifyCmd.model_validate(raw)
+            if cmd.on:
+                # Need a drive_mod.Drive for identify_drive.
+                discovered = {d.serial: d for d in drive_mod.discover()}
+                drive_obj = discovered.get(cmd.serial)
+                if drive_obj is None:
+                    return cmd.cmd_id, False, f"drive {cmd.serial} not present on this agent"
+                ok, message = await orch.identify_drive(drive_obj)
+                return cmd.cmd_id, ok, message
+            else:
+                stopped = orch.stop_identify(cmd.serial)
+                return cmd.cmd_id, stopped, (
+                    "identify stopped" if stopped else "no identify blinker was running"
+                )
+
+        if msg_type == "regrade":
+            cmd = proto.RegradeCmd.model_validate(raw)
+            # Extract the core regrade logic without going through the
+            # web handler (which does form parsing + flash redirects
+            # that don't apply here). The orchestrator doesn't currently
+            # own a regrade method (v0.8.0's logic lives in routes.py);
+            # for v0.10.2 we call into a small helper that wraps the
+            # same DB-level operation.
+            from driveforge.core import fleet_regrade
+            try:
+                new_grade = await fleet_regrade.regrade_drive_locally(
+                    state, cmd.serial,
+                )
+            except fleet_regrade.RegradeRefused as exc:
+                return cmd.cmd_id, False, str(exc)
+            except Exception as exc:  # noqa: BLE001
+                return cmd.cmd_id, False, f"regrade errored: {exc}"
+            return cmd.cmd_id, True, f"new grade: {new_grade}"
+
+        cmd_id = raw.get("cmd_id", "?")
+        return cmd_id, False, f"unknown command {msg_type!r}"
 
     def _build_snapshot(self) -> proto.DriveSnapshotMsg:
         """Capture the agent's live per-drive state from DaemonState.
@@ -296,6 +416,7 @@ class FleetClient:
                     io_rate=state.active_io_rate.get(serial),
                     drive_temp_c=state.active_drive_temp.get(serial),
                     phase_change_ts_epoch=state.phase_change_ts.get(serial),
+                identifying=_is_identifying_safe(state, serial),
                 ))
                 continue
             drives.append(proto.DriveState(
@@ -313,8 +434,23 @@ class FleetClient:
                 io_rate=state.active_io_rate.get(serial),
                 drive_temp_c=state.active_drive_temp.get(serial),
                 phase_change_ts_epoch=state.phase_change_ts.get(serial),
+                identifying=_is_identifying_safe(state, serial),
             ))
         return proto.DriveSnapshotMsg(drives=drives, seq=self._seq)
+
+
+def _is_identifying_safe(state: Any, serial: str) -> bool:
+    """Read orch.is_identifying(serial) defensively. During startup
+    the orchestrator attribute may not exist yet (lifespan hasn't
+    run), and the snapshot builder is called from unit tests that
+    bypass full boot."""
+    orch = getattr(state, "orchestrator", None)
+    if orch is None:
+        return False
+    try:
+        return bool(orch.is_identifying(serial))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _extract_agent_id_from_token(path: Any) -> str | None:

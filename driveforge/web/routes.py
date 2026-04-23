@@ -339,7 +339,9 @@ def _remote_installed_card(agent_state, drive_state) -> dict:
         "last_error": None,
         "drive_age_label": None,
         "just_completed": False,
-        "identifying": False,
+        # v0.10.2+ — protocol now carries `identifying` per-drive so
+        # the operator's toggle button reflects agent reality.
+        "identifying": bool(getattr(drive_state, "identifying", False)),
         "promote_prompt": False,
         "host_id": agent_state.agent_id,
         "host_display": agent_state.display_name,
@@ -495,6 +497,19 @@ def dashboard(request: Request) -> HTMLResponse:
     with state.session_factory() as session:
         view = _drive_view(state, session, host_filter=host_filter)
     chassis = _chassis_snapshot(state)
+    # v0.10.2+ — drain any failed remote-command results so the
+    # dashboard shows a banner once, then forgets. Typical causes:
+    # agent refused an abort mid-secure-erase, identify hit the
+    # "drive not present" path, regrade had no prior A/B/C run.
+    fleet_errors: list[dict] = []
+    if state.settings.fleet.role == "operator":
+        from driveforge.daemon import fleet_server
+        for ra, result in fleet_server.drain_command_failures(state):
+            fleet_errors.append({
+                "host": ra.display_name,
+                "command": result.command,
+                "detail": result.detail or "(no detail)",
+            })
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -504,6 +519,7 @@ def dashboard(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "available_hosts": _available_hosts(state),
             "current_host_filter": host_filter,
+            "fleet_errors": fleet_errors,
         },
     )
 
@@ -690,12 +706,63 @@ def new_batch_form(request: Request) -> HTMLResponse:
     )
 
 
+def _new_cmd_id() -> str:
+    """Short random id for correlating CommandResultMsg replies with
+    the POST handler that dispatched the command. Not security-
+    sensitive — just a log-friendly identifier."""
+    import secrets
+    return secrets.token_hex(6)
+
+
+async def _forward_start_pipeline_to_agent(
+    state, agent_id: str, serial: str, *, quick: bool, source: str | None,
+) -> None:
+    """Enqueue a StartPipelineCmd on the target agent's outbound
+    queue. Fire-and-forget; the drive's state appears in the next
+    snapshot (≤3s) if the agent accepts, else the CommandResultMsg
+    reply lands in `recent_command_results` for the dashboard flash
+    area.
+
+    Raises `fleet_server.CommandDispatchError` if the agent has no
+    active session. Callers catch + surface to the operator.
+    """
+    from driveforge.core import fleet_protocol as proto
+    from driveforge.daemon import fleet_server
+    cmd = proto.StartPipelineCmd(
+        cmd_id=_new_cmd_id(), serial=serial, quick_mode=quick, source=source,
+    )
+    await fleet_server.send_command_to_agent(state, agent_id, cmd)
+
+
+async def _forward_abort_to_agent(state, agent_id: str, serial: str) -> None:
+    from driveforge.core import fleet_protocol as proto
+    from driveforge.daemon import fleet_server
+    cmd = proto.AbortCmd(cmd_id=_new_cmd_id(), serial=serial)
+    await fleet_server.send_command_to_agent(state, agent_id, cmd)
+
+
+async def _forward_identify_to_agent(state, agent_id: str, serial: str, *, on: bool) -> None:
+    from driveforge.core import fleet_protocol as proto
+    from driveforge.daemon import fleet_server
+    cmd = proto.IdentifyCmd(cmd_id=_new_cmd_id(), serial=serial, on=on)
+    await fleet_server.send_command_to_agent(state, agent_id, cmd)
+
+
+async def _forward_regrade_to_agent(state, agent_id: str, serial: str) -> None:
+    from driveforge.core import fleet_protocol as proto
+    from driveforge.daemon import fleet_server
+    cmd = proto.RegradeCmd(cmd_id=_new_cmd_id(), serial=serial)
+    await fleet_server.send_command_to_agent(state, agent_id, cmd)
+
+
 @router.post("/batches/new")
 async def new_batch_submit(request: Request) -> RedirectResponse:
     # Imported locally so this module doesn't pull in the orchestrator on
     # collection-time — keeps test import graph shallow.
     from driveforge.daemon.orchestrator import BatchRejected
+    from driveforge.daemon import fleet_server
 
+    state = get_state()
     form = await request.form()
     source = form.get("source") or None
     selected = form.getlist("drive")
@@ -703,14 +770,45 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
     confirm = (form.get("confirm") or "").strip().upper()
     if confirm != "ERASE":
         return RedirectResponse(url="/batches/new?err=confirm", status_code=303)
-    drives = [d for d in drive_mod.discover() if d.serial in selected]
-    if not drives:
-        drives = drive_mod.discover()
+
+    # v0.10.2+ fan-out: for each selected serial, decide whether it
+    # lives locally (send to local orchestrator) or on a remote agent
+    # (forward StartPipelineCmd over the fleet socket). Serials absent
+    # from both paths are dropped silently — matches pre-v0.10.2
+    # behavior where unknown serials just didn't run.
+    local_drives = []
+    remote_dispatch: list[tuple[str, str]] = []  # (agent_id, serial)
+    local_by_serial = {d.serial: d for d in drive_mod.discover()}
+    for serial in selected:
+        if serial in local_by_serial:
+            local_drives.append(local_by_serial[serial])
+            continue
+        agent_id = fleet_server.find_agent_for_serial(state, serial)
+        if agent_id is not None:
+            remote_dispatch.append((agent_id, serial))
+
+    # Empty selection → fall back to "all present local drives" (original
+    # behavior). Operator clicking New Batch with no drives ticked means
+    # they want the whole local chassis.
+    if not local_drives and not remote_dispatch:
+        local_drives = drive_mod.discover()
+
     orch = request.app.state.orchestrator
-    try:
-        await orch.start_batch(drives, source=source, quick=quick)
-    except BatchRejected:
-        return RedirectResponse(url="/batches/new?err=active", status_code=303)
+    if local_drives:
+        try:
+            await orch.start_batch(local_drives, source=source, quick=quick)
+        except BatchRejected:
+            # Only error if there's NO remote dispatch either; otherwise
+            # the remote path is still valid and we continue.
+            if not remote_dispatch:
+                return RedirectResponse(url="/batches/new?err=active", status_code=303)
+    for agent_id, serial in remote_dispatch:
+        try:
+            await _forward_start_pipeline_to_agent(
+                state, agent_id, serial, quick=quick, source=source,
+            )
+        except fleet_server.CommandDispatchError as exc:
+            logger.warning("fleet: start_batch forward to %s failed: %s", agent_id, exc)
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -738,21 +836,37 @@ async def identify_drive_web(serial: str, request: Request) -> RedirectResponse:
     Refuses cleanly if the drive is currently under test (the pipeline
     is already lighting the activity LED) or if the drive is no longer
     physically present.
+
+    v0.10.2+: routes to the owning agent when the drive lives on a
+    remote node. Toggle state is read from the most recent snapshot's
+    `identifying` bit rather than the operator's orchestrator.
     """
+    from driveforge.daemon import fleet_server
+
     orch = request.app.state.orchestrator
     state = get_state()
-    # Toggle semantics — if an identify is already running, Stop it.
+
+    # v0.10.2+ remote routing
+    remote_agent_id = fleet_server.find_agent_for_serial(state, serial)
+    if remote_agent_id is not None:
+        ra = state.remote_agents[remote_agent_id]
+        drive_state = ra.drives.get(serial)
+        currently_on = bool(getattr(drive_state, "identifying", False))
+        try:
+            await _forward_identify_to_agent(
+                state, remote_agent_id, serial, on=not currently_on,
+            )
+        except fleet_server.CommandDispatchError as exc:
+            logger.warning("fleet: identify forward to %s failed: %s", remote_agent_id, exc)
+        return RedirectResponse(url="/", status_code=303)
+
+    # Local path — unchanged from pre-v0.10.2
     if orch.is_identifying(serial):
         orch.stop_identify(serial)
         return RedirectResponse(url="/", status_code=303)
-    # Otherwise, start one. Re-discover so we have a fresh device_path
-    # (kernel letters drift across hotplug/reboot; DB doesn't persist them).
     discovered = {d.serial: d for d in drive_mod.discover()}
     drive = discovered.get(serial)
     if drive is None:
-        # Drive was pulled between dashboard render and click — nothing
-        # to identify. Silently return to dashboard; the card will
-        # disappear on the next refresh.
         return RedirectResponse(url="/", status_code=303)
     await orch.identify_drive(drive)
     return RedirectResponse(url="/", status_code=303)
@@ -784,13 +898,11 @@ async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
     from; falls through to `/` otherwise (dashboard bay-card click).
     """
     from urllib.parse import quote, urlparse
+    from driveforge.daemon import fleet_server
 
-    orch = request.app.state.orchestrator
-    outcome = await orch.abort_drive(serial)
+    state = get_state()
 
-    # Pick redirect target. If Referer points at the drive-detail
-    # page for this serial, bounce back there so the operator sees
-    # the banner in context. Otherwise default to the dashboard.
+    # Resolve Referer redirect target once; both paths use it.
     referer = request.headers.get("Referer", "")
     dest = "/"
     if referer:
@@ -801,6 +913,25 @@ async def abort_drive_web(serial: str, request: Request) -> RedirectResponse:
         except Exception:  # noqa: BLE001
             dest = "/"
 
+    # v0.10.2+ remote routing
+    remote_agent_id = fleet_server.find_agent_for_serial(state, serial)
+    if remote_agent_id is not None:
+        try:
+            await _forward_abort_to_agent(state, remote_agent_id, serial)
+            status, note = "forwarded", f"abort sent to agent {state.remote_agents[remote_agent_id].display_name}"
+        except fleet_server.CommandDispatchError as exc:
+            status, note = "dispatch_error", str(exc)
+        sep = "&" if "?" in dest else "?"
+        params = (
+            f"aborted={status}"
+            f"&abort_serial={quote(serial)}"
+            f"&abort_note={quote(note)}"
+        )
+        return RedirectResponse(url=f"{dest}{sep}{params}", status_code=303)
+
+    # Local path
+    orch = request.app.state.orchestrator
+    outcome = await orch.abort_drive(serial)
     sep = "&" if "?" in dest else "?"
     params = (
         f"aborted={outcome['status']}"
@@ -1158,8 +1289,30 @@ async def regrade_drive(serial: str, request: Request) -> RedirectResponse:
     from driveforge.core import drive_class as drive_class_mod
     from driveforge.core import drive as drive_mod
     from driveforge.core import grading, smart as smart_mod
+    from driveforge.daemon import fleet_server
 
     state = get_state()
+
+    # v0.10.2+ remote routing. Regrade forwards to the owning agent
+    # so the re-grading runs locally where the drive lives (fresh
+    # SMART requires actual device access). Result surfaces via
+    # CommandResultMsg; the new run appears in the agent's next
+    # snapshot.
+    remote_agent_id = fleet_server.find_agent_for_serial(state, serial)
+    if remote_agent_id is not None:
+        try:
+            await _forward_regrade_to_agent(state, remote_agent_id, serial)
+            return RedirectResponse(
+                url=(f"/drives/{serial}?regrade_forwarded="
+                     + quote(f"sent to agent {state.remote_agents[remote_agent_id].display_name}")),
+                status_code=303,
+            )
+        except fleet_server.CommandDispatchError as exc:
+            return RedirectResponse(
+                url=(f"/drives/{serial}?regrade_error="
+                     + quote(f"agent unreachable: {exc}")),
+                status_code=303,
+            )
 
     # Refusal 1: drive actively running
     if serial in state.active_phase:
