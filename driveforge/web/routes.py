@@ -2418,6 +2418,55 @@ def agents_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.post("/settings/fleet-role")
+async def save_fleet_role(request: Request) -> RedirectResponse:
+    """v0.10.5+ — flip the daemon's fleet role between standalone and
+    operator from the Settings UI.
+
+    Agent mode is NOT settable here. An agent is born by consuming an
+    enrollment token from an operator via
+    `sudo driveforge fleet join <operator_url> <token>` — the CLI is
+    what writes the role AND the long-lived credential to disk. A
+    web-UI path would need somewhere to paste the token first, which
+    duplicates the CLI and muddies the security model (the token
+    briefly lives in a browser-cached URL).
+
+    Operators detaching an agent back to standalone should use
+    `sudo driveforge fleet leave` on the agent's console.
+
+    Flipping standalone ↔ operator requires a daemon restart because
+    the lifespan hooks (`fleet_client` task + mounted routes'
+    role-gate behavior) are evaluated once at boot. Restart banner
+    renders on the Settings page after save so the operator knows to
+    apply the change.
+    """
+    state = get_state()
+    form = await request.form()
+    new_role = (form.get("role") or "").strip()
+    if new_role not in ("standalone", "operator"):
+        return RedirectResponse(
+            url="/settings?saved=fleet_role_invalid",
+            status_code=303,
+        )
+    if state.settings.fleet.role == new_role:
+        # No-op click; don't advertise a restart that isn't needed.
+        return RedirectResponse(url="/settings?saved=fleet_role", status_code=303)
+    state.settings.fleet.role = new_role
+    # When flipping OUT of agent mode (shouldn't happen via this form
+    # since we don't accept agent as an option, but defensive),
+    # clear agent-only config so a future flip to agent doesn't
+    # inherit stale operator_url.
+    if new_role != "agent":
+        # Intentionally leave operator_url / api_token_path as-is so a
+        # round-trip standalone → operator → standalone doesn't erase
+        # history. Only wipe on explicit `driveforge fleet leave`.
+        pass
+    await _save_settings_or_ignore(request)
+    return RedirectResponse(
+        url="/settings?saved=fleet_role&restart=1", status_code=303,
+    )
+
+
 @router.post("/settings/agents/new-token")
 def agents_new_token(request: Request) -> RedirectResponse:
     """Generate a one-shot enrollment token and redirect back to the
