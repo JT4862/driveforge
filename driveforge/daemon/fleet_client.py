@@ -108,7 +108,16 @@ class FleetClient:
             logger.warning("fleet-client: agent role but no operator_url configured")
             return
 
-        token = fleet_mod.read_agent_token(cfg.api_token_path)
+        try:
+            token = fleet_mod.read_agent_token(cfg.api_token_path)
+        except fleet_mod.AgentTokenUnreadable as exc:
+            # v0.10.6+: surface ownership / selinux issues loudly so
+            # they don't turn into silent "agent not connecting"
+            # mysteries. Pre-v0.10.6 this path crashed the lifespan
+            # task with PermissionError that asyncio swallowed.
+            logger.error("fleet-client: %s", exc)
+            self.status.last_error = str(exc)
+            return
         if not token:
             logger.warning(
                 "fleet-client: agent role but no token at %s — run 'driveforge fleet join' to enroll",
@@ -479,51 +488,76 @@ class FleetClient:
         Mirrors the per-serial dicts the dashboard reads locally so
         the operator renders the remote drives with the same data
         density as its own.
+
+        v0.10.6 fix: previously this iterated `DB rows ∪ active_phase`,
+        which made EVERY drive ever enrolled on the agent appear on
+        the operator's dashboard as "installed" — a drive-history
+        dump, not a presence snapshot. Now iterates only over drives
+        that (a) are currently discovered by lsblk OR (b) are in
+        `active_phase` (covers the sub-second window during enroll
+        where a drive is running but lsblk hasn't caught up). DB
+        rows are consulted purely for metadata hydration — no row =
+        fall through to minimal identity from live state.
         """
+        from driveforge.core import drive as drive_mod
+        from driveforge.db import models as m
+
         self._seq += 1
         drives: list[proto.DriveState] = []
         state = self.state
 
-        # Union of "drive is known to DB" ∪ "drive is currently active".
-        # Active drives might not be in DB yet during a fresh enroll,
-        # so snapshot both sets.
-        from driveforge.db import models as m
+        # Currently-present drives via lsblk. This is what the local
+        # dashboard's Installed section renders from.
+        try:
+            discovered = {d.serial: d for d in drive_mod.discover()}
+        except Exception:  # noqa: BLE001
+            # lsblk hiccup shouldn't kill the snapshot — report an
+            # empty set and let the next tick recover.
+            logger.exception("fleet-client: discover() failed; sending empty-present snapshot")
+            discovered = {}
+
         active_serials = set(state.active_phase.keys())
+        # Presence = discovered ∪ actively running. DO NOT include
+        # DB rows here; that was the v0.10.0..v0.10.5 bug.
+        present_serials = set(discovered.keys()) | active_serials
+
+        if not present_serials:
+            return proto.DriveSnapshotMsg(drives=[], seq=self._seq)
+
         with state.session_factory() as session:
-            db_drives = {d.serial: d for d in session.query(m.Drive).all()}
+            db_rows = {
+                d.serial: d
+                for d in session.query(m.Drive)
+                .filter(m.Drive.serial.in_(present_serials))
+                .all()
+            }
 
-        serials = set(db_drives.keys()) | active_serials
-
-        for serial in serials:
-            d = db_drives.get(serial)
-            if d is None:
-                # Active but not yet in DB — synthesize minimal identity
-                # from whatever the state dicts carry. The operator's
-                # renderer treats missing fields defensively.
-                drives.append(proto.DriveState(
-                    serial=serial,
-                    model="(unknown)",
-                    capacity_bytes=0,
-                    transport="unknown",
-                    device_basename=state.device_basenames.get(serial),
-                    phase=state.active_phase.get(serial),
-                    percent=state.active_percent.get(serial),
-                    sublabel=state.active_sublabel.get(serial),
-                    io_rate=state.active_io_rate.get(serial),
-                    drive_temp_c=state.active_drive_temp.get(serial),
-                    phase_change_ts_epoch=state.phase_change_ts.get(serial),
-                identifying=_is_identifying_safe(state, serial),
-                ))
-                continue
+        for serial in present_serials:
+            live = discovered.get(serial)
+            db_row = db_rows.get(serial)
+            # Resolve each field preferring: live discovery → DB row →
+            # None. Live discovery is freshest for transport + model
+            # + capacity because it comes from lsblk right now; DB
+            # row supplies manufacturer / firmware_version that
+            # discover() doesn't compute.
+            model = (live.model if live else None) or (db_row.model if db_row else "(unknown)")
+            capacity = (live.capacity_bytes if live else 0) or (db_row.capacity_bytes if db_row else 0)
+            transport = "unknown"
+            if live is not None:
+                transport = live.transport.value if hasattr(live.transport, "value") else str(live.transport)
+            elif db_row is not None:
+                transport = db_row.transport
             drives.append(proto.DriveState(
                 serial=serial,
-                model=d.model,
-                capacity_bytes=d.capacity_bytes,
-                transport=d.transport,
-                manufacturer=d.manufacturer,
-                rotational=d.rotational,
-                firmware_version=d.firmware_version,
-                device_basename=state.device_basenames.get(serial),
+                model=model,
+                capacity_bytes=capacity,
+                transport=transport,
+                manufacturer=(db_row.manufacturer if db_row else None)
+                             or (live.manufacturer if live and getattr(live, "manufacturer", None) else None),
+                rotational=(db_row.rotational if db_row else None),
+                firmware_version=(db_row.firmware_version if db_row else None),
+                device_basename=state.device_basenames.get(serial)
+                                or (live.device_path.rsplit("/", 1)[-1] if live else None),
                 phase=state.active_phase.get(serial),
                 percent=state.active_percent.get(serial),
                 sublabel=state.active_sublabel.get(serial),
