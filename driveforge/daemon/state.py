@@ -169,6 +169,17 @@ class DaemonState:
     # driveforge.core.frozen_remediation.
     frozen_remediation: dict[str, "object"] = field(default_factory=dict)
 
+    # v0.9.0+: drives that come to DriveForge with a user password
+    # already set by some prior host (laptop BIOS HDD password,
+    # vendor utility, previous owner, etc.). Populated by the
+    # orchestrator when secure_erase preflight hits the security-
+    # locked pattern AND the vendor-factory-master-password auto-
+    # recovery also failed. Rendered by a dedicated drive-detail
+    # remediation panel with PSID-revert guidance, manual-password
+    # unlock field, and mark-as-unrecoverable button. Same shape
+    # as frozen_remediation.  See driveforge.core.password_locked_remediation.
+    password_locked: dict[str, "object"] = field(default_factory=dict)
+
     def refresh_bay_plan(self) -> enclosures.BayPlan:
         """Re-discover enclosures + capabilities. Called on daemon start
         and on udev add/remove events."""

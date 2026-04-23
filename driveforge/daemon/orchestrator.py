@@ -1580,6 +1580,36 @@ class Orchestrator:
                         f"— remediation panel escalated to destruction-recommended tone",
                     )
 
+            # v0.9.0+: drives locked with an unknown password (some prior
+            # tool / host set a SECURITY password that DriveForge's default
+            # + the vendor-factory-master auto-recovery path both couldn't
+            # clear). Sibling path to the frozen-SSD remediation above.
+            # Panel offers PSID-revert guidance, manual-password unlock,
+            # and mark-as-unrecoverable.
+            if erase.is_security_locked_pattern(str(exc)):
+                from driveforge.core import password_locked_remediation as pwd_lock
+                lock_state = pwd_lock.register_locked(
+                    self.state.password_locked,
+                    serial=serial,
+                    drive_model=drive.model or "unknown",
+                )
+                if lock_state.retry_count == 0:
+                    self._log(
+                        serial,
+                        "drive is security-locked by unknown password + factory-"
+                        "master auto-recovery failed — remediation panel available "
+                        "on drive detail page (PSID revert, manual password, "
+                        "mark unrecoverable)",
+                    )
+                else:
+                    self._log(
+                        serial,
+                        f"drive STILL security-locked after operator retry #"
+                        f"{lock_state.retry_count} — panel escalated. "
+                        f"{lock_state.attempts_remaining_estimate} manual attempts "
+                        f"estimated remaining before drive locks out permanently.",
+                    )
+
             failure_msg = f"{decoded.cause} — {decoded.next_step}"
             self._log(serial, f"secure_erase failed: {decoded.cause}")
             self._log(serial, f"  → {decoded.next_step}")
@@ -2057,6 +2087,20 @@ class Orchestrator:
                 # miss. The next orchestrator cycle will retry.
                 logger.exception(
                     "frozen_remediation.clear failed for %s (non-fatal)", drive.serial
+                )
+
+            # v0.9.0+: same housekeeping for password-locked remediation
+            # state. A successful pipeline completion means the drive is
+            # now accessible (operator unlocked it manually, or the
+            # factory-master auto-recovery DID work and this is the
+            # post-recovery pipeline run), so the remediation panel
+            # should no longer render.
+            try:
+                from driveforge.core import password_locked_remediation as pwd_lock
+                pwd_lock.clear(self.state.password_locked, drive.serial)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "password_locked clear failed for %s (non-fatal)", drive.serial
                 )
 
             # v0.6.4+: auto-print the cert label now that the run is

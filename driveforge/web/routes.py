@@ -464,6 +464,11 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             # isn't currently flagged as frozen; populated when the
             # orchestrator registered it after a libata-freeze pattern.
             "frozen_remediation_state": state.frozen_remediation.get(serial),
+            # v0.9.0+ password-locked remediation state. None when this
+            # drive isn't currently flagged as security-locked; populated
+            # when secure_erase preflight failed with the locked pattern
+            # AND the vendor-factory-master auto-recovery also failed.
+            "password_locked_state": state.password_locked.get(serial),
             # v0.7.0+ active-pipeline phase for this drive. None when
             # the drive isn't in _tasks (most common case — the drive
             # was tested earlier, the card is informational). The
@@ -796,6 +801,187 @@ async def frozen_remediation_mark_unrecoverable(
     frozen_remediation.clear(state.frozen_remediation, serial)
     return RedirectResponse(
         url=f"/drives/{serial}?frozen=marked-unrecoverable",
+        status_code=303,
+    )
+
+
+# ------------------------------------------ v0.9.0 password-locked routes
+
+
+@router.post("/drives/{serial}/password-locked/try-unlock")
+async def password_locked_try_unlock(
+    serial: str, request: Request
+) -> RedirectResponse:
+    """v0.9.0+: operator entered a manual password in the remediation
+    panel and clicked Try unlock. Runs `hdparm --security-disable
+    <password> /dev/sdX` under the hood. Success → clears the
+    remediation state + re-dispatches the drive through the pipeline.
+    Failure → bumps manual_attempts counter + surfaces the reason in
+    the panel's "last attempt" line.
+
+    Bounded blast radius: we don't retry on our own. Each click =
+    exactly one `hdparm --security-disable` attempt. Operators can
+    see their remaining strikes in the panel
+    (`attempts_remaining_estimate`) and decide whether to keep
+    guessing vs. mark unrecoverable vs. destroy.
+    """
+    from urllib.parse import quote
+    from driveforge.core import password_locked_remediation as pwd_lock
+    from driveforge.core.process import run as run_sync
+
+    state = get_state()
+    form = await request.form()
+    password = (form.get("password") or "").strip()
+    if not password:
+        return RedirectResponse(
+            url=f"/drives/{serial}?pwd_error=" + quote("password field was empty"),
+            status_code=303,
+        )
+
+    # Look up device path. Drive must be currently present.
+    device_basename = state.device_basenames.get(serial)
+    if not device_basename:
+        return RedirectResponse(
+            url=f"/drives/{serial}?pwd_error=" + quote(
+                "drive not currently plugged in — reinsert to try unlock"
+            ),
+            status_code=303,
+        )
+    device_path = f"/dev/{device_basename}"
+
+    # Run `hdparm --security-disable <pw> <device>`. This DISABLES the
+    # security state (doesn't erase data) — if the password is right,
+    # the drive comes back to CLEAN + accepts normal I/O. Pipeline will
+    # then re-run secure_erase through the normal path.
+    try:
+        result = run_sync(
+            [
+                "hdparm",
+                "--user-master", "u",
+                "--security-disable", password,
+                device_path,
+            ],
+            timeout=30,
+            owner=serial,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("password-locked try-unlock crashed for %s", serial)
+        pwd_lock.record_manual_attempt(
+            state.password_locked, serial,
+            ok=False, note=f"hdparm crashed: {exc}",
+        )
+        return RedirectResponse(
+            url=f"/drives/{serial}?pwd_error=" + quote(f"hdparm crashed: {exc}"),
+            status_code=303,
+        )
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        note = f"hdparm rc={result.returncode}: {stderr[:120]}"
+        pwd_lock.record_manual_attempt(
+            state.password_locked, serial, ok=False, note=note,
+        )
+        logger.info(
+            "password-locked manual attempt failed for %s: %s", serial, note,
+        )
+        return RedirectResponse(
+            url=f"/drives/{serial}?pwd_error=" + quote(
+                f"unlock failed ({stderr[:60] or 'wrong password'}). "
+                f"Drive's internal counter has decremented — watch for lockout."
+            ),
+            status_code=303,
+        )
+
+    # Success — drive is unlocked. Clear remediation state + kick a
+    # fresh pipeline run. Operator sees green banner on return.
+    pwd_lock.record_manual_attempt(
+        state.password_locked, serial,
+        ok=True,
+        note="manual unlock succeeded; re-enrolling drive for full pipeline",
+    )
+    pwd_lock.clear(state.password_locked, serial)
+    logger.warning(
+        "password-locked manual unlock SUCCEEDED on %s — re-enrolling for pipeline",
+        serial,
+    )
+
+    # Re-enroll: fresh discovery + pipeline kick. Same pattern as the
+    # frozen-remediation retry route.
+    try:
+        from driveforge.core import drive as drive_mod
+        drives = {d.serial: d for d in drive_mod.discover()}
+        match = drives.get(serial)
+        if match is not None:
+            orch = request.app.state.orchestrator
+            await orch.start_batch(
+                [match],
+                source="password-locked manual unlock success",
+                quick=False,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("password-locked post-unlock pipeline kick failed for %s", serial)
+
+    return RedirectResponse(
+        url=f"/drives/{serial}?pwd_ok=" + quote(
+            "drive unlocked and re-enrolled for pipeline"
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/drives/{serial}/password-locked/mark-unrecoverable")
+async def password_locked_mark_unrecoverable(
+    serial: str, request: Request
+) -> RedirectResponse:
+    """v0.9.0+: operator clicked Mark as unrecoverable in the
+    password-locked remediation panel. Same mechanics as the
+    frozen-remediation equivalent:
+      - Stamp F grade on the latest TestRun (or create a minimal
+        one if none exists)
+      - Clear the remediation state entry
+      - Redirect with a confirmation flash
+    Use phase="password_locked_unrecoverable" to distinguish this
+    failure mode from `frozen_unrecoverable` in the history view
+    + reports.
+    """
+    from urllib.parse import quote
+    from datetime import UTC, datetime as dt
+    from driveforge.core import password_locked_remediation as pwd_lock
+
+    state = get_state()
+    with state.session_factory() as session:
+        last_run = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.drive_serial == serial)
+            .order_by(m.TestRun.completed_at.desc().nulls_last())
+            .first()
+        )
+        error_msg = (
+            "security-locked by unknown password, no remediation worked — "
+            "marked unrecoverable by operator"
+        )
+        if last_run is None:
+            new_run = m.TestRun(
+                drive_serial=serial,
+                started_at=dt.now(UTC),
+                completed_at=dt.now(UTC),
+                phase="password_locked_unrecoverable",
+                grade="F",
+                error_message=error_msg,
+            )
+            session.add(new_run)
+        else:
+            last_run.grade = "F"
+            last_run.phase = "password_locked_unrecoverable"
+            last_run.completed_at = last_run.completed_at or dt.now(UTC)
+            last_run.error_message = error_msg
+        session.commit()
+
+    pwd_lock.clear(state.password_locked, serial)
+    return RedirectResponse(
+        url=f"/drives/{serial}?pwd_ok=" + quote(
+            "drive marked unrecoverable; F grade stamped, auto-enroll will skip this serial"
+        ),
         status_code=303,
     )
 
@@ -1323,13 +1509,40 @@ def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
 
 @router.get("/history", response_class=HTMLResponse)
 def history(request: Request) -> HTMLResponse:
+    """v0.9.0+: history page gained a serial search. Operators
+    typically know a drive by the last 4-5 chars of its serial ("the
+    one ending 2452"). The `?q=<substring>` query param filters the
+    result set with a case-insensitive substring match against
+    `Drive.serial` — so suffix search, prefix search, and arbitrary
+    substring search all work with one input.
+
+    Preserves existing behavior:
+      - Reverse-chronological sort (most recent first)
+      - 500-row limit (applied to the filtered result set)
+      - Only completed runs (completed_at IS NOT NULL)
+
+    URL state via `?q=` so operators can bookmark a filter and
+    browser-refresh keeps it active.
+    """
     state = get_state()
+    query = (request.query_params.get("q") or "").strip()
     with state.session_factory() as session:
-        runs = (
+        base = (
             session.query(m.TestRun)
             .options(joinedload(m.TestRun.drive))
             .filter(m.TestRun.completed_at.isnot(None))
-            .order_by(m.TestRun.completed_at.desc())
+        )
+        if query:
+            # Case-insensitive substring match. SQLite's `LIKE` is
+            # case-insensitive by default for ASCII (which every drive
+            # serial we've ever seen fits within), so a plain ilike
+            # equivalent via func.lower would be redundant. Keep it
+            # simple: `%<q>%` LIKE against drive_serial.
+            base = base.filter(
+                m.TestRun.drive_serial.ilike(f"%{query}%")
+            )
+        runs = (
+            base.order_by(m.TestRun.completed_at.desc())
             .limit(500)
             .all()
         )
@@ -1355,7 +1568,9 @@ def history(request: Request) -> HTMLResponse:
                     "has_report": bool(r.report_url),
                 }
             )
-    return templates.TemplateResponse(request, "history.html", {"rows": rows})
+    return templates.TemplateResponse(
+        request, "history.html", {"rows": rows, "search_query": query},
+    )
 
 
 @router.get("/settings", response_class=HTMLResponse)
