@@ -36,11 +36,22 @@
   {% if new_token %}
   {# Show the raw token exactly once, immediately after it's generated. #}
   <div class="token-display">
-    <h2>New enrollment token</h2>
+    <h2>
+      {% if rotated %}Rotated credential — new enrollment token{% else %}New enrollment token{% endif %}
+    </h2>
+    {% if rotated %}
+    <p class="muted">
+      Agent <code>{{ rotated }}</code> has been revoked. Run the command
+      below on that agent's console to re-enroll it with a fresh
+      credential. The old row remains in the history below so prior
+      drive runs stay attributable.
+    </p>
+    {% else %}
     <p class="muted">
       Copy this command and run it on the agent console. Token expires
       in {{ token_ttl_minutes }} minutes and may only be used once.
     </p>
+    {% endif %}
     <pre class="token-code" aria-label="Agent enrollment command"><code>sudo driveforge fleet join {{ operator_url }} {{ new_token }}</code></pre>
     <p class="muted">
       This is the only time the token is displayed. If you lose it,
@@ -65,11 +76,13 @@
         <th>Enrolled</th>
         <th>Last seen</th>
         <th>Status</th>
+        <th>Live</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for a in agents %}
+      {% set live = live_status.get(a.id) %}
       <tr{% if a.revoked_at %} class="revoked"{% endif %}>
         <td>{{ a.display_name }}</td>
         <td><code>{{ a.hostname or "—" }}</code></td>
@@ -90,8 +103,29 @@
           {% endif %}
         </td>
         <td>
+          {# v0.10.4+ live connection status pulled from the in-memory
+             state map. Distinct from DB `last_seen_at` (which is
+             minutes-precision DB-committed metadata). #}
+          {% if a.revoked_at %}
+            <span class="muted small">—</span>
+          {% elif live and live.connected %}
+            <span class="badge badge-ok" title="Active WebSocket session">connected</span>
+            <span class="muted small">· {{ live.drives }} drives</span>
+          {% elif live and live.online %}
+            <span class="badge" title="Recent activity but socket not currently attached">online</span>
+          {% else %}
+            <span class="badge badge-muted">offline</span>
+          {% endif %}
+        </td>
+        <td>
           {% if not a.revoked_at %}
+          <form method="post" action="/settings/agents/{{ a.id }}/rotate" class="inline-form"
+                style="display: inline-block; margin-right: 6px;"
+                onsubmit="return confirm('Rotate credential for agent {{ a.display_name }}? The current token will be revoked immediately and the session dropped. You will receive a new enrollment token to paste on the agent''s console.');">
+            <button type="submit" class="btn" title="Revoke the current credential and issue a new enrollment token.">Rotate</button>
+          </form>
           <form method="post" action="/settings/agents/{{ a.id }}/revoke" class="inline-form"
+                style="display: inline-block;"
                 onsubmit="return confirm('Revoke agent {{ a.display_name }}? Its connection will drop and it can no longer send drive state. Historical records stay.');">
             <button type="submit" class="btn btn-danger">Revoke</button>
           </form>
@@ -103,6 +137,38 @@
   </table>
   {% else %}
   <p class="muted">No agents enrolled yet. Generate a token above to add one.</p>
+  {% endif %}
+
+  {# v0.10.4+ — recent connection refusals. Helps operators diagnose
+     "why isn't my agent connecting?" — shows the reason (token
+     revoked, protocol skew, etc.) along with the source IP and
+     which agent_id was presented. #}
+  {% if refusals %}
+  <h2 class="section-head">Recent connection refusals</h2>
+  <p class="muted small">
+    Last {{ refusals|length }} connection attempts that were rejected.
+    Useful for diagnosing why an agent isn't showing up.
+  </p>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Reason</th>
+        <th>Agent id presented</th>
+        <th>Source IP</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in refusals %}
+      <tr>
+        <td><code>{{ r.ts }}</code></td>
+        <td>{{ r.reason }}</td>
+        <td>{% if r.token_agent_id %}<code>{{ r.token_agent_id }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if r.remote_ip %}<code>{{ r.remote_ip }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
   {% endif %}
 
   {% endif %}

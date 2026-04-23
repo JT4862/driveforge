@@ -44,6 +44,7 @@ from pydantic import ValidationError
 from driveforge.core import fleet as fleet_mod
 from driveforge.core import fleet_protocol as proto
 from driveforge.daemon.state import RemoteAgentState, get_state
+from driveforge.db import models as m
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ async def fleet_ws(ws: WebSocket) -> None:
 
     token = _extract_bearer_token(ws)
     if not token:
+        _record_refusal(state, "missing bearer token", token_agent_id=None, ws=ws)
         await ws.close(code=1008, reason="missing bearer token")
         return
 
@@ -88,10 +90,21 @@ async def fleet_ws(ws: WebSocket) -> None:
     # synchronous (SHA-256 + constant-time compare); doing it before
     # accept() means an unauthenticated client never sees a 101
     # Switching Protocols response.
+    # v0.10.4+: extract agent_id from the composite token (even when
+    # auth fails) so the operator's refusal log can point at which
+    # agent_id was presented.
+    token_agent_id = token.split(".", 1)[0] if "." in token else None
     with state.session_factory() as session:
         agent = fleet_mod.authenticate_agent(session, token)
         if agent is None:
-            await ws.close(code=1008, reason="invalid or revoked token")
+            # Distinguish revoked-but-present vs genuinely unknown.
+            raw_row = session.get(m.Agent, token_agent_id) if token_agent_id else None
+            reason = (
+                "token revoked" if raw_row is not None and raw_row.revoked_at is not None
+                else "invalid token"
+            )
+            _record_refusal(state, reason, token_agent_id=token_agent_id, ws=ws)
+            await ws.close(code=1008, reason=reason)
             return
         agent_id = agent.id
         stored_display = agent.display_name
@@ -112,11 +125,72 @@ async def fleet_ws(ws: WebSocket) -> None:
     except Exception:
         logger.exception("fleet: agent session errored agent_id=%s", agent_id)
     finally:
-        # Keep the last snapshot around for display (marked offline
-        # via `is_online()` timeout). It's more useful than vanishing
-        # rows — operator can still see which drives WERE in the
-        # agent when it went away.
+        # v0.10.4+ — clear the socket reference so `kick_agent_session`
+        # doesn't try to double-close. Keep the rest of the
+        # remote_agents entry for display purposes; dashboard marks
+        # the agent offline via is_online() timeout.
+        ra = state.remote_agents.get(agent_id)
+        if ra is not None:
+            ra.ws = None
+            if ra.outbound_queue is not None:
+                # Don't keep a queue around for a dead session; next
+                # connect creates a fresh one.
+                ra.outbound_queue = None
+
+
+def _record_refusal(
+    state: Any, reason: str, *, token_agent_id: str | None, ws: WebSocket,
+) -> None:
+    """Stash a connection refusal for the operator's Agents page.
+
+    Bounded to the last 32 entries so a misbehaving agent that
+    reconnects in a tight loop doesn't OOM the daemon."""
+    from datetime import UTC, datetime
+    remote_ip = None
+    try:
+        client = getattr(ws, "client", None)
+        if client is not None:
+            remote_ip = client.host
+    except Exception:  # noqa: BLE001
         pass
+    state.fleet_refusals.append({
+        "ts": datetime.now(UTC).isoformat(),
+        "reason": reason,
+        "token_agent_id": token_agent_id,
+        "remote_ip": remote_ip,
+    })
+    # Cap buffer.
+    if len(state.fleet_refusals) > 32:
+        del state.fleet_refusals[0:len(state.fleet_refusals) - 32]
+    logger.info(
+        "fleet: connection refused (reason=%s, agent_id=%s, ip=%s)",
+        reason, token_agent_id, remote_ip,
+    )
+
+
+async def kick_agent_session(state: Any, agent_id: str, reason: str) -> bool:
+    """v0.10.4+ — forcibly close an agent's active WebSocket session.
+
+    Called from Settings → Agents when the operator revokes or
+    rotates a credential. The agent's reconnect loop then sees the
+    close, tries to reconnect with the now-invalid token, and gets
+    refused at the handshake — the refusal lands in
+    `state.fleet_refusals` so the operator sees confirmation on the
+    Agents page.
+
+    Returns True if a session was kicked, False if the agent wasn't
+    connected.
+    """
+    ra = state.remote_agents.get(agent_id)
+    if ra is None or ra.ws is None:
+        return False
+    ws = ra.ws
+    try:
+        await ws.close(code=1008, reason=reason)
+    except Exception:  # noqa: BLE001
+        logger.exception("fleet: kick close failed for %s", agent_id)
+    ra.ws = None
+    return True
 
 
 async def _handle_session(
@@ -136,12 +210,14 @@ async def _handle_session(
         # Major-version skew → refuse. Agent logs the reason and stops
         # reconnecting until operator action.
         from driveforge.version import __version__ as DRIVEFORGE_VERSION
+        reason = (
+            f"protocol {hello.protocol_version} incompatible with "
+            f"operator's {proto.PROTOCOL_VERSION}"
+        )
+        _record_refusal(state, reason, token_agent_id=agent_id, ws=ws)
         await ws.send_json(proto.HelloAckMsg(
             operator_version=DRIVEFORGE_VERSION,
-            refused_reason=(
-                f"protocol {hello.protocol_version} incompatible with "
-                f"operator's {proto.PROTOCOL_VERSION}"
-            ),
+            refused_reason=reason,
         ).model_dump(mode="json"))
         await ws.close(code=1008, reason="protocol skew")
         return
@@ -154,6 +230,7 @@ async def _handle_session(
             "fleet: agent_id mismatch token=%s hello=%s — closing",
             agent_id, hello.agent_id,
         )
+        _record_refusal(state, "agent_id mismatch", token_agent_id=agent_id, ws=ws)
         await ws.close(code=1008, reason="agent_id mismatch")
         return
 
@@ -174,6 +251,7 @@ async def _handle_session(
         last_message_at=now,
         drives={},
         outbound_queue=outbound,
+        ws=ws,  # v0.10.4+ — referenced by `kick_agent_session`
     )
     with state.session_factory() as session:
         # Persist version + display-name drift for the Agents page.

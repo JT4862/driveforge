@@ -2362,11 +2362,33 @@ async def save_daemon(request: Request) -> RedirectResponse:
 def agents_page(request: Request) -> HTMLResponse:
     state = get_state()
     new_token = request.query_params.get("new_token")
+    rotated = request.query_params.get("rotated")
     agents: list[m.Agent] = []
+    # v0.10.4+: live status per agent_id for the Agents page.
+    #   connected: bool — is there an active WS session right now
+    #   online: bool — has the agent sent a frame in the is_online
+    #                   window (2 min default)
+    #   last_seen_monotonic: float | None — operator-local cache
+    #   drives: int — count of drives the agent reported on last snapshot
+    live_status: dict[str, dict] = {}
+    refusals: list[dict] = []
     if state.settings.fleet.role == "operator":
         from driveforge.core import fleet as fleet_mod
+        import time as _time
         with state.session_factory() as session:
             agents = fleet_mod.list_agents(session)
+        now_m = _time.monotonic()
+        for aid, ra in state.remote_agents.items():
+            live_status[aid] = {
+                "connected": ra.ws is not None,
+                "online": ra.is_online(now_m),
+                "drives": len(ra.drives),
+                "agent_version": ra.agent_version,
+                "protocol_version": ra.protocol_version,
+            }
+        # Copy the refusal buffer (newest first) — don't drain it;
+        # operator may refresh the page to recheck.
+        refusals = list(reversed(state.fleet_refusals))
     # Synthesize the operator URL for the token-display command. Prefer
     # the configured integrations.cloudflare_tunnel_hostname if set
     # (public hostname), else fall back to <hostname>.local:<port>.
@@ -2386,8 +2408,12 @@ def agents_page(request: Request) -> HTMLResponse:
             "settings": state.settings,
             "agents": agents,
             "new_token": new_token,
+            "rotated": rotated,
             "operator_url": operator_url,
             "token_ttl_minutes": state.settings.fleet.enrollment_token_ttl_seconds // 60,
+            # v0.10.4+ live status map + refusals buffer
+            "live_status": live_status,
+            "refusals": refusals,
         },
     )
 
@@ -2424,14 +2450,64 @@ def agents_new_token(request: Request) -> RedirectResponse:
 
 
 @router.post("/settings/agents/{agent_id}/revoke")
-def agents_revoke(agent_id: str) -> RedirectResponse:
+async def agents_revoke(agent_id: str) -> RedirectResponse:
+    """v0.10.0+ revoke the agent; v0.10.4+ also kicks the active
+    WebSocket session so the operator sees the effect immediately
+    (pre-v0.10.4 the existing socket kept delivering snapshots until
+    the agent naturally disconnected)."""
     state = get_state()
     if state.settings.fleet.role != "operator":
         raise HTTPException(status_code=400, detail="fleet role is not operator")
     from driveforge.core import fleet as fleet_mod
+    from driveforge.daemon import fleet_server
     with state.session_factory() as session:
         fleet_mod.revoke_agent(session, agent_id)
+    # v0.10.4+ — kick any active session. `kick_agent_session`
+    # returns False cleanly if the agent wasn't connected.
+    await fleet_server.kick_agent_session(state, agent_id, reason="revoked by operator")
     return RedirectResponse(url="/settings/agents", status_code=303)
+
+
+@router.post("/settings/agents/{agent_id}/rotate")
+async def agents_rotate(agent_id: str) -> RedirectResponse:
+    """v0.10.4+ Rotate an agent's credential.
+
+    One click: revoke the existing agent record + mint a fresh
+    enrollment token. The operator runs the new `driveforge fleet
+    join` command on the agent console, which creates a BRAND NEW
+    agent row (new agent_id) — the old row stays in the DB with
+    `revoked_at` set so historical drive/run attribution isn't
+    broken.
+
+    The operator should use this when:
+      - A credential is suspected to be leaked
+      - Regular-cadence rotation per security policy
+      - An agent was reinstalled + needs a fresh identity
+
+    NOTE: this does NOT preserve the agent_id. The agent's host_id
+    history-page filter will split between "old credential runs"
+    and "new credential runs." Operators who need continuity should
+    rename the new display_name to match the old one at enrollment
+    time; the Agents page will surface two entries (one revoked,
+    one active) for the same human-facing name.
+    """
+    from urllib.parse import quote
+    state = get_state()
+    if state.settings.fleet.role != "operator":
+        raise HTTPException(status_code=400, detail="fleet role is not operator")
+    from driveforge.core import fleet as fleet_mod
+    from driveforge.daemon import fleet_server
+    with state.session_factory() as session:
+        fleet_mod.revoke_agent(session, agent_id)
+        issue = fleet_mod.issue_enrollment_token(
+            session,
+            ttl_seconds=state.settings.fleet.enrollment_token_ttl_seconds,
+        )
+    await fleet_server.kick_agent_session(state, agent_id, reason="credential rotated")
+    return RedirectResponse(
+        url=f"/settings/agents?new_token={quote(issue.raw_token)}&rotated={agent_id}",
+        status_code=303,
+    )
 
 
 @router.post("/settings/wizard-replay")

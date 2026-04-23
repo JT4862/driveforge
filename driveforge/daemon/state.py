@@ -195,6 +195,15 @@ class DaemonState:
     # overwriting newer state. Keyed by agent_id.
     remote_snapshot_seq: dict[str, int] = field(default_factory=dict)
 
+    # v0.10.4+ — recent connection refusals. When an agent tries to
+    # join but gets rejected (bad token, revoked, protocol skew,
+    # agent_id mismatch), an entry lands here. Surfaced on the
+    # Agents page so the operator can see WHY agent X isn't showing
+    # up. Capped to last 32 by insertion order. One dict per entry:
+    # {ts: iso_string, reason: str, token_agent_id: str | None,
+    #  remote_ip: str | None}.
+    fleet_refusals: list[dict] = field(default_factory=list)
+
     def refresh_bay_plan(self) -> enclosures.BayPlan:
         """Re-discover enclosures + capabilities. Called on daemon start
         and on udev add/remove events."""
@@ -278,6 +287,13 @@ class RemoteAgentState:
     # the dashboard's flash area on subsequent requests. Capped at
     # the last 64 by insertion order.
     recent_command_results: list["object"] = field(default_factory=list)
+    # v0.10.4+ — reference to the live WebSocket so the operator can
+    # kick the session on revoke (otherwise the existing socket keeps
+    # serving until the agent naturally disconnects, which can be
+    # minutes on a quiet fleet). Set by the server session handler
+    # after the hello handshake; cleared on close. None = no active
+    # session (agent offline or mid-reconnect).
+    ws: "object | None" = None
 
     def is_online(self, now_monotonic: float, *, timeout_s: float = 120.0) -> bool:
         """An agent is considered online if we've received any frame
