@@ -12,7 +12,18 @@
 #}
 {% macro drive_card(card) -%}
 {% if card.state == "installed" %}
-<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.last_triage %} triaged triaged-{{ card.last_triage }}{% endif %}{% if card.just_completed %} just-completed{% endif %}">
+<div class="bay-card installed{% if card.last_grade %} graded graded-{{ card.last_grade }}{% endif %}{% if card.last_triage %} triaged triaged-{{ card.last_triage }}{% endif %}{% if card.just_completed %} just-completed{% endif %}{% if card.host_id %} remote-host{% endif %}{% if card.host_offline %} host-offline{% endif %}">
+  {# v0.10.1+ host badge. Renders only on remote-agent drives (local
+     cards leave `host_id` unset). `host_offline` signals the agent
+     hasn't sent a heartbeat recently; styling muted in that case
+     so operators can see the drive USED to be on agent X but the
+     agent is gone. #}
+  {% if card.host_id %}
+  <div class="host-badge" title="Drive is on agent '{{ card.host_display }}'{% if card.host_offline %} — agent currently offline{% endif %}">
+    <span class="host-dot{% if card.host_offline %} host-dot--offline{% endif %}" aria-hidden="true"></span>
+    {{ card.host_display }}{% if card.host_offline %} · offline{% endif %}
+  </div>
+  {% endif %}
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">
@@ -146,7 +157,13 @@
   </form>
 </div>
 {% else %}
-<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}{% if card.recovery_mode %} recovery-mode{% endif %}">
+<div class="bay-card active phase-{{ card.phase_class }}{% if card.phase_just_changed %} phase-pulse{% endif %}{% if card.recovery_mode %} recovery-mode{% endif %}{% if card.host_id %} remote-host{% endif %}{% if card.host_offline %} host-offline{% endif %}">
+  {% if card.host_id %}
+  <div class="host-badge" title="Drive is on agent '{{ card.host_display }}'{% if card.host_offline %} — agent currently offline{% endif %}">
+    <span class="host-dot{% if card.host_offline %} host-dot--offline{% endif %}" aria-hidden="true"></span>
+    {{ card.host_display }}{% if card.host_offline %} · offline{% endif %}
+  </div>
+  {% endif %}
   <a class="bay-card-main" href="/drives/{{ card.serial }}">
     <div class="bay-body">
       <div class="drive-model">

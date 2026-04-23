@@ -1,0 +1,160 @@
+"""Fleet WebSocket wire protocol (v0.10.1+).
+
+All messages are JSON, with a `msg` discriminator field. Pydantic
+validates every inbound message; unknown `msg` types are dropped
+with a warning (forward-compat: agents running a newer protocol can
+safely send messages the operator doesn't understand yet).
+
+Protocol version is separate from the daemon's semver so patch
+releases don't break the fleet. `PROTOCOL_VERSION` bumps only when
+the wire format changes in a non-backward-compatible way.
+
+### Message flow
+
+Agent → operator:
+- `hello` (first frame after connect): agent announces itself
+- `drive_snapshot`: full list of currently-attached drives + their
+  live state. Sent on connect and every N seconds thereafter.
+- `heartbeat`: keep-alive ping with agent-side timestamp
+
+Operator → agent:
+- `hello_ack`: operator acknowledges hello, returns version info
+- `ack`: generic acknowledgment with the message's correlation id
+
+### Design choices
+
+- **Snapshot-based, not delta-based (for v0.10.1).** Every N seconds
+  the agent sends a full drive list rather than per-drive deltas.
+  Simpler to reason about on the operator side (no reconciliation
+  needed), and the snapshot size is small (a handful of drives × a
+  few hundred bytes each). v0.10.2+ may introduce deltas if the
+  snapshot becomes too chatty.
+
+- **No explicit ack required for snapshots.** The agent keeps its
+  local WAL until the operator sends an `ack` for specific runs
+  (v0.10.3). Live state is fire-and-forget — if a snapshot is lost,
+  the next one (≤3s later) supersedes it.
+
+- **Bearer-token auth, not mutual TLS.** v0.10.1 ships with bearer
+  tokens in the WebSocket handshake `Authorization` header. mTLS is
+  on the v0.10.4 list; bearer tokens are fine for LAN-scoped
+  homelab use until then.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# Bumped only when the wire format breaks backward compatibility.
+# Operators refuse connections from agents whose major component
+# differs from their own.
+PROTOCOL_VERSION = "1.0"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+# ----------------------------------------------- agent → operator
+
+
+class HelloMsg(BaseModel):
+    msg: Literal["hello"] = "hello"
+    agent_id: str
+    display_name: str
+    hostname: str | None = None
+    agent_version: str
+    protocol_version: str = PROTOCOL_VERSION
+
+
+class DriveState(BaseModel):
+    """One drive's live state snapshot. Mirrors the per-serial fields
+    from `DaemonState` on the agent side. All fields except serial +
+    model are optional — if a drive isn't currently active, the
+    phase/percent/etc. are None."""
+    serial: str
+    model: str
+    capacity_bytes: int
+    transport: str  # "sata" | "sas" | "nvme"
+    manufacturer: str | None = None
+    rotational: bool | None = None
+    firmware_version: str | None = None
+    # Kernel device basename ("sda", "nvme0n1"). Optional + local to
+    # the agent — never used by the operator except for display /
+    # debugging, since kernel letters drift across reboots.
+    device_basename: str | None = None
+    # Live-run state (None when drive is idle)
+    phase: str | None = None
+    percent: float | None = None
+    sublabel: str | None = None
+    io_rate: dict[str, float] | None = None  # {"read_mbps", "write_mbps"}
+    drive_temp_c: int | None = None
+    # When the current phase started, for the dashboard's pulse
+    # animation. Operator renders relative to its own clock.
+    phase_change_ts_epoch: float | None = None
+
+
+class DriveSnapshotMsg(BaseModel):
+    msg: Literal["drive_snapshot"] = "drive_snapshot"
+    # Full list of drives this agent currently sees. Empty list is
+    # valid (agent has no drives attached); the operator uses that
+    # to clear any stale rows.
+    drives: list[DriveState]
+    # Monotonic clock sequence number so the operator can drop an
+    # out-of-order snapshot if one arrives late on a flaky link.
+    seq: int
+    sent_at: datetime = Field(default_factory=_utcnow)
+
+
+class HeartbeatMsg(BaseModel):
+    msg: Literal["heartbeat"] = "heartbeat"
+    sent_at: datetime = Field(default_factory=_utcnow)
+
+
+# ----------------------------------------------- operator → agent
+
+
+class HelloAckMsg(BaseModel):
+    msg: Literal["hello_ack"] = "hello_ack"
+    operator_version: str
+    protocol_version: str = PROTOCOL_VERSION
+    # If the operator refuses the connection (e.g. protocol skew),
+    # this carries the reason and the agent should not retry without
+    # operator intervention. Present only on a refusal path.
+    refused_reason: str | None = None
+
+
+class AckMsg(BaseModel):
+    msg: Literal["ack"] = "ack"
+    ack_for: str  # name of the message being acked (for logs / debugging)
+
+
+# ---------------------------------- helpers
+
+
+# Union type for inbound (agent → operator) decoding. Used by the
+# server handler to dispatch on `msg`.
+AgentToOperatorMsg = HelloMsg | DriveSnapshotMsg | HeartbeatMsg
+
+# Union for the reverse direction.
+OperatorToAgentMsg = HelloAckMsg | AckMsg
+
+
+def is_protocol_compatible(their_version: str, our_version: str = PROTOCOL_VERSION) -> bool:
+    """Major-version match is required; minor skew is fine.
+
+    v0.10.1 only speaks "1.0", but future releases may add fields.
+    Minor bumps (1.1, 1.2) stay compatible — pydantic silently
+    ignores unknown fields by default via model_config. Major bumps
+    (2.0) are breaking and get refused at handshake.
+    """
+    try:
+        their_major = their_version.split(".", 1)[0]
+        our_major = our_version.split(".", 1)[0]
+    except (AttributeError, IndexError):
+        return False
+    return their_major == our_major

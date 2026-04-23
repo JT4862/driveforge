@@ -180,6 +180,21 @@ class DaemonState:
     # as frozen_remediation.  See driveforge.core.password_locked_remediation.
     password_locked: dict[str, "object"] = field(default_factory=dict)
 
+    # v0.10.1+ fleet aggregation state. Operator-only: one entry per
+    # connected (or recently-connected) agent. Keyed by agent_id.
+    # Each entry carries the latest drive snapshot the agent sent,
+    # plus its version + last-seen timestamp. Dashboard view layer
+    # merges these into the drive grid alongside local drives.
+    # Cleared when an agent is revoked or the operator restarts.
+    # Agents never populate this dict.
+    remote_agents: dict[str, "RemoteAgentState"] = field(default_factory=dict)
+
+    # v0.10.1+ inbound-fleet snapshot sequence, per agent. Tracks the
+    # latest snapshot `seq` the operator has processed so
+    # out-of-order frames on a flaky link can be dropped rather than
+    # overwriting newer state. Keyed by agent_id.
+    remote_snapshot_seq: dict[str, int] = field(default_factory=dict)
+
     def refresh_bay_plan(self) -> enclosures.BayPlan:
         """Re-discover enclosures + capabilities. Called on daemon start
         and on udev add/remove events."""
@@ -219,6 +234,42 @@ class DaemonState:
         instance = cls(settings=settings, engine=engine, session_factory=sf)
         instance.refresh_bay_plan()
         return instance
+
+
+# ---------------------------------------------- v0.10.1 fleet aggregation
+
+
+@dataclass
+class RemoteAgentState:
+    """Operator-side view of one connected agent.
+
+    Populated by the fleet WebSocket server as snapshots arrive;
+    read by the dashboard view layer when building the drive grid.
+    Everything here is **live state** — DB upserts happen separately
+    on a slower cadence (v0.10.3+).
+    """
+    agent_id: str
+    display_name: str
+    hostname: str | None
+    agent_version: str
+    protocol_version: str
+    connected_at: float  # time.monotonic() at connect
+    last_message_at: float  # time.monotonic() at most recent frame
+    # Full most-recent snapshot, indexed by drive serial. One entry
+    # per drive currently attached to the agent. An empty dict is a
+    # valid snapshot meaning "the agent has no drives attached" —
+    # NOT "the agent hasn't sent anything yet" (that case is just
+    # absence from `DaemonState.remote_agents`).
+    drives: dict[str, "object"] = field(default_factory=dict)  # dict[serial, DriveState]
+
+    def is_online(self, now_monotonic: float, *, timeout_s: float = 120.0) -> bool:
+        """An agent is considered online if we've received any frame
+        (snapshot or heartbeat) within `timeout_s`. Defaults to 2
+        minutes so a missed snapshot or two over a flaky link doesn't
+        mark the agent dead — snapshots fire every 3 s in the
+        healthy path, so a 2-minute window is ~40 missed snapshots
+        before we give up."""
+        return (now_monotonic - self.last_message_at) < timeout_s
 
 
 _STATE: DaemonState | None = None

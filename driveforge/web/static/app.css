@@ -1120,3 +1120,35 @@ dialog.label-preview-dialog::backdrop { background: rgba(0,0,0,0.65); }
 .enclosure-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
 .enclosure-head h3 { margin: 0; font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
 .enclosure-head .muted { font-size: 12px; }
+
+/* v0.10.1+ fleet — host badge on drive cards + host filter row */
+.bay-card.remote-host { border-left: 3px solid #5b8cd6; }
+.bay-card.remote-host.host-offline { opacity: 0.55; border-left-color: #6a6f78; }
+.host-badge {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 11px; color: var(--muted);
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(91, 140, 214, 0.12); border: 1px solid rgba(91, 140, 214, 0.3);
+  padding: 2px 8px; border-radius: 999px;
+  pointer-events: none;
+}
+.host-badge .host-dot { width: 6px; height: 6px; border-radius: 50%; background: #5b8cd6; display: inline-block; }
+.host-badge .host-dot--offline { background: #6a6f78; }
+.host-filter-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 8px 0 16px 0; padding: 8px 0; border-bottom: 1px solid var(--panel-border);
+}
+.host-filter-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.host-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 12px; border-radius: 999px;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--panel-border);
+  color: var(--muted); text-decoration: none; font-size: 13px;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.host-pill:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.host-pill.active { background: rgba(91, 140, 214, 0.16); border-color: rgba(91, 140, 214, 0.45); color: var(--text); }
+.host-pill.offline { opacity: 0.6; }
+.host-pill .host-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.host-pill .host-dot--offline { background: #6a6f78; }
+.host-pill-count { font-size: 11px; opacity: 0.75; padding: 0 4px; }
