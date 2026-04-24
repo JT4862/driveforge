@@ -216,6 +216,18 @@ class FleetClient:
         self.status.connected = True
         self.status.last_connected_at = time.monotonic()
         self.status.last_error = None
+        # v0.10.9+ — capture operator's fleet-wide auto_enroll_mode
+        # so hotplug decisions use the operator's setting instead
+        # of this agent's stale local config. Forward-compat: older
+        # operators don't send the field; leave None and agent
+        # falls back to "off".
+        op_mode = ack_data.get("auto_enroll_mode")
+        if op_mode in ("off", "quick", "full"):
+            self.state.fleet_operator_auto_enroll_mode = op_mode
+            logger.info(
+                "fleet-client: operator auto_enroll_mode = %s",
+                op_mode,
+            )
         logger.info(
             "fleet-client: connected (operator v%s)",
             ack_data.get("operator_version", "unknown"),
@@ -290,8 +302,31 @@ class FleetClient:
                 asyncio.create_task(self._dispatch_command(ws, msg_type, raw))
             elif msg_type == "run_completed_ack":
                 self._handle_completion_ack(raw)
+            elif msg_type == "config_update":
+                self._handle_config_update(raw)
             else:
                 logger.debug("fleet-client: dropping unknown msg type=%r", msg_type)
+
+    def _handle_config_update(self, raw: dict) -> None:
+        """v0.10.9+ — apply an operator-pushed fleet config change.
+
+        Currently scoped to `auto_enroll_mode`. When the operator's
+        dashboard toggle changes, they broadcast this message to
+        every connected agent; each agent updates its cached value,
+        and the NEXT hotplug event respects the new mode.
+        """
+        try:
+            msg = proto.ConfigUpdateMsg.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fleet-client: bad config_update: %s", exc)
+            return
+        if msg.auto_enroll_mode in ("off", "quick", "full"):
+            prev = self.state.fleet_operator_auto_enroll_mode
+            self.state.fleet_operator_auto_enroll_mode = msg.auto_enroll_mode
+            logger.info(
+                "fleet-client: auto_enroll_mode updated by operator: %s -> %s",
+                prev, msg.auto_enroll_mode,
+            )
 
     def _handle_completion_ack(self, raw: dict) -> None:
         """Clear pending_fleet_forward on the TestRun matching the

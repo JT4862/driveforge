@@ -561,7 +561,15 @@ def dashboard(request: Request) -> HTMLResponse:
 
 @router.post("/settings/auto-enroll")
 async def set_auto_enroll(request: Request) -> RedirectResponse:
-    """Toggle auto-enrollment mode from the dashboard segmented control."""
+    """Toggle auto-enrollment mode from the dashboard segmented control.
+
+    v0.10.9+: when this daemon is the fleet operator, the mode is
+    broadcast to every connected agent via ConfigUpdateMsg so the
+    toggle applies fleet-wide. Agents update their cached operator-
+    mode value; the NEXT hotplug event on the agent honors it.
+    Pre-v0.10.9 each agent had its own invisible toggle that
+    stayed stale after an operator click.
+    """
     state = get_state()
     form = await request.form()
     mode = (form.get("mode") or "off").strip().lower()
@@ -569,6 +577,25 @@ async def set_auto_enroll(request: Request) -> RedirectResponse:
         mode = "off"
     state.settings.daemon.auto_enroll_mode = mode
     await _save_settings_or_ignore(request)
+
+    # v0.10.9+ fleet broadcast. Enqueue on every connected agent's
+    # outbound queue; agents with no active session miss this tick
+    # but pick up the new value on their next reconnect via
+    # HelloAckMsg.
+    if state.settings.fleet.role == "operator":
+        from driveforge.core import fleet_protocol as proto
+        from driveforge.daemon import fleet_server
+        update_msg = proto.ConfigUpdateMsg(auto_enroll_mode=mode)
+        for agent_id in list(state.remote_agents.keys()):
+            try:
+                await fleet_server.send_command_to_agent(
+                    state, agent_id, update_msg,
+                )
+            except fleet_server.CommandDispatchError:
+                # Agent offline — no-op; they'll get the new value
+                # from HelloAckMsg on reconnect.
+                pass
+
     return RedirectResponse(url="/", status_code=303)
 
 

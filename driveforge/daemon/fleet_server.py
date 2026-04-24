@@ -267,8 +267,13 @@ async def _handle_session(
             row.last_seen_at = datetime.now(UTC)
             session.commit()
 
+    # v0.10.9+ — hand the agent our current fleet-wide config so it
+    # mirrors our auto_enroll_mode instead of consulting its stale
+    # local copy. Agents read this from state.fleet_operator_auto_enroll_mode
+    # when their hotplug handler fires.
     await ws.send_json(proto.HelloAckMsg(
         operator_version=DRIVEFORGE_VERSION,
+        auto_enroll_mode=state.settings.daemon.auto_enroll_mode,
     ).model_dump(mode="json"))
 
     # v0.10.2+ run sender + receiver concurrently. Sender drains the

@@ -195,6 +195,14 @@ class DaemonState:
     # overwriting newer state. Keyed by agent_id.
     remote_snapshot_seq: dict[str, int] = field(default_factory=dict)
 
+    # v0.10.9+ — agent-side cache of the operator's auto_enroll_mode.
+    # Populated from HelloAckMsg on every (re)connect + updated on
+    # ConfigUpdateMsg. The agent's hotplug handler reads this when
+    # role == "agent" instead of `settings.daemon.auto_enroll_mode`,
+    # so the operator's dashboard toggle controls the entire fleet
+    # from one place. None until first handshake completes.
+    fleet_operator_auto_enroll_mode: str | None = None
+
     # v0.10.4+ — recent connection refusals. When an agent tries to
     # join but gets rejected (bad token, revoked, protocol skew,
     # agent_id mismatch), an entry lands here. Surfaced on the
