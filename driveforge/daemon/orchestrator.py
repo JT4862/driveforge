@@ -347,12 +347,23 @@ class Orchestrator:
         source: str | None = None,
         *,
         quick: bool = False,
+        batch_id: str | None = None,
     ) -> str:
         """Create a batch and kick off testing for each drive.
 
         Refuses to include any drive that's already under test in another
         in-flight batch (raises `BatchRejected` if every requested drive is
         already active).
+
+        v0.11.9+: `batch_id` is optional. When omitted (the standalone
+        path) we mint one. When provided (the fleet path — operator
+        pre-mints the id and dispatches `StartPipelineCmd` to agents
+        with the same id) we adopt it. Insertion is idempotent: if
+        the row already exists (operator's local start_batch ran first
+        and created the Batch row, then this same-process call comes
+        back via a different code path), we reuse it. On the agent
+        side the row never exists locally yet, so we insert fresh —
+        both sides end up with rows under the same operator-owned id.
         """
         busy = self.active_serials()
         conflicts = [d.serial for d in drives if d.serial in busy]
@@ -367,11 +378,14 @@ class Orchestrator:
                 "all selected drives are already under test in another batch",
                 conflicts=conflicts,
             )
-        batch_id = uuid.uuid4().hex[:12]
+        if batch_id is None:
+            batch_id = uuid.uuid4().hex[:12]
         plan = self.state.refresh_bay_plan()
         with self.state.session_factory() as session:
-            batch = m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC))
-            session.add(batch)
+            existing_batch = session.get(m.Batch, batch_id)
+            if existing_batch is None:
+                batch = m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC))
+                session.add(batch)
             for d in drives:
                 # Refine transport for drives lsblk reports as SAS: the
                 # `tran=sas` field just says "attached to a SAS HBA" — actual
@@ -1186,7 +1200,12 @@ class Orchestrator:
 
         # Phase 4: secure erase (ALWAYS runs — this is the destructive step)
         await self._advance(run_id, "secure_erase", drive)
-        await self._run_secure_erase(drive, dev_mode=dev_mode, run_id=run_id)
+        # v0.11.9+: pass quick mode through so the HDD libata-freeze
+        # fallback can refuse to engage when badblocks won't actually
+        # run (was stamping `sanitization_method=badblocks_overwrite`
+        # then returning normally → quick mode skipped badblocks → DB
+        # row claimed sanitization that never happened).
+        await self._run_secure_erase(drive, dev_mode=dev_mode, run_id=run_id, quick=quick)
 
         bb_errors = (0, 0, 0)
         bb_throughput = throughput_mod.ThroughputCollector().finalize()
@@ -1366,7 +1385,10 @@ class Orchestrator:
         logger.warning("drive %s %s self-test timed out after %ds", drive.serial, kind, timeout)
         return None
 
-    async def _run_secure_erase(self, drive: Drive, *, dev_mode: bool, run_id: int | None = None) -> None:
+    async def _run_secure_erase(
+        self, drive: Drive, *, dev_mode: bool, run_id: int | None = None,
+        quick: bool = False,
+    ) -> None:
         if dev_mode:
             await asyncio.sleep(1.0)
             return
@@ -1548,7 +1570,11 @@ class Orchestrator:
             # keep the original failure for them.
             is_hdd = drive.rotation_rate and drive.rotation_rate > 0
             is_libata_freeze = erase.is_libata_freeze_pattern(str(exc))
-            if is_hdd and is_libata_freeze:
+            if is_hdd and is_libata_freeze and not quick:
+                # FULL-mode HDD path — original v0.6.7 behavior. Badblocks
+                # WILL run after we return, so stamping the sanitization
+                # method ahead of time is honest. Drive ends with a real
+                # NIST 800-88 Clear (4-pattern overwrite).
                 self._log(
                     serial,
                     "secure_erase unavailable (libata freeze detected) — HDD "
@@ -1563,6 +1589,45 @@ class Orchestrator:
                 # Return normally — the pipeline continues to the
                 # badblocks phase which will do the actual sanitization.
                 return
+            if is_hdd and is_libata_freeze and quick:
+                # v0.11.9+ — QUICK-mode HDD on libata-freeze. Pre-v0.11.9
+                # we'd unconditionally stamp `sanitization_method=
+                # badblocks_overwrite` then return, expecting the next
+                # phase to be badblocks. But quick mode SKIPS badblocks
+                # (orchestrator pipeline gate around `if quick:`) so the
+                # stamp was a lie — drive was tested but never sanitized.
+                # Now we let the failure path run (preserves the
+                # data-integrity contract) and inject a clear "re-run in
+                # full mode" hint into the decoded error so the operator
+                # sees an actionable next step on the dashboard card,
+                # rather than the raw libata-freeze decoder text that
+                # implies the drive is unrecoverable.
+                self._log(
+                    serial,
+                    "secure_erase unavailable (libata freeze) AND quick mode "
+                    "skips badblocks → no sanitization will happen. Re-run "
+                    "in full mode to sanitize via 4-pattern badblocks "
+                    "overwrite (NIST 800-88 Clear for magnetic media).",
+                )
+                # Synthesize a HDD-quick-mode-specific decoded message
+                # that overrides the generic libata-freeze prose. Pipeline
+                # falls through to the existing PipelineFailure path
+                # below; _record_failure picks up this decoded text.
+                decoded = ata_errors.DecodedError(
+                    cause=(
+                        "Drive frozen by libata AND quick mode skipped "
+                        "badblocks — drive was NOT sanitized."
+                    ),
+                    next_step=(
+                        "Re-run this drive in FULL mode (uncheck Quick mode "
+                        "on the New Batch screen). The pipeline will skip "
+                        "secure_erase as it did here, then run badblocks: "
+                        "4-pattern destructive overwrite, ~8h per 3TB drive, "
+                        "satisfies NIST 800-88 Clear for magnetic media. "
+                        "Drive ends usable + certified."
+                    ),
+                    severity="recoverable",
+                )
 
             # v0.6.9+: SSDs hitting the same libata-freeze pattern CAN'T
             # safely fall back to badblocks (wear leveling + NIST 800-88

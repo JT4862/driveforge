@@ -417,7 +417,17 @@ async def _ingest_run_completed(
                 r = msg.run
                 new_run = m.TestRun(
                     drive_serial=r.drive_serial,
-                    batch_id=None,  # batch IDs are agent-local; drop
+                    # v0.11.9+: preserve the operator-minted batch_id
+                    # the agent reports back. Pre-v0.11.9 we dropped
+                    # this with a "batch IDs are agent-local" comment,
+                    # but as of v0.11.9 the operator pre-mints the id
+                    # in the POST /batches/new handler and pushes it
+                    # down via StartPipelineCmd.batch_id, so r.batch_id
+                    # IS the operator's id. The Batch row was created
+                    # operator-side at click time so the FK is
+                    # guaranteed present (whether or not local drives
+                    # were also in the batch).
+                    batch_id=r.batch_id,
                     bay=r.bay,
                     phase=r.phase,
                     started_at=r.started_at,

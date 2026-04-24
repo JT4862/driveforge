@@ -94,6 +94,16 @@ class CertLabelData:
     # Clear for magnetic media, but the label should state the method
     # honestly so a downstream auditor can trace the verdict.
     sanitization_method: str | None = None
+    # v0.11.9+: when True, render an UNRECOVERABLE label instead of the
+    # generic F label. Operator hits "Mark as unrecoverable" in either
+    # the frozen-SSD or password-locked remediation panel; the route
+    # handler stamps F grade in the DB AND fires this print so the
+    # operator's hand has a physical sticker to slap on the drive
+    # before it goes into the destroy bin. Title becomes "DriveForge
+    # — UNRECOVERABLE", grade glyph becomes "✗" (or text "DESTROY"),
+    # body text stays the same shape so the operator can still read
+    # the model/serial/reason.
+    unrecoverable: bool = False
 
 
 def primary_fail_reason(rules: list[dict]) -> str | None:
@@ -314,7 +324,18 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     font_footer = _load_font(14)
 
     padding = 14
-    title = "DriveForge — FAIL" if is_fail else "DriveForge Certified"
+    # v0.11.9+: unrecoverable variant replaces "DriveForge — FAIL"
+    # with "DriveForge — DESTROY" so a fleet-rack operator scanning
+    # labels at arm's length immediately separates "test failed,
+    # might still wipe via vendor tool" from "operator marked dead,
+    # physically destroy and don't reuse." Same fail-tier layout
+    # otherwise.
+    if data.unrecoverable:
+        title = "DriveForge — DESTROY"
+    elif is_fail:
+        title = "DriveForge — FAIL"
+    else:
+        title = "DriveForge Certified"
     draw.text((padding, padding), title, font=font_title, fill="black")
     draw.line(
         [(padding, padding + 42), (size[0] - padding, padding + 42)],
@@ -414,8 +435,19 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
     # which forced body text into a cramped left column (~24-char
     # wrap). Now grade + QR form a single vertical block along
     # the right edge; body text gets the full left column.
-    grade_text = "F" if is_fail else data.grade.upper()
-    grade_suffix = "*" if (data.quick_mode and not is_fail) else ""
+    # v0.11.9+: unrecoverable variant uses "✗" as the right-column
+    # glyph instead of "F". The rasterizer renders "✗" cleanly with
+    # the bundled DejaVuSans font and visually screams "do not reuse"
+    # at arm's length, which is the whole point of a destruction
+    # sticker. Falls back to "X" if the bundled font happens to lack
+    # the U+2717 codepoint on some build (defensive — same font ships
+    # with brother_ql so this branch should never trigger in practice).
+    if data.unrecoverable:
+        grade_text = "✗"
+        grade_suffix = ""
+    else:
+        grade_text = "F" if is_fail else data.grade.upper()
+        grade_suffix = "*" if (data.quick_mode and not is_fail) else ""
     grade_display = grade_text + grade_suffix
     grade_bbox = draw.textbbox((0, 0), grade_display, font=font_grade)
     grade_w = grade_bbox[2] - grade_bbox[0]
@@ -779,6 +811,82 @@ def auto_print_cert_for_run(state, drive, run) -> tuple[bool, str]:
     if not ok:
         return (False, f"auto-print dispatch failed: {print_msg}")
     return (True, f"auto-printed cert label for {drive.serial}")
+
+
+def auto_print_unrecoverable_for_drive(
+    state, drive, *, reason: str | None = None,
+) -> tuple[bool, str]:
+    """v0.11.9+ — print a physical "DriveForge — DESTROY" sticker for
+    a drive the operator just marked unrecoverable in either the
+    frozen-SSD or password-locked remediation panel.
+
+    Why a separate function instead of routing through
+    `auto_print_cert_for_run`: the unrecoverable label doesn't need a
+    completed TestRun (the drive may have never run a successful
+    pipeline — frozen drives error at secure_erase before any health
+    data lands). We just need the drive's identity (model, serial,
+    capacity) and a reason string.
+
+    Same fail-safe contract as auto_print_cert_for_run: returns
+    `(ok, message)` and never raises. Caller (the route handler) does
+    not block on print failure — the F-grade DB stamp is the source
+    of truth; the sticker is the operator's hand-bridge to the
+    physical drive.
+    """
+    from datetime import date as _date
+    pc = state.settings.printer
+    if not pc.model:
+        return (False, "no printer configured")
+    if not getattr(pc, "auto_print", True):
+        return (False, "auto-print disabled in Settings")
+
+    tun = state.settings.integrations.cloudflare_tunnel_hostname
+    if tun:
+        if not tun.startswith(("http://", "https://")):
+            tun = f"https://{tun}"
+        report_url = f"{tun.rstrip('/')}/reports/{drive.serial}"
+    else:
+        host = state.settings.daemon.host
+        port = state.settings.daemon.port
+        if host in ("0.0.0.0", "::", "*", ""):
+            import socket
+            host = f"{socket.gethostname()}.local"
+        report_url = f"http://{host}:{port}/reports/{drive.serial}"
+
+    capacity_tb = (
+        (drive.capacity_bytes / 1_000_000_000_000)
+        if getattr(drive, "capacity_bytes", None) else 0.0
+    )
+    try:
+        data = CertLabelData(
+            model=drive.model or "Unknown drive",
+            serial=drive.serial,
+            capacity_tb=capacity_tb,
+            grade="F",  # render path branches on `unrecoverable` first
+            tested_date=_date.today(),
+            power_on_hours=0,
+            report_url=report_url,
+            fail_reason=reason or "Marked unrecoverable by operator",
+            unrecoverable=True,
+        )
+        img = render_label(data, roll=pc.label_roll or "DK-1209")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "auto-print: unrecoverable label render failed for %s", drive.serial,
+        )
+        return (False, f"render failed: {exc}")
+
+    backend = _BROTHER_QL_BACKENDS.get(pc.connection, "file")
+    ok, print_msg = print_label(
+        img,
+        model=pc.model,
+        backend=backend,
+        identifier=pc.backend_identifier,
+        roll=pc.label_roll,
+    )
+    if not ok:
+        return (False, f"dispatch failed: {print_msg}")
+    return (True, f"auto-printed UNRECOVERABLE label for {drive.serial}")
 
 
 def render_test_label(*, roll: str = "DK-1209") -> Image.Image:

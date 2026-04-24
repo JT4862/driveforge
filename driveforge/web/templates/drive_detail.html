@@ -80,7 +80,13 @@
   </ol>
   <div class="frozen-remediation-actions">
     <form method="post" action="/drives/{{ drive.serial }}/frozen/retry" style="margin:0;">
-      <button type="submit" class="btn">I tried one of these — retest</button>
+      {# v0.11.9+: bumped from `.btn` to `.btn primary` so it visually
+         reads as the panel's primary call-to-action — pre-v0.11.9 it
+         rendered as a thin outlined element next to the much louder
+         red "Mark as unrecoverable" button and operators were missing
+         it. JT flagged this on the frozen-SSD remediation page during
+         the v0.11.9 walkthrough. #}
+      <button type="submit" class="btn primary">I tried one of these — retest</button>
     </form>
     <form method="post" action="/drives/{{ drive.serial }}/frozen/mark-unrecoverable"
           style="margin:0;"

@@ -176,6 +176,16 @@ class StartPipelineCmd(BaseModel):
     serial: str
     quick_mode: bool = False
     source: str | None = None
+    # v0.11.9+: operator-minted batch id. When the operator dispatches
+    # this command as part of a New Batch click that selected one or
+    # more agent drives, it pre-mints a batch id and sends it down so
+    # every TestRun (local + agent) lands under the same batch on the
+    # operator's batch detail page. Pre-v0.11.9 agents minted their own
+    # batch ids and the operator dropped them on ingestion (see
+    # fleet_server line ~420), making fleet runs invisible from the
+    # batch view. Optional for backwards compat; agents older than
+    # v0.11.9 ignore it harmlessly.
+    batch_id: str | None = None
 
 
 class AbortCmd(BaseModel):
