@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Agent status · DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Agent status</h1>
+  <p class="muted">
+    This DriveForge box is running as a fleet <strong>agent</strong>.
+    Drive management happens on the operator; this page exists only to
+    confirm local health.
+  </p>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Connection</h2>
+    {% if client_status and client_status.connected %}
+      <span class="pill saved">connected</span>
+    {% else %}
+      <span class="pill" style="background: rgba(255,102,102,0.18); color: var(--fail);">disconnected</span>
+    {% endif %}
+  </div>
+  <dl style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; margin: 0;">
+    <dt class="muted">Operator URL</dt>
+    <dd>
+      {% if operator_url %}
+        <a href="{{ operator_url }}">{{ operator_url }}</a>
+      {% else %}
+        <span class="muted">(not configured — run <code>driveforge fleet join</code>)</span>
+      {% endif %}
+    </dd>
+    <dt class="muted">Display name</dt>
+    <dd>{{ settings.fleet.display_name or "(uses hostname)" }}</dd>
+    {% if client_status %}
+    <dt class="muted">Snapshots sent</dt>
+    <dd>{{ client_status.snapshots_sent }}</dd>
+    <dt class="muted">Heartbeats sent</dt>
+    <dd>{{ client_status.heartbeats_sent }}</dd>
+    <dt class="muted">Completions forwarded</dt>
+    <dd>{{ client_status.completions_sent }}</dd>
+    <dt class="muted">Reconnect attempts</dt>
+    <dd>{{ client_status.reconnect_attempts }}</dd>
+    {% if client_status.last_error %}
+    <dt class="muted">Last error</dt>
+    <dd><code style="color: var(--fail);">{{ client_status.last_error }}</code></dd>
+    {% endif %}
+    {% endif %}
+    <dt class="muted">Pending forward</dt>
+    <dd>
+      {{ pending_forward_count }}
+      <span class="muted small">
+        {% if pending_forward_count %}
+          — runs completed locally but not yet ack'd by the operator; will
+          auto-flush on next reconnect
+        {% else %}
+          — all local runs have been acknowledged upstream
+        {% endif %}
+      </span>
+    </dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Detach from fleet</h2>
+  </div>
+  <p class="muted">
+    To revert this box to standalone mode, run on its console:
+  </p>
+  <pre class="token-code"><code>sudo driveforge fleet leave</code></pre>
+  <p class="muted small">
+    The operator keeps the historical run records. To also free the
+    agent slot on the operator, click <em>Revoke</em> next to this agent
+    on the operator's <em>Settings &rarr; Agents</em> page.
+  </p>
+</section>
+{% endblock %}

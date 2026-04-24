@@ -342,7 +342,13 @@ def test_api_enroll_rejects_when_role_is_standalone(tmp_path) -> None:
 
 
 def test_api_enroll_rejects_when_role_is_agent(tmp_path) -> None:
-    """Agents aren't enrollment targets either — only operators are."""
+    """Agents aren't enrollment targets either — only operators are.
+
+    v0.10.0 expected 404 (handler-level role check). v0.10.7 added
+    the agent-lockdown middleware which refuses all non-allowlisted
+    POSTs with 403 BEFORE the handler runs, so the effective
+    refusal code shifted. Both are valid "agents don't serve this"
+    responses; accept either so we don't regress on either path."""
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
         resp = client.post(
@@ -352,7 +358,7 @@ def test_api_enroll_rejects_when_role_is_agent(tmp_path) -> None:
                 "display_name": "r720",
             },
         )
-    assert resp.status_code == 404
+    assert resp.status_code in (403, 404)
 
 
 def test_api_enroll_rejects_bad_token_with_400(tmp_path) -> None:

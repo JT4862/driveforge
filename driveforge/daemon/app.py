@@ -628,17 +628,31 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         except Exception:  # noqa: BLE001
             logger.exception("startup recovery dispatch failed (non-fatal)")
         hotplug_task = asyncio.create_task(_hotplug_loop(state, orch))
+        # v0.10.7+ /etc/hosts self-heal — fixes "sudo: unable to
+        # resolve host" warnings when hostname rename left stale
+        # entries. Idempotent; no-op when file is canonical.
+        try:
+            from driveforge.core import hostname as hostname_mod
+            hostname_mod.ensure_hosts_entry_matches_hostname()
+        except Exception:  # noqa: BLE001
+            logger.exception("hosts self-heal failed at startup (non-fatal)")
         # v0.10.1+ agent-side fleet client. Connects to the operator and
         # streams drive state. No-ops when role != "agent"; the client's
         # own `run()` method bails early on misconfig so we don't need
         # a role check here.
         fleet_client_task: asyncio.Task | None = None
         fleet_client_instance = None
+        prune_task: asyncio.Task | None = None
         if settings.fleet.role == "agent":
             from driveforge.daemon.fleet_client import FleetClient
+            from driveforge.daemon.agent_prune import prune_loop
             fleet_client_instance = FleetClient(state)
             state.fleet_client = fleet_client_instance  # type: ignore[attr-defined]
             fleet_client_task = asyncio.create_task(fleet_client_instance.run())
+            # v0.10.7+ agent DB pruning. Runs hourly; removes
+            # forwarded-and-ack'd TestRuns older than 24h per JT's
+            # original fleet-spec intent.
+            prune_task = asyncio.create_task(prune_loop(state))
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s, role=%s)",
             settings.daemon.host,
@@ -652,8 +666,8 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         # seeing a TCP RST.
         if fleet_client_instance is not None:
             await fleet_client_instance.stop()
-        fleet_tasks: tuple[asyncio.Task, ...] = (
-            (fleet_client_task,) if fleet_client_task is not None else ()
+        fleet_tasks: tuple[asyncio.Task, ...] = tuple(
+            t for t in (fleet_client_task, prune_task) if t is not None
         )
         for task in (io_task, hotplug_task, update_check_task, udev_health_task, *fleet_tasks):
             task.cancel()
@@ -690,6 +704,58 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         ):
             return RedirectResponse(url="/setup/1", status_code=303)
         return await call_next(request)
+
+    # v0.10.7+ agent UI lockdown. When this daemon runs as an agent,
+    # all operator-surface mutating endpoints (start batch, abort,
+    # identify, regrade, etc.) return 403 — the operator is the
+    # single pane of glass for fleet management. A minimal allowlist
+    # covers the endpoints agents legitimately need for self-service
+    # (update, restart udev, fleet leave via CLI, health probes).
+    #
+    # Mounted as a separate middleware from setup_gate so the two
+    # concerns stay independent — setup gate still applies before
+    # role gate on a fresh install.
+    AGENT_ALLOWED_WRITE_PATHS = {
+        "/settings/install-update",  # self-update should work
+        "/settings/restart-udev",    # operator-in-SSH debug path
+        "/settings/check-updates",   # trigger update poll
+    }
+    AGENT_ALLOWED_WRITE_PREFIXES = (
+        "/setup/",                   # first-run setup always OK
+    )
+
+    @app.middleware("http")
+    async def agent_role_gate(request: Request, call_next):
+        """Block mutating routes when role == agent."""
+        s = get_state().settings
+        if s.fleet.role != "agent":
+            return await call_next(request)
+        method = request.method.upper()
+        if method in ("GET", "HEAD", "OPTIONS"):
+            return await call_next(request)
+        path = request.url.path
+        if path in AGENT_ALLOWED_WRITE_PATHS:
+            return await call_next(request)
+        if any(path.startswith(p) for p in AGENT_ALLOWED_WRITE_PREFIXES):
+            return await call_next(request)
+        # Everything else — /batches/*, /drives/*, /settings/grading,
+        # /settings/printer, /regrade-all-idle, etc. — refuses with
+        # a 403 pointing back at the operator. HTML response so
+        # browser-accidental hits render a friendly page.
+        operator_url = s.fleet.operator_url or "(not configured)"
+        from fastapi.responses import HTMLResponse
+        html = f"""<!doctype html>
+<html lang=en><head><meta charset=utf-8><title>Agent locked</title>
+<link rel=stylesheet href=/static/app.css></head><body style='padding:40px;max-width:720px;margin:0 auto;'>
+<h1>Agent mode: managed by operator</h1>
+<p>This DriveForge box runs as a fleet <strong>agent</strong>. All
+drive management happens from the operator's dashboard at:</p>
+<p><a href='{operator_url}'>{operator_url}</a></p>
+<p class='muted'>Run <code>sudo driveforge fleet leave</code> on this
+box's console to detach from the fleet and restore standalone mode.</p>
+<p><a href='/'>&larr; back to local status</a></p>
+</body></html>"""
+        return HTMLResponse(content=html, status_code=403)
 
     app.include_router(api_router)
     app.include_router(setup_router)

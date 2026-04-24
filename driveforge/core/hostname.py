@@ -198,3 +198,61 @@ def _patch_etc_hosts(new_name: str) -> None:
     # Direct write — same systemd-namespace constraint as /etc/hostname.
     # See `apply_hostname` for the EROFS / ReadWritePaths discussion.
     hosts.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def ensure_hosts_entry_matches_hostname() -> bool:
+    """v0.10.7+ — self-heal /etc/hosts if the 127.0.1.1 entry drifts
+    from the current hostname.
+
+    Runs on daemon startup to fix the "sudo: unable to resolve host"
+    warning that appears when the hosts file's 127.0.1.1 line has
+    extra tokens from a prior rename path (e.g. `driveforge-abcdef.local
+    driveforge` left over from avahi interaction).
+
+    The canonical Debian form is a single short-name on 127.0.1.1:
+        127.0.1.1    driveforge-abcdef
+    avahi-daemon handles the `.local` alias separately via mDNS; we
+    don't need to put it in /etc/hosts.
+
+    Returns True if a rewrite happened, False if the file was already
+    canonical. Non-fatal on permission / missing-file errors —
+    returns False and the caller ignores.
+    """
+    current = current_hostname()
+    if not current:
+        return False
+    hosts = Path("/etc/hosts")
+    if not hosts.exists():
+        return False
+    try:
+        content = hosts.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # Find the 127.0.1.1 line's tokens.
+    canonical = f"127.0.1.1\t{current}"
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("127.0.1.1"):
+            continue
+        if stripped.startswith("#"):
+            continue
+        # Tokens after 127.0.1.1 — split on any whitespace.
+        tokens = stripped.split()[1:]  # skip "127.0.1.1" itself
+        # Canonical = exactly one token, equal to current hostname.
+        if len(tokens) == 1 and tokens[0] == current:
+            return False  # already canonical, nothing to do
+        # Drift detected — rewrite.
+        break
+    else:
+        # No 127.0.1.1 line at all — add one.
+        pass
+    try:
+        _patch_etc_hosts(current)
+    except OSError as exc:
+        logger.warning("could not self-heal /etc/hosts: %s", exc)
+        return False
+    logger.info(
+        "hosts-self-heal: rewrote /etc/hosts 127.0.1.1 to canonical '%s'",
+        canonical,
+    )
+    return True

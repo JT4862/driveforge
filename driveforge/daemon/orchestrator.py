@@ -1057,7 +1057,8 @@ class Orchestrator:
             # Failures graded "error" don't print — they might be transient
             # and re-trigger on reinsert; a sticker saying "FAIL" on a
             # drive that might actually be fine is worse than no sticker.
-            if grade == "F":
+            # v0.10.7+ — suppress local F-print on agents (operator prints).
+            if grade == "F" and self.state.settings.fleet.role != "agent":
                 pc = self.state.settings.printer
                 if pc.model and getattr(pc, "auto_print", True):
                     from driveforge.core import printer as printer_mod
@@ -2135,7 +2136,13 @@ class Orchestrator:
             # click Print Label manually once they fix the printer
             # issue. Print status goes to the drive's log so the
             # dashboard shows why the sticker didn't print.
-            if run.grade and not run.quick_mode:
+            # v0.10.7+ — agents don't print locally. The operator
+            # receives the forwarded RunCompletedMsg and prints from
+            # its own printer, so the QR on the label always points
+            # to the operator's permanent record (not the agent's
+            # prunable DB).
+            is_agent = self.state.settings.fleet.role == "agent"
+            if run.grade and not run.quick_mode and not is_agent:
                 pc = self.state.settings.printer
                 if pc.model and getattr(pc, "auto_print", True):
                     from driveforge.core import printer as printer_mod
