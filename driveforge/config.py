@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -264,6 +264,21 @@ class DaemonConfig(BaseModel):
     # Root path for sysfs — overridable in tests + dev to point at a
     # synthetic tree. Production leaves this at "/".
     sysfs_root: Path = Path("/")
+
+    # v0.10.10+ YAML 1.1 boolean footgun: bare `off` / `on` / `yes` /
+    # `no` parse as booleans, not strings. So a hand-edited
+    # `auto_enroll_mode: off` (looks correct, matches the docs) drops
+    # a `False` into settings, which then fails pydantic string
+    # validation and crash-loops the daemon on startup. JT hit this
+    # exact bug during v0.10.9 recovery when we sed'd the YAML from
+    # a shell. Coerce the bool forms back to the intended strings
+    # so the daemon tolerates both styles.
+    @field_validator("auto_enroll_mode", mode="before")
+    @classmethod
+    def _coerce_yaml_bool(cls, v):  # noqa: ANN001, ANN201
+        if isinstance(v, bool):
+            return "off" if v is False else "full"
+        return v
 
     # v0.5.5+ — What to do when a quick-pass run finishes with triage=fail
     # (the drive deteriorated during the quick pass). Three modes:
