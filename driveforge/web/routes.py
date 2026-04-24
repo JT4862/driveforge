@@ -1117,9 +1117,12 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
     source = form.get("source") or None
     selected = form.getlist("drive")
     quick = form.get("quick") == "on"
-    confirm = (form.get("confirm") or "").strip().upper()
-    if confirm != "ERASE":
-        return RedirectResponse(url="/batches/new?err=confirm", status_code=303)
+    # v0.11.13: dropped the typed-confirmation gate (`confirm == "ERASE"`)
+    # that used to live here. Operators selecting drives and clicking
+    # "Start Batch" already know the product secure-erases — the
+    # typed-confirmation field was friction without safety benefit.
+    # Older clients that still POST a `confirm` field submit it
+    # harmlessly (form.get is just not read).
 
     # v0.10.2+ fan-out: for each selected serial, decide whether it
     # lives locally (send to local orchestrator) or on a remote agent
