@@ -331,3 +331,137 @@ Delivery is best-effort — failures are logged and recorded in the
 `webhook_deliveries` DB table but don't retry automatically.
 Re-trigger by re-running the batch (curl the appropriate endpoint
 with the same drive serials).
+
+---
+
+## Fleet endpoints (v0.10+)
+
+See [Fleet mode](../operations/fleet.md) for the operator + agent
+model these endpoints implement.
+
+### `GET /api/fleet/local-status`
+
+Role-aware live status for the local daemon. No auth; localhost-only
+by convention (CLI defaults to `127.0.0.1`). Response shape differs
+per role:
+
+**Standalone**:
+
+```json
+{"role": "standalone"}
+```
+
+**Operator**:
+
+```json
+{
+  "role": "operator",
+  "agents_total": 2,
+  "agents_online": 2,
+  "agents_connected": 2,
+  "recent_refusals": 0
+}
+```
+
+**Agent**:
+
+```json
+{
+  "role": "agent",
+  "connected": true,
+  "last_error": null,
+  "snapshots_sent": 1243,
+  "heartbeats_sent": 42,
+  "completions_sent": 7,
+  "reconnect_attempts": 0
+}
+```
+
+Used by `driveforge fleet status` CLI. Reveals only counters and
+connection booleans — no tokens, no drive identity.
+
+### `POST /api/fleet/enroll` (operator-only)
+
+Manual enrollment path. Agent's `driveforge fleet join` CLI posts
+here with a one-shot enrollment token generated on the operator's
+Settings → Agents → Generate enrollment token button.
+
+Request:
+
+```json
+{
+  "token": "abc123def.xyz789...",
+  "display_name": "r720-bench",
+  "hostname": "driveforge-r720",
+  "version": "0.11.0"
+}
+```
+
+Response (200):
+
+```json
+{
+  "agent_id": "ac57c3b52e3d9434",
+  "api_token": "ac57c3b52e3d9434.<long-random>",
+  "operator_version": "0.11.0"
+}
+```
+
+Returns:
+
+- **404** — fleet enrollment not enabled (this daemon is not an
+  operator). Prevents accidental cross-fleet adoption.
+- **400** — token unknown / consumed / expired / hash mismatch.
+  All cases return a generic message to avoid leaking which
+  failure mode tripped.
+
+### `POST /api/fleet/adopt` (candidate-only, v0.11+)
+
+Operator-initiated adoption of a candidate discovered via mDNS.
+The operator's dashboard Enroll button POSTs here on the candidate's
+URL; the candidate writes the credential, flips role to agent,
+restarts.
+
+Request:
+
+```json
+{
+  "operator_url": "http://driveforge-op.local:8080",
+  "agent_token": "<composite-id-and-raw-token>",
+  "display_name": "r720-bench",
+  "install_id": "a1b2c3d4e5f6"
+}
+```
+
+Response (200):
+
+```json
+{"ok": true, "detail": "adoption accepted; restarting"}
+```
+
+Returns:
+
+- **404** — daemon is not in `candidate` role. Prevents
+  re-adoption of running agents.
+- **400** — `install_id` doesn't match the candidate's own.
+  Defends against cross-candidate confusion on a LAN with multiple
+  candidates visible at once.
+- **500** — token-write / config-save failure.
+
+### Fleet WebSocket: `/fleet/ws`
+
+Agent ↔ operator persistent connection. Binary / JSON frames; not
+a REST endpoint but lives at the same path. Protocol details in
+`driveforge/core/fleet_protocol.py` (pydantic models define the
+wire format). Authentication via `Authorization: Bearer <composite>`
+header. Agents reconnect with exponential backoff 1s → 60s.
+
+Protocol version is separate from daemon semver. v0.11.0 speaks
+`PROTOCOL_VERSION = "1.0"`. Minor forward-compat on unknown
+message types; major-version mismatch is a hard refusal at
+handshake.
+
+Not a public endpoint — no documented shape for third-party
+clients; the wire format is subject to change between DriveForge
+versions. To interact with a fleet programmatically, use the
+REST endpoints listed above or the CLI.

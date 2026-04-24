@@ -27,11 +27,49 @@ Across the top, left-to-right:
     **warm** 45–55°C (amber), **hot** ≥ 55°C (red)
 - **+ New Batch** button — opens the batch-creation page
 - **Auto-enroll mode pill** (Off / Quick / Full) — segmented control;
-  click any pill to switch modes immediately. See
+  click any pill to switch modes immediately. In operator mode
+  (v0.10.9+) this is fleet-wide: clicking Quick propagates to every
+  agent in the fleet via WebSocket within seconds. See
   [Auto-enroll](auto-enroll.md).
 
 If your hardware has no BMC and no IPMI access, the chassis strip is
 hidden — the dashboard adapts to the smaller header.
+
+## Host filter row (operator mode, v0.10.1+)
+
+On an operator with enrolled agents, a filter-pill row appears above
+the drive grid:
+
+```
+VIEW: [All hosts 24] [this operator 6] [r720-bench 12] [nx3200-jbod 6]
+```
+
+Click a pill to scope the view to one host. Counts reflect current
+drive totals per host. Agents that have gone offline since their last
+advertisement render with a muted dot + "offline" suffix; their last-
+known drives still appear on the grid but with reduced card opacity.
+
+Standalone installs never see this row — it's only rendered when the
+operator has at least one enrolled agent.
+
+## Host badges on drive cards (operator mode)
+
+Remote drives carry a small **host badge** in the top-right of their
+card showing the source agent's display name:
+
+```
+┌──────────────────────────────────────────────┐
+│                            [• r720-bench]    │  ← host badge
+│  Western Digital                             │
+│  WDC WD4000FYYZ-01UL1B3                      │
+│  ...                                         │
+└──────────────────────────────────────────────┘
+```
+
+The operator's own drives have no badge. Cards also gain a blue
+left border to signal "this drive is remote"; offline-host cards
+drop to muted gray. See [Fleet mode](fleet.md) for the full
+aggregation story.
 
 ## Active section
 

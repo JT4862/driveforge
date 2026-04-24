@@ -11,7 +11,14 @@ badblocks burn-in (or skips it for a "quick" verdict), runs a SMART
 long self-test, grades the result A/B/C/Fail, and prints a cert
 label. Commercial-refurbisher workflow at homelab scale.
 
-**Full operator documentation as of v0.4.0.** Every page in the tree
+**Single-box or fleet.** Single-box is the default and covers most
+homelab deployments. **Fleet mode (v0.10+)** lets one operator
+DriveForge aggregate drives from additional agent DriveForge boxes
+onto one dashboard — useful when you have spare servers that could
+burn-in drives but don't need their own UI. See
+[Fleet mode](operations/fleet.md) for the multi-node guide.
+
+**Full operator documentation as of v0.11.0.** Every page in the tree
 below has detailed content. For the architectural / design plan, see
 [`BUILD.md`](https://github.com/JT4862/driveforge/blob/main/BUILD.md)
 in the repo root — that's still the canonical place for "why is the
@@ -22,8 +29,9 @@ system designed this way?" decisions.
 ### Operators (running DriveForge on real hardware)
 
 - [Installation](installation/) — flashing the ISO, booting, walking through the setup wizard
-- [Operations](operations/) — daily use: dashboard tour, auto-enroll, identify LED, hostname rename, in-app updates
+- [Operations](operations/) — daily use: dashboard tour, fleet setup, auto-enroll, identify LED, hostname rename, in-app updates
 - [Hardware compatibility](hardware/) — supported HBAs, supported drives, known issues per hardware combo
+- [Fleet mode](operations/fleet.md) — multi-node deployments: operator + agents, one dashboard
 
 ### Reference
 

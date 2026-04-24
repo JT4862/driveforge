@@ -16,6 +16,15 @@ on drives from any source (Facebook Marketplace, eBay, pulled lab gear,
 a friend's retired NAS) and independently verify the claim before you
 trust a drive with your data.
 
+**Single-box or multi-box.** Fleet mode (v0.10+) lets one DriveForge
+install — the *operator* — aggregate drives from other DriveForge
+boxes — *agents* — onto a single dashboard. Plug a drive into any
+agent; it shows up on the operator with a host badge. Click Enroll
+next to a freshly-booted candidate on the operator's Agents page and
+it joins the fleet — no tokens to copy, no shell commands. See
+[Fleet mode](https://jt4862.github.io/driveforge/operations/fleet.html)
+for the full multi-node guide.
+
 - **Status**: pre-alpha, in active development
 - **License**: [MIT](LICENSE)
 - **Latest release**: [GitHub Releases](https://github.com/JT4862/driveforge/releases/latest)
@@ -161,6 +170,13 @@ with a distinct `DriveForge — FAIL` title and a primary-reason line
    (fail) so you can see what to pull from across the room. On hardware
    with proper SES backplanes, the amber fault LED also lights for
    failures.
+9. **Fleet mode (v0.10+)** — scale from one box to many without
+   spinning up a dashboard per server. Boot additional boxes from
+   the ISO's "DriveForge Agent" menu entry; they advertise themselves
+   via mDNS and appear on the operator's Settings → Agents page with
+   an Enroll button. The operator then aggregates every agent's drives
+   onto its single dashboard, runs the printer for the whole fleet,
+   and controls fleet-wide settings like auto-enroll from one place.
 
 ---
 

@@ -10,9 +10,22 @@ it on, every new drive you insert gets a pipeline started automatically
 
 ## The three modes
 
-Toggle at the dashboard header pill. Stored in `daemon.auto_enroll_mode`
-in `/etc/driveforge/driveforge.yaml`. Daemon reads it live; no restart
+Toggle at the dashboard header pill. Daemon reads it live; no restart
 needed when changing.
+
+- **Standalone** installs: stored in `daemon.auto_enroll_mode` in
+  `/etc/driveforge/driveforge.yaml` on this box.
+- **Operator** installs (v0.10.9+): same — but the operator's value
+  is the **fleet-wide** setting. Clicking Quick / Full propagates to
+  every connected agent via the fleet WebSocket within seconds; agents
+  ignore their own local config when in agent mode and use the
+  operator's cached value. Agents that are offline when you click pick
+  up the new value on reconnect via the handshake.
+- **Agent** installs: the pill is not rendered on agents (they have
+  no web GUI in v0.11+). They receive the value from their operator.
+  Fail-closed: an agent with no cached operator value defaults to
+  "Off" — pipelines never auto-start without the operator's green
+  light.
 
 | Mode | Pipeline run on insert |
 |------|------------------------|

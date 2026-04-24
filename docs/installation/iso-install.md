@@ -5,9 +5,20 @@ title: ISO install
 # ISO install
 
 The recommended path. Flash the release ISO to a USB stick, boot the
-target server, pick the OS disk, walk away. The unattended portion
-takes ~10–15 minutes; you come back to a working DriveForge instance
-reachable at `http://driveforge.local:8080`.
+target server, **pick one of two boot-menu entries** (standalone/operator
+or agent), select the OS disk, walk away. The unattended portion takes
+~10–15 minutes; you come back to a working DriveForge instance.
+
+**Two install flavors** ship in the same ISO — you choose at boot time:
+
+| Boot entry | What you get |
+|---|---|
+| **DriveForge** (default) | Standalone / operator install. First boot runs the setup wizard where you pick Standalone or Operator. |
+| **DriveForge Agent** | Headless worker that joins an existing fleet. No wizard — the box comes up advertising itself on the LAN, and an operator on your network enrolls it with one click from Settings → Agents. Use for the 2nd, 3rd, Nth DriveForge box when you already have an operator running. |
+| Manual Debian install | Fallback for operators who want a stock Debian box without DriveForge's preseed (rare). |
+
+For fleet setup, see [Fleet mode](../operations/fleet.md) once both
+boxes are installed.
 
 ## 1. Download + verify the ISO
 
@@ -59,6 +70,26 @@ Select the ISO, select the USB stick, hit Start. Either tool handles
 the hybrid-ISO boot record correctly.
 
 ## 3. Boot the target
+
+### Pick the right boot-menu entry
+
+When the ISO boots, the menu shows:
+
+```
+DriveForge (standalone / operator)
+DriveForge Agent (auto-join fleet on this network)
+Manual Debian install (no preseed)
+```
+
+**First DriveForge box on your network?** Pick the default
+"DriveForge" entry. The setup wizard will let you choose Standalone
+or Operator on first boot.
+
+**Adding to an existing fleet?** Pick "DriveForge Agent." No wizard,
+no configuration — the box boots into candidate mode and waits for
+your operator to adopt it. (Operators adopt by clicking Enroll on
+Settings → Agents; see [Fleet mode](../operations/fleet.md) for
+the full flow.)
 
 ### Boot order
 
