@@ -291,11 +291,22 @@ async def _handle_session(
 
 async def _sender_loop(ws: WebSocket, outbound: asyncio.Queue) -> None:
     """Drain outbound_queue and write each JSON-encoded command to
-    the WebSocket. One task per active session."""
+    the WebSocket. One task per active session.
+
+    v0.11.5+ logs every drain at INFO so the operator's journal
+    confirms the bytes actually went out (paired with the queue
+    log in `send_command_to_agent`).
+    """
     while True:
         payload = await outbound.get()
         try:
+            # Truncate the logged payload so we don't dump entire
+            # snapshot bodies; first 80 chars is enough to see the
+            # msg type + cmd_id.
+            preview = payload[:80] + ("..." if len(payload) > 80 else "")
+            logger.info("fleet: sender drained queue → %s", preview)
             await ws.send_text(payload)
+            logger.info("fleet: sender ws.send_text OK (%d bytes)", len(payload))
         except Exception:  # noqa: BLE001
             logger.exception("fleet: sender_loop error; aborting session")
             return
@@ -631,6 +642,13 @@ async def send_command_to_agent(
     (no outbound queue — the session hasn't started OR was torn
     down). Callers should catch + surface a user-facing error
     ("agent X is offline — command not sent").
+
+    v0.11.5+: logs at INFO so the operator's journal carries an
+    audit trail of every command dispatched. Helped diagnose the
+    v0.11.4 fleet-push issue where the operator's `fleet_pushed=1`
+    counter said the put succeeded but the agent never received
+    the bytes — pre-v0.11.5 there was no log to confirm the put
+    actually happened or whether the sender_loop drained it.
     """
     ra = state.remote_agents.get(agent_id)
     if ra is None:
@@ -640,12 +658,17 @@ async def send_command_to_agent(
     # Queue full = agent can't drain. This only happens if the agent's
     # event loop is wedged or the connection is saturated; both are
     # weird enough that raising is the right behavior.
+    msg_type = getattr(command, "msg", "?")
     try:
         ra.outbound_queue.put_nowait(command.model_dump_json())
     except asyncio.QueueFull as exc:
         raise CommandDispatchError(
             f"agent {agent_id} outbound queue full (256 items)"
         ) from exc
+    logger.info(
+        "fleet: queued %s for agent %s (queue depth now %d)",
+        msg_type, agent_id, ra.outbound_queue.qsize(),
+    )
 
 
 def drain_command_failures(state: Any) -> list[Any]:
