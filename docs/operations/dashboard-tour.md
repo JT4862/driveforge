@@ -54,22 +54,32 @@ operator has at least one enrolled agent.
 
 ## Host badges on drive cards (operator mode)
 
-Remote drives carry a small **host badge** in the top-right of their
+Remote drives carry a small **host badge** at the top of their
 card showing the source agent's display name:
 
 ```
 ┌──────────────────────────────────────────────┐
-│                            [• r720-bench]    │  ← host badge
+│  [• r720-bench]                              │  ← host badge
 │  Western Digital                             │
-│  WDC WD4000FYYZ-01UL1B3                      │
+│  WDC WD4000FYYZ-01UL1B3              [Abort] │
 │  ...                                         │
 └──────────────────────────────────────────────┘
 ```
 
-The operator's own drives have no badge. Cards also gain a blue
-left border to signal "this drive is remote"; offline-host cards
-drop to muted gray. See [Fleet mode](fleet.md) for the full
-aggregation story.
+The badge is in normal card flow as of v0.11.9 (pre-v0.11.9 it was
+absolutely-positioned top-right and overlapped the Abort button on
+active cards). The operator's own drives have no badge. Cards also
+gain a blue left border to signal "this drive is remote"; offline-
+host cards drop to muted gray.
+
+Remote drive cards in the Installed section show **real test
+history** as of v0.11.9 — last grade, last tested timestamp,
+triage verdict, and SMART deltas — pulled from the operator's DB
+where the agent's completed runs land via cert forwarding. Pre-
+v0.11.9 these fields were hardcoded to None and the agent's drive
+showed as "idle · never tested" even right after a completed run.
+
+See [Fleet mode](fleet.md) for the full aggregation story.
 
 ## Active section
 

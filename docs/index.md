@@ -18,8 +18,13 @@ onto one dashboard — useful when you have spare servers that could
 burn-in drives but don't need their own UI. See
 [Fleet mode](operations/fleet.md) for the multi-node guide.
 
-**Full operator documentation as of v0.11.0.** Every page in the tree
-below has detailed content. For the architectural / design plan, see
+**Full operator documentation as of v0.11.11.** Every page in the tree
+below has detailed content. The v0.11.x series brought fleet mode to
+production-readiness — fleet-wide one-click updates with verified
+delivery, batch creation across multiple hosts, agent drives showing
+real test history on the operator dashboard, and remediation panels
+that work for both standalone and fleet drives. For the architectural
+/ design plan, see
 [`BUILD.md`](https://github.com/JT4862/driveforge/blob/main/BUILD.md)
 in the repo root — that's still the canonical place for "why is the
 system designed this way?" decisions.

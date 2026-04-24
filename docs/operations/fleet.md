@@ -255,16 +255,44 @@ drives:
 
 | Action | Forwards to agent? |
 |---|---|
-| Start a new batch | Yes — if any selected drives live on an agent |
+| Start a new batch | Yes — agent drives appear in the New Batch form alongside local drives (v0.11.7+); pick any combination across the fleet |
 | Abort a drive | Yes |
 | Identify / Stop Identify LED | Yes (toggle state read from the agent's latest snapshot) |
 | Regrade | Yes — agent runs the regrade locally against its SMART + source run |
+| Mark as unrecoverable | Yes (v0.11.10+) — operator clicks the button on a fleet drive's detail page; F-grade stamps via the operator's DB ingestion path; physical UNRECOVERABLE label prints on the operator's QL printer |
 
 Commands ride the same WebSocket as snapshots. Results arrive via
 `CommandResultMsg` frames; failures flash as warning banners on the
 operator dashboard ("abort refused on SERIAL: drive in secure_erase
 phase"). Successful commands just show the new state on the next
 snapshot (≤3 s later).
+
+### Batches that span the fleet (v0.11.9+)
+
+When the operator's New Batch form fans out across one local drive
+and one agent drive, both rows land under the same `batch_id` on
+the operator's batch detail page. Pre-v0.11.9 the agent's TestRun
+was orphaned (`batch_id=None`) and the batch view only listed local
+rows. Now `StartPipelineCmd` carries the operator-minted batch_id
+down to each agent, the agent's TestRun row joins back to the
+operator's Batch row on completion ingestion, and the batch view
+shows the full roster with host badges. Click into any row to see
+the per-drive run details.
+
+### Remediation panels for fleet drives (v0.11.10+)
+
+Both the v0.6.9 frozen-SSD remediation panel and the v0.9.0
+password-locked panel work for drives that live on agents. Pre-
+v0.11.10 the panel only rendered when the orchestrator-side state
+(in-memory `DaemonState.frozen_remediation`) had an entry — but the
+agent's orchestrator registers on the AGENT's state, not the
+operator's, so fleet drives silently lost their remediation panel
+on the operator. Same loss happened on standalone after a daemon
+restart (in-app update wiped the dict). The fix derives panel
+state from the latest TestRun's error pattern when no in-memory
+entry exists — both classes resolve cleanly now. The Mark-as-
+Unrecoverable button on either panel triggers the physical label
+print regardless of whether the drive lives locally or on an agent.
 
 ---
 
@@ -355,17 +383,29 @@ operator's Agents page is its own world.
 `driveforge-update.service` (polkit-authorized) works on every
 role, including agents. Three ways to update:
 
-1. **Per-box, via operator web UI**: operator can trigger updates
-   on its own.
-2. **Per-box, via CLI**: `sudo systemctl start driveforge-update.service`
-   on any agent or operator.
-3. **Fleet-wide**: in development — future release will add a
-   single "Update N agents" button that pushes the update to every
-   online agent simultaneously.
+1. **Fleet-wide, one click** (v0.11.4+, verified-delivery in v0.11.6+):
+   on the operator's Settings → Updates panel, click **Install update
+   now**. The operator broadcasts an `UpdateCmd` to every connected
+   agent, waits up to 5 seconds per agent for an ACK
+   (`CommandResultMsg`), then triggers its own update. Each agent
+   updates independently via its local
+   `driveforge-update.service`. The operator's redirect URL surfaces
+   `fleet_pushed=N&fleet_acked=M&fleet_failed=name1,name2` so the
+   Settings page can render a per-agent failure banner with manual
+   recovery commands. Failed/timed-out agents do NOT block the
+   operator's own update — they just appear in the failed list.
+2. **Per-box, via operator web UI**: visiting an individual agent
+   isn't possible (agents are headless), but the fleet-wide button
+   above is the supported path.
+3. **Per-box, via CLI**: `sudo systemctl start driveforge-update.service`
+   on any agent or operator. Useful when the in-app update path is
+   itself broken (rare — the v0.11.8 release fixed a class of dead-
+   button bugs caused by `window.confirm()` blocking, and v0.11.10
+   removed the same pattern from every other form across the app).
 
-For now, SSH to each box and run the update command, or roll a new
-ISO and reinstall via "DriveForge Agent" boot entry — the install
-preserves the existing agent token.
+The fleet-wide button is the documented happy path. SSH-as-fallback
+exists but should be needed only for bootstrap (installing the first
+update that itself fixes the in-app update path).
 
 ---
 

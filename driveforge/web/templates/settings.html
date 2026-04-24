@@ -88,432 +88,6 @@
   </div>
 </form>
 
-{# v0.10.0+ fleet entry point. v0.10.5+ gained an actual role
-   selector form — previously this panel just described the current
-   state + linked to /settings/agents, which meant operators had to
-   either re-run the setup wizard OR hand-edit YAML to flip roles
-   post-install. Now the form lives here; flipping role requires a
-   daemon restart (lifespan hooks are evaluated once at boot) so the
-   post-save banner nudges the operator toward that. #}
-<section class="panel">
-  <div class="panel-head">
-    <h2>Fleet</h2>
-    {% if saved_panel == "fleet_role" %}<span class="pill saved">saved</span>{% endif %}
-    {% if saved_panel == "fleet_role_invalid" %}<span class="pill" style="background: rgba(255,102,102,0.18); color: var(--fail);">invalid role</span>{% endif %}
-  </div>
-
-  {% if settings.fleet.role == "agent" %}
-  {# Agent nodes can't self-promote to operator via the web UI —
-     the long-lived operator credential they hold only authenticates
-     them as an agent. Detach first via CLI, then re-enroll or flip. #}
-  <p class="muted">
-    This node is a fleet <strong>agent</strong>, reporting to
-    <code>{{ settings.fleet.operator_url or "(not configured)" }}</code>.
-    Manage fleet membership on the operator's dashboard, or run
-    <code>sudo driveforge fleet leave</code> on this box to detach
-    and revert to standalone.
-  </p>
-  <p class="form-actions">
-    <a href="/settings/agents" class="btn">Open fleet page</a>
-  </p>
-  {% else %}
-  <form method="post" action="/settings/fleet-role">
-    <fieldset class="role-select" style="border: none; padding: 0; margin: 0;">
-      <legend class="muted small" style="margin-bottom: 8px;">Role for this DriveForge install</legend>
-
-      <label class="role-option" style="display: block; margin-bottom: 10px;">
-        <input type="radio" name="role" value="standalone"
-               {% if settings.fleet.role == "standalone" %}checked{% endif %}>
-        <strong>Standalone</strong>
-        <span class="muted small" style="display: block; margin-left: 22px;">
-          One box, one dashboard. Default for single-box installs.
-        </span>
-      </label>
-
-      <label class="role-option" style="display: block; margin-bottom: 10px;">
-        <input type="radio" name="role" value="operator"
-               {% if settings.fleet.role == "operator" %}checked{% endif %}>
-        <strong>Operator</strong>
-        <span class="muted small" style="display: block; margin-left: 22px;">
-          This node aggregates drives from one or more agent nodes
-          AND runs its own local pipeline. Enroll agents from
-          Settings &rarr; Agents after flipping + restarting.
-        </span>
-      </label>
-    </fieldset>
-
-    <p class="muted small" style="margin-top: 12px;">
-      <strong>Agent mode</strong> isn't set here — agents are born by
-      running <code>sudo driveforge fleet join &lt;operator_url&gt; &lt;token&gt;</code>
-      on the agent's console with a token minted on the operator's
-      Agents page.
-    </p>
-    <p class="muted small">
-      Switching role requires a daemon restart to take effect. The
-      <em>Install update now</em> button on this page restarts the
-      daemon; otherwise <code>sudo systemctl restart driveforge-daemon</code>
-      from a shell works.
-    </p>
-
-    <div class="form-actions" style="display: flex; gap: 10px; align-items: center;">
-      <button type="submit" class="btn primary">Save role</button>
-      {% if settings.fleet.role == "operator" %}
-      <a href="/settings/agents" class="btn">Manage agents &rarr;</a>
-      {% endif %}
-    </div>
-  </form>
-  {% endif %}
-</section>
-
-<form class="panel" method="post" action="/settings/grading">
-  <div class="panel-head">
-    <h2>Grading thresholds</h2>
-    {% if saved_panel == "grading" %}<span class="pill saved">saved</span>{% endif %}
-  </div>
-  <label class="field">
-    <span>Grade A — max reallocated sectors</span>
-    <input type="number" name="grade_a_reallocated_max" value="{{ settings.grading.grade_a_reallocated_max }}" min="0">
-  </label>
-  <label class="field">
-    <span>Grade B — max reallocated sectors</span>
-    <input type="number" name="grade_b_reallocated_max" value="{{ settings.grading.grade_b_reallocated_max }}" min="0">
-  </label>
-  <label class="field">
-    <span>Grade C — max reallocated sectors</span>
-    <input type="number" name="grade_c_reallocated_max" value="{{ settings.grading.grade_c_reallocated_max }}" min="0">
-  </label>
-  <label class="field checkbox">
-    <input type="checkbox" name="fail_on_pending_sectors"{% if settings.grading.fail_on_pending_sectors %} checked{% endif %}>
-    <span>Fail on any current-pending-sector count &gt; 0</span>
-  </label>
-  <label class="field checkbox">
-    <input type="checkbox" name="fail_on_offline_uncorrectable"{% if settings.grading.fail_on_offline_uncorrectable %} checked{% endif %}>
-    <span>Fail on any offline-uncorrectable count &gt; 0</span>
-  </label>
-  <label class="field">
-    <span>Thermal excursion — demote to C above this °C (blank to disable)</span>
-    <input type="number" name="thermal_excursion_c" value="{{ settings.grading.thermal_excursion_c or '' }}" min="0">
-  </label>
-
-  {# v0.8.0+ Buyer-transparency grading rules. Collapsible sections so
-     the main grading panel doesn't become a wall of inputs. Each
-     section has its own enable/disable toggle so operators can switch
-     off an entire category while tuning others. #}
-
-  <details class="grading-section" open>
-    <summary><strong>Age-based ceilings (power-on hours)</strong></summary>
-    <p class="muted small">
-      A drive can accumulate clean SMART counters while still being at the end
-      of its design life. These ceilings cap grade by age: demoted but not
-      auto-failed unless the hard threshold below is set.
-    </p>
-    <label class="field checkbox">
-      <input type="checkbox" name="age_ceiling_enabled"{% if settings.grading.age_ceiling_enabled %} checked{% endif %}>
-      <span>Enable age-based ceilings</span>
-    </label>
-    <label class="field">
-      <span>Can't be A above N hours (~4 yrs 24/7 = 35,040)</span>
-      <input type="number" name="poh_a_ceiling_hours" value="{{ settings.grading.poh_a_ceiling_hours }}" min="0">
-    </label>
-    <label class="field">
-      <span>Can't be B above N hours (~7 yrs 24/7 = 61,320)</span>
-      <input type="number" name="poh_b_ceiling_hours" value="{{ settings.grading.poh_b_ceiling_hours }}" min="0">
-    </label>
-    <label class="field">
-      <span>Auto-fail above N hours (blank to disable)</span>
-      <input type="number" name="poh_fail_hours" value="{{ settings.grading.poh_fail_hours or '' }}" min="0">
-    </label>
-  </details>
-
-  <details class="grading-section" open>
-    <summary><strong>Workload ceilings (lifetime writes vs rated TBW)</strong></summary>
-    <p class="muted small">
-      Compares lifetime host writes against the drive's class-rated workload.
-      Classes are auto-detected from model + transport + rotation rate;
-      ambiguous drives default to the consumer tier for their media type
-      (tighter ceiling — safer for refurb grading).
-    </p>
-    <label class="field checkbox">
-      <input type="checkbox" name="workload_ceiling_enabled"{% if settings.grading.workload_ceiling_enabled %} checked{% endif %}>
-      <span>Enable workload ceilings</span>
-    </label>
-    <label class="field">
-      <span>Can't be A above % of rated TBW</span>
-      <input type="number" name="workload_a_ceiling_pct" value="{{ settings.grading.workload_a_ceiling_pct }}" min="1" max="500">
-    </label>
-    <label class="field">
-      <span>Can't be B above % of rated TBW</span>
-      <input type="number" name="workload_b_ceiling_pct" value="{{ settings.grading.workload_b_ceiling_pct }}" min="1" max="500">
-    </label>
-    <label class="field">
-      <span>Auto-fail above % of rated TBW</span>
-      <input type="number" name="workload_fail_pct" value="{{ settings.grading.workload_fail_pct }}" min="1" max="1000">
-    </label>
-    <p class="muted small" style="margin-top: 14px;">
-      <strong>Rated lifetime writes per drive class (TB):</strong>
-      Sane defaults based on typical market 5-year design life (550 TB/yr
-      enterprise HDD, 55 TB/yr consumer HDD, etc). Adjust for your
-      specific SKUs if you know better.
-    </p>
-    <label class="field">
-      <span>Enterprise HDD rated TBW</span>
-      <input type="number" name="rated_tbw_enterprise_hdd" value="{{ settings.grading.rated_tbw_enterprise_hdd }}" min="1">
-    </label>
-    <label class="field">
-      <span>Enterprise SSD rated TBW</span>
-      <input type="number" name="rated_tbw_enterprise_ssd" value="{{ settings.grading.rated_tbw_enterprise_ssd }}" min="1">
-    </label>
-    <label class="field">
-      <span>Consumer HDD rated TBW</span>
-      <input type="number" name="rated_tbw_consumer_hdd" value="{{ settings.grading.rated_tbw_consumer_hdd }}" min="1">
-    </label>
-    <label class="field">
-      <span>Consumer SSD rated TBW</span>
-      <input type="number" name="rated_tbw_consumer_ssd" value="{{ settings.grading.rated_tbw_consumer_ssd }}" min="1">
-    </label>
-  </details>
-
-  <details class="grading-section" open>
-    <summary><strong>SSD wear ceilings</strong></summary>
-    <p class="muted small">
-      SSDs expose a 0–100% "wear indicator" (NVMe <code>percentage_used</code>
-      or SATA attrs 233/177/231/169). HDDs have no equivalent — these rules
-      no-op on spinners.
-    </p>
-    <label class="field checkbox">
-      <input type="checkbox" name="ssd_wear_ceiling_enabled"{% if settings.grading.ssd_wear_ceiling_enabled %} checked{% endif %}>
-      <span>Enable SSD wear ceilings</span>
-    </label>
-    <label class="field">
-      <span>Can't be A above % wear used</span>
-      <input type="number" name="ssd_wear_a_ceiling_pct" value="{{ settings.grading.ssd_wear_a_ceiling_pct }}" min="0" max="100">
-    </label>
-    <label class="field">
-      <span>Can't be B above % wear used</span>
-      <input type="number" name="ssd_wear_b_ceiling_pct" value="{{ settings.grading.ssd_wear_b_ceiling_pct }}" min="0" max="100">
-    </label>
-    <label class="field">
-      <span>Auto-fail above % wear used</span>
-      <input type="number" name="ssd_wear_fail_pct" value="{{ settings.grading.ssd_wear_fail_pct }}" min="0" max="100">
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="fail_on_low_nvme_spare"{% if settings.grading.fail_on_low_nvme_spare %} checked{% endif %}>
-      <span>Auto-fail when NVMe <code>available_spare</code> drops below the drive's own threshold</span>
-    </label>
-  </details>
-
-  <details class="grading-section" open>
-    <summary><strong>Error-based auto-fail / ceiling rules</strong></summary>
-    <p class="muted small">
-      Individual drive-reported error signals. All disableable individually
-      so operators can soften specific flags without turning off the category.
-    </p>
-    <label class="field checkbox">
-      <input type="checkbox" name="error_rules_enabled"{% if settings.grading.error_rules_enabled %} checked{% endif %}>
-      <span>Enable error-based rules</span>
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="fail_on_end_to_end_error"{% if settings.grading.fail_on_end_to_end_error %} checked{% endif %}>
-      <span>Fail on SATA end-to-end error (attr 184) &gt; 0</span>
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="fail_on_nvme_critical_warning"{% if settings.grading.fail_on_nvme_critical_warning %} checked{% endif %}>
-      <span>Fail on any NVMe <code>critical_warning</code> bit set</span>
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="cap_c_on_nvme_media_errors"{% if settings.grading.cap_c_on_nvme_media_errors %} checked{% endif %}>
-      <span>Cap at C when NVMe <code>media_errors</code> &gt; 0</span>
-    </label>
-    <label class="field">
-      <span>Cap at B when SATA command-timeout count (attr 188) exceeds</span>
-      <input type="number" name="command_timeout_b_ceiling" value="{{ settings.grading.command_timeout_b_ceiling }}" min="0">
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="cap_c_on_past_self_test_failure"{% if settings.grading.cap_c_on_past_self_test_failure %} checked{% endif %}>
-      <span>Cap at C when the drive's own self-test log shows a past failure</span>
-    </label>
-  </details>
-
-  <div class="form-actions">
-    <button type="submit" class="btn primary">Save grading</button>
-  </div>
-</form>
-
-<section class="panel">
-  <div class="panel-head">
-    <h2>Printer</h2>
-    {% if saved_panel == "printer" %}<span class="pill saved">saved</span>{% endif %}
-    {% if saved_panel == "test_print" %}<span class="pill" style="background: rgba(63,185,80,0.18); color: var(--ok);">sent to printer</span>{% endif %}
-  </div>
-
-  {% if test_print_error %}
-  <div class="banner warn-banner" style="margin-bottom: 14px;">
-    &#9888; <strong>Test print failed:</strong> {{ test_print_error }}
-  </div>
-  {% endif %}
-
-  <form method="post" action="/settings/printer">
-    <label class="field">
-      <span>Model</span>
-      {# v0.6.1: model values are exact brother_ql identifiers — pre-
-         v0.6.1 offered QL-820NWBc / QL-1110NWBc which brother_ql's
-         library rejects (BrotherQLUnknownModel → 500). The labels
-         include the "c" suffix variants for operator recognition
-         since that's what's printed on many physical units. #}
-      <select name="model">
-        <option value="">— not configured —</option>
-        <option value="QL-800"{% if settings.printer.model == "QL-800" %} selected{% endif %}>QL-800</option>
-        <option value="QL-810W"{% if settings.printer.model == "QL-810W" %} selected{% endif %}>QL-810W</option>
-        <option value="QL-820NWB"{% if settings.printer.model == "QL-820NWB" %} selected{% endif %}>QL-820NWB / QL-820NWBc</option>
-      </select>
-      <p class="muted small" style="margin-top: 4px;">
-        The QL-1100 / QL-1110NWB aren't offered here because
-        <code>brother_ql</code>, the raster library we ship with, doesn't
-        recognize those models. Support requires a library upgrade; the
-        800-series covers most DriveForge deployments.
-      </p>
-    </label>
-    <label class="field">
-      <span>Connection</span>
-      <select name="connection" id="printer-connection-select">
-        {% for c in ["usb", "network", "bluetooth"] %}
-        <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
-        {% endfor %}
-        <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
-      </select>
-    </label>
-    {# v0.7.0+ Network connection fields. Shown only when connection=
-       "network". Tiny inline script at the bottom of this panel
-       toggles visibility on select change. Values always round-trip
-       on save (see routes.py::save_printer) so switching usb → network
-       → usb doesn't lose what the operator typed. #}
-    <div class="field-group printer-network-fields"
-         id="printer-network-fields"
-         style="{% if settings.printer.connection != 'network' %}display: none;{% endif %}">
-      <label class="field">
-        <span>Printer IP / hostname</span>
-        <input type="text" name="network_host"
-               placeholder="e.g. 10.10.10.42 or ql820.local"
-               value="{{ settings.printer.network_host or '' }}">
-      </label>
-      <label class="field">
-        <span>TCP port</span>
-        <input type="number" name="network_port" min="1" max="65535"
-               value="{{ settings.printer.network_port or 9100 }}">
-      </label>
-      <p class="muted small" style="margin-top: 4px;">
-        Brother QL-820NWB and other network-capable QL models listen on
-        TCP 9100 by default. Find the printer's IP from its LCD menu
-        (WLAN → TCP/IP → IP Address) or your DHCP lease list. Test Print
-        below verifies reachability + data dispatch in one click.
-      </p>
-    </div>
-    <label class="field">
-      <span>Label roll</span>
-      <select name="label_roll">
-        <option value="">— auto-detect (QL-820/810/1100 only) —</option>
-        {% for r in ["DK-1209", "DK-1208", "DK-1201", "DK-1221", "DK-22210"] %}
-        <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field checkbox">
-      <input type="checkbox" name="auto_print"{% if settings.printer.auto_print %} checked{% endif %}>
-      <span>Auto-print cert label on pipeline completion (v0.6.4+)</span>
-    </label>
-    <p class="muted small">
-      When enabled, DriveForge auto-prints the cert sticker as soon as a drive's
-      full pipeline finishes grading. Applies to pass AND fail tiers (both
-      produce a sticker with the grade). Quick-pass triage runs don't print
-      &mdash; they produce a verdict, not a cert. You can still click Print
-      Label on the drive detail page any time for a reprint.
-    </p>
-    <div class="form-actions">
-      <button type="submit" class="btn primary">Save printer</button>
-    </div>
-  </form>
-
-  {# v0.6.1+ Test print button. Shown only after model + connection are
-     saved so there's something real to dispatch. Uses a separate
-     <form> rather than a second submit on the save form so clicking
-     Test Print can't accidentally re-save unsaved dropdown edits. #}
-  {% if settings.printer.model %}
-  <form method="post" action="/settings/test-print"
-        style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--panel-border);">
-    <div style="display: flex; gap: 12px; align-items: center;">
-      <button type="submit" class="btn">Test print</button>
-      <span class="muted small">
-        Prints a sentinel label (dummy serial "TEST-PRINT", grade A) using the
-        currently-saved settings &mdash; useful for verifying the printer is
-        wired up before committing a real cert. v0.6.1+.
-      </span>
-    </div>
-
-    {# v0.6.2+ template-mode hint. Brother QL printers ship (or get
-       left) in "template mode" — a Brother-proprietary ESC/P command
-       mode for their P-touch Editor software. The brother_ql library
-       only speaks raster; any QL left in template mode silently
-       discards the raster bytes and prints nothing. This bit JT's
-       QL-820NWB during v0.6.1 validation — collapsed by default so
-       it's not noise for operators whose printers already work. #}
-    <details class="printer-troubleshoot" style="margin-top: 10px;">
-      <summary class="muted small">Not printing? Check raster mode &mdash; Brother QLs default to template mode</summary>
-      <p class="muted small" style="margin-top: 8px; line-height: 1.5;">
-        Brother QL printers have two command modes: <strong>raster</strong>
-        (what DriveForge sends) and <strong>template</strong> (Brother's
-        P-touch Editor pre-stored templates). A printer in template mode
-        silently discards raster data &mdash; you see "Printing was
-        successful" in the daemon log but nothing comes out.
-      </p>
-      <p class="muted small">
-        Switch to raster mode via the printer's physical menu:
-        <strong>Setup &rarr; Command Mode &rarr; Raster</strong> on the
-        QL-820NWB (path varies by model &mdash; consult the Brother user
-        guide). Power-cycle the printer once changed.
-      </p>
-    </details>
-  </form>
-  {% else %}
-  <p class="muted small" style="margin-top: 12px;">
-    Save a printer model above to enable the Test print button.
-  </p>
-  {% endif %}
-
-  {# v0.7.0+ Show/hide the network-printer fields based on the
-     Connection select. Tiny vanilla-JS — no framework, no htmx, no
-     extra render. Deliberately inline here because it's one
-     selector + one style toggle and has no reuse outside this
-     panel. #}
-  <script>
-    (function () {
-      var sel = document.getElementById('printer-connection-select');
-      var fields = document.getElementById('printer-network-fields');
-      if (!sel || !fields) { return; }
-      sel.addEventListener('change', function () {
-        fields.style.display = (sel.value === 'network') ? '' : 'none';
-      });
-    })();
-  </script>
-</section>
-
-<form class="panel" method="post" action="/settings/integrations">
-  <div class="panel-head">
-    <h2>Integrations</h2>
-    {% if saved_panel == "integrations" %}<span class="pill saved">saved</span>{% endif %}
-  </div>
-  <label class="field">
-    <span>Outbound webhook URL</span>
-    <input type="url" name="webhook_url" value="{{ settings.integrations.webhook_url or '' }}" placeholder="https://n8n.example.com/webhook/driveforge">
-  </label>
-  <label class="field">
-    <span>Cloudflare Tunnel hostname</span>
-    <input type="text" name="cloudflare_tunnel_hostname" value="{{ settings.integrations.cloudflare_tunnel_hostname or '' }}" placeholder="driveforge.example.com">
-  </label>
-  <div class="form-actions">
-    <button type="submit" class="btn primary">Save integrations</button>
-  </div>
-</form>
-
 <section class="panel">
   <div class="panel-head">
     <h2>About / Updates</h2>
@@ -758,6 +332,432 @@
 })();
 </script>
 {% endif %}
+
+{# v0.10.0+ fleet entry point. v0.10.5+ gained an actual role
+   selector form — previously this panel just described the current
+   state + linked to /settings/agents, which meant operators had to
+   either re-run the setup wizard OR hand-edit YAML to flip roles
+   post-install. Now the form lives here; flipping role requires a
+   daemon restart (lifespan hooks are evaluated once at boot) so the
+   post-save banner nudges the operator toward that. #}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Fleet</h2>
+    {% if saved_panel == "fleet_role" %}<span class="pill saved">saved</span>{% endif %}
+    {% if saved_panel == "fleet_role_invalid" %}<span class="pill" style="background: rgba(255,102,102,0.18); color: var(--fail);">invalid role</span>{% endif %}
+  </div>
+
+  {% if settings.fleet.role == "agent" %}
+  {# Agent nodes can't self-promote to operator via the web UI —
+     the long-lived operator credential they hold only authenticates
+     them as an agent. Detach first via CLI, then re-enroll or flip. #}
+  <p class="muted">
+    This node is a fleet <strong>agent</strong>, reporting to
+    <code>{{ settings.fleet.operator_url or "(not configured)" }}</code>.
+    Manage fleet membership on the operator's dashboard, or run
+    <code>sudo driveforge fleet leave</code> on this box to detach
+    and revert to standalone.
+  </p>
+  <p class="form-actions">
+    <a href="/settings/agents" class="btn">Open fleet page</a>
+  </p>
+  {% else %}
+  <form method="post" action="/settings/fleet-role">
+    <fieldset class="role-select" style="border: none; padding: 0; margin: 0;">
+      <legend class="muted small" style="margin-bottom: 8px;">Role for this DriveForge install</legend>
+
+      <label class="role-option" style="display: block; margin-bottom: 10px;">
+        <input type="radio" name="role" value="standalone"
+               {% if settings.fleet.role == "standalone" %}checked{% endif %}>
+        <strong>Standalone</strong>
+        <span class="muted small" style="display: block; margin-left: 22px;">
+          One box, one dashboard. Default for single-box installs.
+        </span>
+      </label>
+
+      <label class="role-option" style="display: block; margin-bottom: 10px;">
+        <input type="radio" name="role" value="operator"
+               {% if settings.fleet.role == "operator" %}checked{% endif %}>
+        <strong>Operator</strong>
+        <span class="muted small" style="display: block; margin-left: 22px;">
+          This node aggregates drives from one or more agent nodes
+          AND runs its own local pipeline. Enroll agents from
+          Settings &rarr; Agents after flipping + restarting.
+        </span>
+      </label>
+    </fieldset>
+
+    <p class="muted small" style="margin-top: 12px;">
+      <strong>Agent mode</strong> isn't set here — agents are born by
+      running <code>sudo driveforge fleet join &lt;operator_url&gt; &lt;token&gt;</code>
+      on the agent's console with a token minted on the operator's
+      Agents page.
+    </p>
+    <p class="muted small">
+      Switching role requires a daemon restart to take effect. The
+      <em>Install update now</em> button on this page restarts the
+      daemon; otherwise <code>sudo systemctl restart driveforge-daemon</code>
+      from a shell works.
+    </p>
+
+    <div class="form-actions" style="display: flex; gap: 10px; align-items: center;">
+      <button type="submit" class="btn primary">Save role</button>
+      {% if settings.fleet.role == "operator" %}
+      <a href="/settings/agents" class="btn">Manage agents &rarr;</a>
+      {% endif %}
+    </div>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Printer</h2>
+    {% if saved_panel == "printer" %}<span class="pill saved">saved</span>{% endif %}
+    {% if saved_panel == "test_print" %}<span class="pill" style="background: rgba(63,185,80,0.18); color: var(--ok);">sent to printer</span>{% endif %}
+  </div>
+
+  {% if test_print_error %}
+  <div class="banner warn-banner" style="margin-bottom: 14px;">
+    &#9888; <strong>Test print failed:</strong> {{ test_print_error }}
+  </div>
+  {% endif %}
+
+  <form method="post" action="/settings/printer">
+    <label class="field">
+      <span>Model</span>
+      {# v0.6.1: model values are exact brother_ql identifiers — pre-
+         v0.6.1 offered QL-820NWBc / QL-1110NWBc which brother_ql's
+         library rejects (BrotherQLUnknownModel → 500). The labels
+         include the "c" suffix variants for operator recognition
+         since that's what's printed on many physical units. #}
+      <select name="model">
+        <option value="">— not configured —</option>
+        <option value="QL-800"{% if settings.printer.model == "QL-800" %} selected{% endif %}>QL-800</option>
+        <option value="QL-810W"{% if settings.printer.model == "QL-810W" %} selected{% endif %}>QL-810W</option>
+        <option value="QL-820NWB"{% if settings.printer.model == "QL-820NWB" %} selected{% endif %}>QL-820NWB / QL-820NWBc</option>
+      </select>
+      <p class="muted small" style="margin-top: 4px;">
+        The QL-1100 / QL-1110NWB aren't offered here because
+        <code>brother_ql</code>, the raster library we ship with, doesn't
+        recognize those models. Support requires a library upgrade; the
+        800-series covers most DriveForge deployments.
+      </p>
+    </label>
+    <label class="field">
+      <span>Connection</span>
+      <select name="connection" id="printer-connection-select">
+        {% for c in ["usb", "network", "bluetooth"] %}
+        <option value="{{ c }}"{% if settings.printer.connection == c %} selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+        <option value="file"{% if settings.printer.connection == "file" %} selected{% endif %}>file — dev preview (saves PNG to /tmp, no hardware needed)</option>
+      </select>
+    </label>
+    {# v0.7.0+ Network connection fields. Shown only when connection=
+       "network". Tiny inline script at the bottom of this panel
+       toggles visibility on select change. Values always round-trip
+       on save (see routes.py::save_printer) so switching usb → network
+       → usb doesn't lose what the operator typed. #}
+    <div class="field-group printer-network-fields"
+         id="printer-network-fields"
+         style="{% if settings.printer.connection != 'network' %}display: none;{% endif %}">
+      <label class="field">
+        <span>Printer IP / hostname</span>
+        <input type="text" name="network_host"
+               placeholder="e.g. 10.10.10.42 or ql820.local"
+               value="{{ settings.printer.network_host or '' }}">
+      </label>
+      <label class="field">
+        <span>TCP port</span>
+        <input type="number" name="network_port" min="1" max="65535"
+               value="{{ settings.printer.network_port or 9100 }}">
+      </label>
+      <p class="muted small" style="margin-top: 4px;">
+        Brother QL-820NWB and other network-capable QL models listen on
+        TCP 9100 by default. Find the printer's IP from its LCD menu
+        (WLAN → TCP/IP → IP Address) or your DHCP lease list. Test Print
+        below verifies reachability + data dispatch in one click.
+      </p>
+    </div>
+    <label class="field">
+      <span>Label roll</span>
+      <select name="label_roll">
+        <option value="">— auto-detect (QL-820/810/1100 only) —</option>
+        {% for r in ["DK-1209", "DK-1208", "DK-1201", "DK-1221", "DK-22210"] %}
+        <option value="{{ r }}"{% if settings.printer.label_roll == r %} selected{% endif %}>{{ r }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="auto_print"{% if settings.printer.auto_print %} checked{% endif %}>
+      <span>Auto-print cert label on pipeline completion (v0.6.4+)</span>
+    </label>
+    <p class="muted small">
+      When enabled, DriveForge auto-prints the cert sticker as soon as a drive's
+      full pipeline finishes grading. Applies to pass AND fail tiers (both
+      produce a sticker with the grade). Quick-pass triage runs don't print
+      &mdash; they produce a verdict, not a cert. You can still click Print
+      Label on the drive detail page any time for a reprint.
+    </p>
+    <div class="form-actions">
+      <button type="submit" class="btn primary">Save printer</button>
+    </div>
+  </form>
+
+  {# v0.6.1+ Test print button. Shown only after model + connection are
+     saved so there's something real to dispatch. Uses a separate
+     <form> rather than a second submit on the save form so clicking
+     Test Print can't accidentally re-save unsaved dropdown edits. #}
+  {% if settings.printer.model %}
+  <form method="post" action="/settings/test-print"
+        style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--panel-border);">
+    <div style="display: flex; gap: 12px; align-items: center;">
+      <button type="submit" class="btn">Test print</button>
+      <span class="muted small">
+        Prints a sentinel label (dummy serial "TEST-PRINT", grade A) using the
+        currently-saved settings &mdash; useful for verifying the printer is
+        wired up before committing a real cert. v0.6.1+.
+      </span>
+    </div>
+
+    {# v0.6.2+ template-mode hint. Brother QL printers ship (or get
+       left) in "template mode" — a Brother-proprietary ESC/P command
+       mode for their P-touch Editor software. The brother_ql library
+       only speaks raster; any QL left in template mode silently
+       discards the raster bytes and prints nothing. This bit JT's
+       QL-820NWB during v0.6.1 validation — collapsed by default so
+       it's not noise for operators whose printers already work. #}
+    <details class="printer-troubleshoot" style="margin-top: 10px;">
+      <summary class="muted small">Not printing? Check raster mode &mdash; Brother QLs default to template mode</summary>
+      <p class="muted small" style="margin-top: 8px; line-height: 1.5;">
+        Brother QL printers have two command modes: <strong>raster</strong>
+        (what DriveForge sends) and <strong>template</strong> (Brother's
+        P-touch Editor pre-stored templates). A printer in template mode
+        silently discards raster data &mdash; you see "Printing was
+        successful" in the daemon log but nothing comes out.
+      </p>
+      <p class="muted small">
+        Switch to raster mode via the printer's physical menu:
+        <strong>Setup &rarr; Command Mode &rarr; Raster</strong> on the
+        QL-820NWB (path varies by model &mdash; consult the Brother user
+        guide). Power-cycle the printer once changed.
+      </p>
+    </details>
+  </form>
+  {% else %}
+  <p class="muted small" style="margin-top: 12px;">
+    Save a printer model above to enable the Test print button.
+  </p>
+  {% endif %}
+
+  {# v0.7.0+ Show/hide the network-printer fields based on the
+     Connection select. Tiny vanilla-JS — no framework, no htmx, no
+     extra render. Deliberately inline here because it's one
+     selector + one style toggle and has no reuse outside this
+     panel. #}
+  <script>
+    (function () {
+      var sel = document.getElementById('printer-connection-select');
+      var fields = document.getElementById('printer-network-fields');
+      if (!sel || !fields) { return; }
+      sel.addEventListener('change', function () {
+        fields.style.display = (sel.value === 'network') ? '' : 'none';
+      });
+    })();
+  </script>
+</section>
+
+<form class="panel" method="post" action="/settings/grading">
+  <div class="panel-head">
+    <h2>Grading thresholds</h2>
+    {% if saved_panel == "grading" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Grade A — max reallocated sectors</span>
+    <input type="number" name="grade_a_reallocated_max" value="{{ settings.grading.grade_a_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade B — max reallocated sectors</span>
+    <input type="number" name="grade_b_reallocated_max" value="{{ settings.grading.grade_b_reallocated_max }}" min="0">
+  </label>
+  <label class="field">
+    <span>Grade C — max reallocated sectors</span>
+    <input type="number" name="grade_c_reallocated_max" value="{{ settings.grading.grade_c_reallocated_max }}" min="0">
+  </label>
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_pending_sectors"{% if settings.grading.fail_on_pending_sectors %} checked{% endif %}>
+    <span>Fail on any current-pending-sector count &gt; 0</span>
+  </label>
+  <label class="field checkbox">
+    <input type="checkbox" name="fail_on_offline_uncorrectable"{% if settings.grading.fail_on_offline_uncorrectable %} checked{% endif %}>
+    <span>Fail on any offline-uncorrectable count &gt; 0</span>
+  </label>
+  <label class="field">
+    <span>Thermal excursion — demote to C above this °C (blank to disable)</span>
+    <input type="number" name="thermal_excursion_c" value="{{ settings.grading.thermal_excursion_c or '' }}" min="0">
+  </label>
+
+  {# v0.8.0+ Buyer-transparency grading rules. Collapsible sections so
+     the main grading panel doesn't become a wall of inputs. Each
+     section has its own enable/disable toggle so operators can switch
+     off an entire category while tuning others. #}
+
+  <details class="grading-section" open>
+    <summary><strong>Age-based ceilings (power-on hours)</strong></summary>
+    <p class="muted small">
+      A drive can accumulate clean SMART counters while still being at the end
+      of its design life. These ceilings cap grade by age: demoted but not
+      auto-failed unless the hard threshold below is set.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="age_ceiling_enabled"{% if settings.grading.age_ceiling_enabled %} checked{% endif %}>
+      <span>Enable age-based ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above N hours (~4 yrs 24/7 = 35,040)</span>
+      <input type="number" name="poh_a_ceiling_hours" value="{{ settings.grading.poh_a_ceiling_hours }}" min="0">
+    </label>
+    <label class="field">
+      <span>Can't be B above N hours (~7 yrs 24/7 = 61,320)</span>
+      <input type="number" name="poh_b_ceiling_hours" value="{{ settings.grading.poh_b_ceiling_hours }}" min="0">
+    </label>
+    <label class="field">
+      <span>Auto-fail above N hours (blank to disable)</span>
+      <input type="number" name="poh_fail_hours" value="{{ settings.grading.poh_fail_hours or '' }}" min="0">
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>Workload ceilings (lifetime writes vs rated TBW)</strong></summary>
+    <p class="muted small">
+      Compares lifetime host writes against the drive's class-rated workload.
+      Classes are auto-detected from model + transport + rotation rate;
+      ambiguous drives default to the consumer tier for their media type
+      (tighter ceiling — safer for refurb grading).
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="workload_ceiling_enabled"{% if settings.grading.workload_ceiling_enabled %} checked{% endif %}>
+      <span>Enable workload ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above % of rated TBW</span>
+      <input type="number" name="workload_a_ceiling_pct" value="{{ settings.grading.workload_a_ceiling_pct }}" min="1" max="500">
+    </label>
+    <label class="field">
+      <span>Can't be B above % of rated TBW</span>
+      <input type="number" name="workload_b_ceiling_pct" value="{{ settings.grading.workload_b_ceiling_pct }}" min="1" max="500">
+    </label>
+    <label class="field">
+      <span>Auto-fail above % of rated TBW</span>
+      <input type="number" name="workload_fail_pct" value="{{ settings.grading.workload_fail_pct }}" min="1" max="1000">
+    </label>
+    <p class="muted small" style="margin-top: 14px;">
+      <strong>Rated lifetime writes per drive class (TB):</strong>
+      Sane defaults based on typical market 5-year design life (550 TB/yr
+      enterprise HDD, 55 TB/yr consumer HDD, etc). Adjust for your
+      specific SKUs if you know better.
+    </p>
+    <label class="field">
+      <span>Enterprise HDD rated TBW</span>
+      <input type="number" name="rated_tbw_enterprise_hdd" value="{{ settings.grading.rated_tbw_enterprise_hdd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Enterprise SSD rated TBW</span>
+      <input type="number" name="rated_tbw_enterprise_ssd" value="{{ settings.grading.rated_tbw_enterprise_ssd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Consumer HDD rated TBW</span>
+      <input type="number" name="rated_tbw_consumer_hdd" value="{{ settings.grading.rated_tbw_consumer_hdd }}" min="1">
+    </label>
+    <label class="field">
+      <span>Consumer SSD rated TBW</span>
+      <input type="number" name="rated_tbw_consumer_ssd" value="{{ settings.grading.rated_tbw_consumer_ssd }}" min="1">
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>SSD wear ceilings</strong></summary>
+    <p class="muted small">
+      SSDs expose a 0–100% "wear indicator" (NVMe <code>percentage_used</code>
+      or SATA attrs 233/177/231/169). HDDs have no equivalent — these rules
+      no-op on spinners.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="ssd_wear_ceiling_enabled"{% if settings.grading.ssd_wear_ceiling_enabled %} checked{% endif %}>
+      <span>Enable SSD wear ceilings</span>
+    </label>
+    <label class="field">
+      <span>Can't be A above % wear used</span>
+      <input type="number" name="ssd_wear_a_ceiling_pct" value="{{ settings.grading.ssd_wear_a_ceiling_pct }}" min="0" max="100">
+    </label>
+    <label class="field">
+      <span>Can't be B above % wear used</span>
+      <input type="number" name="ssd_wear_b_ceiling_pct" value="{{ settings.grading.ssd_wear_b_ceiling_pct }}" min="0" max="100">
+    </label>
+    <label class="field">
+      <span>Auto-fail above % wear used</span>
+      <input type="number" name="ssd_wear_fail_pct" value="{{ settings.grading.ssd_wear_fail_pct }}" min="0" max="100">
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_low_nvme_spare"{% if settings.grading.fail_on_low_nvme_spare %} checked{% endif %}>
+      <span>Auto-fail when NVMe <code>available_spare</code> drops below the drive's own threshold</span>
+    </label>
+  </details>
+
+  <details class="grading-section" open>
+    <summary><strong>Error-based auto-fail / ceiling rules</strong></summary>
+    <p class="muted small">
+      Individual drive-reported error signals. All disableable individually
+      so operators can soften specific flags without turning off the category.
+    </p>
+    <label class="field checkbox">
+      <input type="checkbox" name="error_rules_enabled"{% if settings.grading.error_rules_enabled %} checked{% endif %}>
+      <span>Enable error-based rules</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_end_to_end_error"{% if settings.grading.fail_on_end_to_end_error %} checked{% endif %}>
+      <span>Fail on SATA end-to-end error (attr 184) &gt; 0</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="fail_on_nvme_critical_warning"{% if settings.grading.fail_on_nvme_critical_warning %} checked{% endif %}>
+      <span>Fail on any NVMe <code>critical_warning</code> bit set</span>
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="cap_c_on_nvme_media_errors"{% if settings.grading.cap_c_on_nvme_media_errors %} checked{% endif %}>
+      <span>Cap at C when NVMe <code>media_errors</code> &gt; 0</span>
+    </label>
+    <label class="field">
+      <span>Cap at B when SATA command-timeout count (attr 188) exceeds</span>
+      <input type="number" name="command_timeout_b_ceiling" value="{{ settings.grading.command_timeout_b_ceiling }}" min="0">
+    </label>
+    <label class="field checkbox">
+      <input type="checkbox" name="cap_c_on_past_self_test_failure"{% if settings.grading.cap_c_on_past_self_test_failure %} checked{% endif %}>
+      <span>Cap at C when the drive's own self-test log shows a past failure</span>
+    </label>
+  </details>
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save grading</button>
+  </div>
+</form>
+
+<form class="panel" method="post" action="/settings/integrations">
+  <div class="panel-head">
+    <h2>Integrations</h2>
+    {% if saved_panel == "integrations" %}<span class="pill saved">saved</span>{% endif %}
+  </div>
+  <label class="field">
+    <span>Outbound webhook URL</span>
+    <input type="url" name="webhook_url" value="{{ settings.integrations.webhook_url or '' }}" placeholder="https://n8n.example.com/webhook/driveforge">
+  </label>
+  <label class="field">
+    <span>Cloudflare Tunnel hostname</span>
+    <input type="text" name="cloudflare_tunnel_hostname" value="{{ settings.integrations.cloudflare_tunnel_hostname or '' }}" placeholder="driveforge.example.com">
+  </label>
+  <div class="form-actions">
+    <button type="submit" class="btn primary">Save integrations</button>
+  </div>
+</form>
 
 <form class="panel" method="post" action="/settings/daemon">
   <div class="panel-head">
