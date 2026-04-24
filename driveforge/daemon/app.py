@@ -289,7 +289,21 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     # a drive that graded A in the morning would re-run itself on
     # afternoon shelf-check. That's the opposite of what operators
     # want.
-    mode = (state.settings.daemon.auto_enroll_mode or "off").lower()
+    # v0.10.9+ — agents use the operator's fleet-wide auto_enroll_mode,
+    # not their own local config. Pre-v0.10.9 each agent had a
+    # separate toggle (invisible since v0.10.7 locked down the agent
+    # UI), which meant an old cached "full" on the agent kept
+    # auto-starting pipelines even when the operator had "off."
+    #
+    # Standalone + operator roles: local config remains authoritative.
+    # Agent role: operator's cached value, falling back to "off" if
+    # the handshake hasn't happened yet (fail-closed — never auto-
+    # start a pipeline without the operator's explicit green light).
+    if state.settings.fleet.role == "agent":
+        effective = state.fleet_operator_auto_enroll_mode or "off"
+    else:
+        effective = state.settings.daemon.auto_enroll_mode or "off"
+    mode = effective.lower()
     if mode not in ("quick", "full"):
         return
     if match.serial in state.active_phase:

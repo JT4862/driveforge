@@ -131,6 +131,28 @@ class HelloAckMsg(BaseModel):
     # this carries the reason and the agent should not retry without
     # operator intervention. Present only on a refusal path.
     refused_reason: str | None = None
+    # v0.10.9+ fleet-wide config snapshot sent on handshake.
+    # auto_enroll_mode: "off" | "quick" | "full" — the operator's
+    # current dashboard toggle value. Agents mirror this instead of
+    # consulting their own local config so a single "Auto: Quick"
+    # click applies to every agent immediately. Optional (default
+    # None) for forward-compat: operators running pre-v0.10.9
+    # won't send it, and agents running v0.10.9+ treat absence as
+    # "off" on the agent side to preserve the fail-closed semantics.
+    auto_enroll_mode: str | None = None
+
+
+class ConfigUpdateMsg(BaseModel):
+    """Operator pushes a setting change to all connected agents.
+
+    v0.10.9 uses this exclusively for `auto_enroll_mode` — the only
+    operator-scoped setting that affects agent behavior. Future
+    settings (retention windows, grading thresholds, etc.) may pile
+    onto this message or get their own types; we start narrow to
+    avoid over-committing the schema.
+    """
+    msg: Literal["config_update"] = "config_update"
+    auto_enroll_mode: str | None = None
 
 
 class AckMsg(BaseModel):
@@ -310,7 +332,7 @@ AgentToOperatorMsg = (
 OperatorToAgentMsg = (
     HelloAckMsg | AckMsg
     | StartPipelineCmd | AbortCmd | IdentifyCmd | RegradeCmd
-    | RunCompletedAckMsg
+    | RunCompletedAckMsg | ConfigUpdateMsg
 )
 
 
