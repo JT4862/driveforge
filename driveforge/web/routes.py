@@ -497,14 +497,35 @@ def _available_hosts(state) -> list[dict]:
     switch between. Empty on standalone/agent roles (no fleet UI).
     On operators with no enrolled agents this returns a single
     "local" entry which the template collapses to a no-op.
+
+    v0.11.3+ — the "this operator" count now reflects total drives
+    (active + installed) that would render under the local filter,
+    not just `len(state.active_phase)`. Pre-v0.11.3 a JT-screenshot
+    bug: NX-3200 had 1 installed-but-idle drive and 1 R720 remote
+    drive; pill row read `[All hosts 2] [this operator 0] [r720 1]`
+    even though clicking "this operator" rendered the local INTEL
+    drive correctly. Counts have to match the rendered view or
+    operators distrust the chip.
     """
     if state.settings.fleet.role != "operator":
         return []
     from driveforge.daemon import fleet_server
+    # v0.11.3+ — local drive count = lsblk-discovered ∪ active_phase.
+    # Mirrors the presence rule the snapshot builder uses on agents
+    # so the operator's "this operator" pill matches both its
+    # locally-rendered cards AND what an agent would self-report.
+    try:
+        local_serials = {d.serial for d in drive_mod.discover()}
+    except Exception:  # noqa: BLE001
+        # discover() shouldn't ever raise (catches lsblk errors
+        # internally) but if it does, don't crash the whole
+        # dashboard — fall back to active count only.
+        local_serials = set()
+    local_serials |= set(state.active_phase.keys())
     entries: list[dict] = [{
         "id": "local",
         "display": state.settings.fleet.display_name or "this operator",
-        "drives": len(state.active_phase),
+        "drives": len(local_serials),
         "online": True,
     }]
     import time as _time
@@ -766,6 +787,34 @@ def new_batch_form(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "new_batch.html", {"drives": drives_view, "err": err}
     )
+
+
+def _primary_lan_ip() -> str | None:
+    """v0.11.3+ — best-effort primary IPv4 detection. Used when
+    composing the operator URL for adoption packages so agents get
+    a hostname-resolution-free address.
+
+    Strategy: open a UDP socket to a non-routable test target;
+    inspect the local socket's bound address. No packet leaves the
+    box (UDP socket bound but never sent on). Reliable on DHCP
+    networks; preserves Linux's default-route choice when there are
+    multiple interfaces.
+    """
+    import socket as _socket
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        # 192.0.2.1 is in TEST-NET-1 (RFC 5737) — guaranteed non-
+        # routable, won't actually generate a packet on connect()
+        # for a UDP socket.
+        s.connect(("192.0.2.1", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except OSError:
+        pass
+    return None
 
 
 def _new_cmd_id() -> str:
@@ -2458,8 +2507,28 @@ def agents_page(request: Request) -> HTMLResponse:
         refusals = list(reversed(state.fleet_refusals))
         # v0.11.0+ — candidate list, excluding ignored rows. Newest
         # first so the operator sees freshly-booted boxes at the top.
+        # v0.11.3+ — also exclude candidates whose hostname matches
+        # an already-enrolled (non-revoked) agent. Pre-v0.11.3 a
+        # candidate that finished adoption but whose mDNS broadcast
+        # was still cached on the operator (or who was misconfigured
+        # and never restarted out of candidate mode, like the JT-walk-
+        # through R720 bug) would appear in BOTH the Discovered AND
+        # Enrolled tables, inviting double-enrollment which would
+        # mint a second agent row and orphan the first credential.
+        # Match by hostname since that's what's stable across the
+        # candidate→agent role flip; install_id correlation is
+        # available too but hostname is more obvious to operators
+        # eyeballing the table.
+        enrolled_hostnames = {
+            a.hostname for a in agents
+            if a.revoked_at is None and a.hostname
+        }
         discovered = sorted(
-            (c for c in state.discovered_candidates.values() if not c.ignored),
+            (
+                c for c in state.discovered_candidates.values()
+                if not c.ignored
+                and c.hostname not in enrolled_hostnames
+            ),
             key=lambda c: c.last_seen_monotonic,
             reverse=True,
         )
@@ -2642,15 +2711,29 @@ async def agents_enroll_discovered(install_id: str, request: Request) -> Redirec
     agent_token = result.api_token
 
     # Compose the operator URL that the candidate will dial into.
-    # Mirrors the logic in the Settings page's operator_url hint.
+    # v0.11.3+ — prefer the operator's actual LAN IP over a `.local`
+    # hostname. mDNS-based name resolution requires libnss-mdns to
+    # be installed on the agent (which v0.11.3+ install.sh now
+    # ensures, but old installs miss). Even when libnss-mdns IS
+    # there, IPs are more reliable across DHCP renewals and avoid
+    # the avahi resolver path on every WebSocket reconnect.
+    # Cloudflare tunnel hostname still wins when configured (operator
+    # explicitly chose a public-routable name).
     from driveforge.core import hostname as hostname_mod
-    op_host = (
-        state.settings.integrations.cloudflare_tunnel_hostname
-        or f"{hostname_mod.current_hostname() or 'driveforge'}.local"
-    )
-    op_scheme = "https" if state.settings.integrations.cloudflare_tunnel_hostname else "http"
-    op_port_suffix = "" if op_scheme == "https" else f":{state.settings.daemon.port}"
-    operator_url = f"{op_scheme}://{op_host}{op_port_suffix}"
+    if state.settings.integrations.cloudflare_tunnel_hostname:
+        operator_url = f"https://{state.settings.integrations.cloudflare_tunnel_hostname}"
+    else:
+        # Find the operator's primary IPv4. avahi-browse already gave
+        # us the candidate's IP from its own perspective, but that
+        # tells us how the candidate sees the operator's IP indirectly.
+        # Cleaner: read it from the network interface directly.
+        op_ip = _primary_lan_ip()
+        if not op_ip:
+            # Fallback to .local hostname if IP detection failed
+            # somehow; with v0.11.3+ install.sh agents have
+            # libnss-mdns so it'll still resolve.
+            op_ip = f"{hostname_mod.current_hostname() or 'driveforge'}.local"
+        operator_url = f"http://{op_ip}:{state.settings.daemon.port}"
 
     # POST the adoption package to the candidate. Short timeout
     # because the candidate's adoption handler is designed to reply
