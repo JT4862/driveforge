@@ -71,21 +71,20 @@ def test_primary_lan_ip_returns_ipv4_or_none() -> None:
 # ---------------------------------------------------- Adoption stores IP
 
 
-def test_enroll_discovered_uses_ip_in_operator_url(tmp_path, monkeypatch) -> None:
-    """The adoption package sent to a candidate must carry an IP-
-    based operator_url, not a `.local` hostname. Pre-v0.11.3 the
-    .local form silently bricked agents on hosts without
-    libnss-mdns."""
+def test_enroll_discovered_uses_local_hostname_in_operator_url(tmp_path, monkeypatch) -> None:
+    """v0.11.4+ — adoption stores the operator's `.local` hostname
+    rather than its current LAN IP. Survives DHCP renewals via mDNS
+    re-resolution; libnss-mdns (also installed by v0.11.3+
+    install.sh) makes the agent's resolver path handle .local
+    transparently. v0.11.3 stored an IP; rolled back in v0.11.4.
+    """
     import httpx
     from driveforge.daemon.state import get_state
     app = _bootstrap_app(tmp_path, role="operator")
     state = get_state()
     state.discovered_candidates["c1"] = fleet_discovery.DiscoveredCandidate(
-        install_id="c1", hostname="newbox", version="0.11.3",
+        install_id="c1", hostname="newbox", version="0.11.4",
         address="10.99.99.5", port=8080, last_seen_monotonic=time.monotonic(),
-    )
-    monkeypatch.setattr(
-        "driveforge.web.routes._primary_lan_ip", lambda: "10.99.99.10",
     )
     captured: list[dict] = []
 
@@ -100,38 +99,10 @@ def test_enroll_discovered_uses_ip_in_operator_url(tmp_path, monkeypatch) -> Non
         )
     assert len(captured) == 1
     body = captured[0]["body"]
-    # operator_url must be IP-based, not .local
-    assert "10.99.99.10" in body["operator_url"]
-    assert ".local" not in body["operator_url"]
+    # operator_url must include `.local` so it re-resolves via
+    # mDNS on every reconnect — DHCP-survivable.
+    assert ".local:" in body["operator_url"]
     assert body["operator_url"].startswith("http://")
-
-
-def test_enroll_falls_back_to_local_when_ip_detection_fails(tmp_path, monkeypatch) -> None:
-    """If `_primary_lan_ip` returns None (weird network, dev box,
-    container without IP), fall back to .local — the agent has
-    libnss-mdns now (v0.11.3+) so it can still resolve."""
-    import httpx
-    from driveforge.daemon.state import get_state
-    app = _bootstrap_app(tmp_path, role="operator")
-    state = get_state()
-    state.discovered_candidates["c1"] = fleet_discovery.DiscoveredCandidate(
-        install_id="c1", hostname="newbox", version="0.11.3",
-        address="10.99.99.5", port=8080, last_seen_monotonic=time.monotonic(),
-    )
-    monkeypatch.setattr("driveforge.web.routes._primary_lan_ip", lambda: None)
-    captured: list[dict] = []
-
-    async def fake_post(self, url, json=None, **_kw):
-        captured.append({"body": json})
-        return httpx.Response(200, json={"ok": True, "detail": "adopted"})
-
-    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
-    with TestClient(app) as client:
-        client.post(
-            "/settings/agents/discovered/c1/enroll", follow_redirects=False,
-        )
-    body = captured[0]["body"]
-    assert ".local" in body["operator_url"]
 
 
 def test_enroll_uses_cloudflare_tunnel_when_set(tmp_path, monkeypatch) -> None:

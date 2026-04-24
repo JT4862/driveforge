@@ -296,7 +296,7 @@ class FleetClient:
                 logger.warning("fleet-client: dropping non-JSON frame")
                 continue
             msg_type = raw.get("msg") if isinstance(raw, dict) else None
-            if msg_type in {"start_pipeline", "abort", "identify", "regrade"}:
+            if msg_type in {"start_pipeline", "abort", "identify", "regrade", "update"}:
                 # Fire-and-forget dispatch so a slow abort doesn't
                 # block the next incoming command.
                 asyncio.create_task(self._dispatch_command(ws, msg_type, raw))
@@ -443,6 +443,19 @@ class FleetClient:
         from driveforge.db import models as m
 
         state = self.state
+
+        # v0.11.4+ — UpdateCmd is dispatched independently of the
+        # orchestrator. The local update path goes through
+        # systemctl + the existing 50-driveforge-update.rules
+        # polkit rule; no orchestrator state needed. Handled
+        # FIRST so a daemon that's mid-startup (orchestrator not
+        # attached yet) can still accept fleet-wide update pushes.
+        if msg_type == "update":
+            cmd = proto.UpdateCmd.model_validate(raw)
+            from driveforge.core import updates as updates_mod
+            ok, message = updates_mod.trigger_in_app_update()
+            return cmd.cmd_id, ok, message
+
         orch = getattr(state, "orchestrator", None)
         if orch is None:
             cmd_id = raw.get("cmd_id", "?")

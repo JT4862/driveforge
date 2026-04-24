@@ -207,6 +207,32 @@ class RegradeCmd(BaseModel):
     serial: str
 
 
+class UpdateCmd(BaseModel):
+    """v0.11.4+ — operator pushes "update yourself" to an agent.
+
+    Agent receives this and fires `systemctl start --no-block
+    driveforge-update.service` locally — same path as clicking
+    Install Update on a standalone or operator. The unit's
+    ExecStart runs install.sh which git-pulls main + reinstalls
+    + restarts the daemon, all polkit-authorized via the existing
+    50-driveforge-update.rules.
+
+    The agent's WebSocket drops as the daemon restarts, then
+    reconnects on the new version (which the operator sees as a
+    transient disconnect / reconnect). CommandResultMsg with
+    success=True reports the update was *triggered*; the actual
+    update completion is observable via the agent's reconnected
+    `version` field in the next handshake.
+
+    Fleet-wide updates are coupled with the operator's own update
+    in v0.11.4+ — clicking "Install update" on the operator first
+    fans this out to every online agent, then triggers the
+    operator's own update. Single-button UX, no version skew.
+    """
+    msg: Literal["update"] = "update"
+    cmd_id: str
+
+
 # ----------------------------------------------- agent → operator (replies)
 
 
@@ -331,7 +357,7 @@ AgentToOperatorMsg = (
 # Union for the reverse direction.
 OperatorToAgentMsg = (
     HelloAckMsg | AckMsg
-    | StartPipelineCmd | AbortCmd | IdentifyCmd | RegradeCmd
+    | StartPipelineCmd | AbortCmd | IdentifyCmd | RegradeCmd | UpdateCmd
     | RunCompletedAckMsg | ConfigUpdateMsg
 )
 

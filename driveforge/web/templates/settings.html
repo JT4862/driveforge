@@ -649,6 +649,19 @@
      starts 502'ing. #}
   <div class="install-progress" style="margin-top: 14px;" data-restart-watch="1">
     <h3 style="margin-top: 0;">Update in progress</h3>
+    {# v0.11.4+ — fleet-wide update confirmation. fleet_pushed > 0
+       means we broadcast UpdateCmd to that many online agents
+       BEFORE triggering the operator's own update. They run in
+       parallel; each agent's daemon restarts independently and
+       reconnects on the new version. #}
+    {% if fleet_pushed %}
+    <p class="muted small" style="margin-top: 0;">
+      Pushed update to <strong>{{ fleet_pushed }}</strong> online
+      agent{% if fleet_pushed != 1 %}s{% endif %} in parallel; each
+      will restart on its new version automatically. Watch the
+      Agents page for the connection-cycle.
+    </p>
+    {% endif %}
     <div hx-get="/_partials/update-log"
          hx-trigger="load, every 2s"
          hx-swap="outerHTML">
