@@ -602,13 +602,26 @@
        as belt-and-suspenders — this is pure UX layering so operators
        see the gate BEFORE clicking, not as an error banner after. #}
     {% set _gate_blocked = active_phase_count > 0 or recovery_count > 0 %}
+    {# v0.11.8: dropped the `onclick="return confirm(...)"` speed-bump.
+       Modern browsers silently block window.confirm() after repeated
+       use as anti-spam — observed in JT's session after a string of
+       fleet updates. The dialog never appeared and the form silently
+       didn't submit, leaving the operator with a dead button.
+
+       Confirmation is provided redundantly elsewhere on the page:
+         - the green "Update vX.Y.Z is available" panel above this form,
+         - the "Restarts the daemon" subtitle below the button, and
+         - server-side gating in /settings/install-update that refuses
+           while any drive is mid-pipeline (active_phase_count or
+           recovery_count > 0 → button rendered disabled here too).
+       So one click triggers the update directly. Same pattern as the
+       per-drive Abort buttons on the dashboard — single-click action,
+       no JS dialog. #}
     <form method="post" action="/settings/install-update"
           style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
       <button type="submit" class="btn primary"
               {% if _gate_blocked %}disabled
               title="Update is blocked while drives are running."
-              {% else %}
-              onclick="return confirm('Install update {{ update_info.latest_version }} now? This will:\n\n  • git-pull origin/main in the source tree\n  • re-run scripts/install.sh\n  • restart driveforge-daemon (10-15 sec dashboard outage)\n\nAny drive currently under test would have its pipeline interrupted; the daemon refuses to start an update while drives are active.\n\nProceed?');"
               {% endif %}>
         Install update now
       </button>
