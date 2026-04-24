@@ -2011,6 +2011,12 @@ def settings_page(request: Request) -> HTMLResponse:
     hostname_error = request.query_params.get("hostname_error")
     install_error = request.query_params.get("install_error")
     install_started = request.query_params.get("install_started") == "1"
+    # v0.11.4+ how many agents got the fleet-wide UpdateCmd push.
+    # 0 = operator-only (standalone install OR no agents online).
+    try:
+        fleet_pushed = int(request.query_params.get("fleet_pushed") or 0)
+    except ValueError:
+        fleet_pushed = 0
     # v0.6.1+: test-print flow uses `saved=test_print` on success and
     # `test_print_error=<msg>` on failure so the template can render a
     # green "sent to printer" pill or a warn banner with the specific
@@ -2051,6 +2057,7 @@ def settings_page(request: Request) -> HTMLResponse:
             "hostname_error": hostname_error,
             "install_error": install_error,
             "install_started": install_started,
+            "fleet_pushed": fleet_pushed,
             "test_print_error": test_print_error,
             # v0.7.0+ Safety-gate UX. Hand the template the live
             # active-drive + recovery counts so it can render the
@@ -2131,13 +2138,46 @@ async def install_update(request: Request) -> RedirectResponse:
             ),
             status_code=303,
         )
+
+    # v0.11.4+ — when this daemon is the fleet operator, push the
+    # update to every connected agent FIRST, then update ourselves.
+    # JT's design intent: one button updates the entire fleet, no
+    # version skew between operator + agents. Agent updates run in
+    # parallel (each agent fires its own polkit update locally,
+    # restarts independently). Operator's update fires last so the
+    # operator's daemon-restart-induced WebSocket drop doesn't
+    # interrupt the agents' UpdateCmd delivery.
+    fleet_pushed = 0
+    if state.settings.fleet.role == "operator":
+        from driveforge.core import fleet_protocol as proto
+        from driveforge.daemon import fleet_server
+        for agent_id in list(state.remote_agents.keys()):
+            ra = state.remote_agents[agent_id]
+            if ra.outbound_queue is None:
+                continue  # agent offline; skip
+            cmd = proto.UpdateCmd(cmd_id=_new_cmd_id())
+            try:
+                await fleet_server.send_command_to_agent(state, agent_id, cmd)
+                fleet_pushed += 1
+            except fleet_server.CommandDispatchError:
+                # Agent might've disconnected mid-broadcast; non-
+                # fatal. They'll need a manual update.
+                logger.warning(
+                    "fleet update: failed to push UpdateCmd to %s", agent_id,
+                )
+
     ok, message = updates_mod.trigger_in_app_update()
     if not ok:
         return RedirectResponse(
             url="/settings?install_error=" + quote(message),
             status_code=303,
         )
-    return RedirectResponse(url="/settings?install_started=1", status_code=303)
+    # Note in the success URL how many agents got the push so the
+    # banner can confirm fleet-wide vs operator-only behavior.
+    suffix = f"&fleet_pushed={fleet_pushed}" if fleet_pushed else ""
+    return RedirectResponse(
+        url=f"/settings?install_started=1{suffix}", status_code=303,
+    )
 
 
 @router.post("/settings/restart-udev")
@@ -2711,29 +2751,31 @@ async def agents_enroll_discovered(install_id: str, request: Request) -> Redirec
     agent_token = result.api_token
 
     # Compose the operator URL that the candidate will dial into.
-    # v0.11.3+ — prefer the operator's actual LAN IP over a `.local`
-    # hostname. mDNS-based name resolution requires libnss-mdns to
-    # be installed on the agent (which v0.11.3+ install.sh now
-    # ensures, but old installs miss). Even when libnss-mdns IS
-    # there, IPs are more reliable across DHCP renewals and avoid
-    # the avahi resolver path on every WebSocket reconnect.
-    # Cloudflare tunnel hostname still wins when configured (operator
-    # explicitly chose a public-routable name).
+    # v0.11.4+ — store the operator's mDNS hostname (`.local`) by
+    # default. Reasoning evolved across the release series:
+    #
+    #   v0.11.0 stored .local — failed because libnss-mdns wasn't
+    #     installed by install.sh, so agents couldn't resolve it.
+    #   v0.11.3 worked around by storing the IP — fixed the
+    #     resolution problem but introduced a worse one: an IP
+    #     becomes stale the moment the operator's DHCP lease
+    #     renews to a different address.
+    #   v0.11.4 returns to .local because (a) v0.11.3 also fixed
+    #     install.sh to ship libnss-mdns, so resolution works
+    #     reliably, and (b) mDNS dynamically re-resolves on every
+    #     reconnect, so DHCP changes are transparent. This is the
+    #     "survives a router reboot" behavior the homelab needs.
+    #
+    # Cloudflare tunnel hostname still wins when configured —
+    # operator explicitly chose a public-routable name + we don't
+    # want mDNS pointing at a LAN IP for a fleet that's also
+    # tunneled.
     from driveforge.core import hostname as hostname_mod
     if state.settings.integrations.cloudflare_tunnel_hostname:
         operator_url = f"https://{state.settings.integrations.cloudflare_tunnel_hostname}"
     else:
-        # Find the operator's primary IPv4. avahi-browse already gave
-        # us the candidate's IP from its own perspective, but that
-        # tells us how the candidate sees the operator's IP indirectly.
-        # Cleaner: read it from the network interface directly.
-        op_ip = _primary_lan_ip()
-        if not op_ip:
-            # Fallback to .local hostname if IP detection failed
-            # somehow; with v0.11.3+ install.sh agents have
-            # libnss-mdns so it'll still resolve.
-            op_ip = f"{hostname_mod.current_hostname() or 'driveforge'}.local"
-        operator_url = f"http://{op_ip}:{state.settings.daemon.port}"
+        op_host = hostname_mod.current_hostname() or "driveforge"
+        operator_url = f"http://{op_host}.local:{state.settings.daemon.port}"
 
     # POST the adoption package to the candidate. Short timeout
     # because the candidate's adoption handler is designed to reply
