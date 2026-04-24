@@ -7,12 +7,10 @@
   <div class="subtitle">Discovered {{ drives|length }} drives. Select which to include — default is all.</div>
 </section>
 
-{% if err == "confirm" %}
-<div class="banner warn-banner">
-  &#9888; Batch not started — you must type <code>ERASE</code> in the confirmation box
-  to acknowledge that selected drives will be destructively wiped.
-</div>
-{% endif %}
+{# v0.11.13 dropped the "type ERASE" typed-confirmation gate — the
+   err=confirm branch below is unreachable now. Kept the structure
+   above it for the err=active branch which still fires when every
+   selected drive is already running. #}
 {% if err == "active" %}
 <div class="banner warn-banner">
   &#9888; Batch not started — every selected drive is already under test in
@@ -87,10 +85,16 @@
       requires a full re-format to recover. Aborting during other phases
       (pre-SMART, short test, badblocks) is always safe.
     </p>
-    <label class="field">
-      <span>Type <code>ERASE</code> to confirm</span>
-      <input type="text" name="confirm" placeholder="ERASE" required autocomplete="off">
-    </label>
+    {# v0.11.13: the "Type ERASE to confirm" input field was removed
+       here. DriveForge's entire purpose is secure-erasing drives —
+       an operator who selected drives, read the warning above, and
+       clicked "Start Batch" already knows exactly what's about to
+       happen. The typed-confirmation field was friction without
+       safety benefit; the destructive warning above + the button's
+       `.btn.danger` red styling do the context work. Same
+       philosophy as v0.11.8 (dropped window.confirm() from Install
+       Update) and v0.11.10 (swept window.confirm() from all 9
+       other forms). #}
   </div>
 
   <div class="form-actions">
