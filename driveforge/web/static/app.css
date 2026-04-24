@@ -1210,13 +1210,25 @@ fieldset.hostname-confirm legend {
 /* v0.10.1+ fleet — host badge on drive cards + host filter row */
 .bay-card.remote-host { border-left: 3px solid #5b8cd6; }
 .bay-card.remote-host.host-offline { opacity: 0.55; border-left-color: #6a6f78; }
+/* v0.11.9+: host badge moved out of absolute positioning into the
+   normal card flow. Pre-v0.11.9 the badge was `position: absolute;
+   top: 8px; right: 8px;` which overlapped the .abort-form button on
+   active cards (also absolute top-right) AND would have collided
+   with the model name if moved to top-left. Now it's a small inline-
+   flex chip at the very top of the card, above the model name, so
+   the body content flows naturally beneath. Action buttons keep
+   their absolute placement (top-right for .abort-form, bottom-right
+   for .ident-form) — no collisions. Slightly reduces vertical density
+   on remote cards but feels much less cluttered. */
 .host-badge {
-  position: absolute; top: 8px; right: 8px;
-  font-size: 11px; color: var(--muted);
-  display: flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--muted);
+  display: inline-flex; align-items: center; gap: 5px;
   background: rgba(91, 140, 214, 0.12); border: 1px solid rgba(91, 140, 214, 0.3);
-  padding: 2px 8px; border-radius: 999px;
-  pointer-events: none;
+  padding: 1px 7px; border-radius: 999px;
+  letter-spacing: 0.1px;
+  align-self: flex-start; /* keep chip at its natural width inside the
+                             flex-column .bay-card */
+  margin-bottom: 2px;     /* tiny breathing room before the model name */
 }
 .host-badge .host-dot { width: 6px; height: 6px; border-radius: 50%; background: #5b8cd6; display: inline-block; }
 .host-badge .host-dot--offline { background: #6a6f78; }

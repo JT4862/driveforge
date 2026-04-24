@@ -316,9 +316,67 @@ def _remote_active_card(agent_state, drive_state) -> dict:
     }
 
 
-def _remote_installed_card(agent_state, drive_state) -> dict:
-    """v0.10.1+ — installed-section card for a remote agent's idle drive."""
+def _remote_installed_card(agent_state, drive_state, session=None) -> dict:
+    """v0.10.1+ — installed-section card for a remote agent's idle drive.
+
+    v0.11.9+: now queries the operator's DB for the most recent TestRun
+    on this serial originating from this agent (host_id=agent_id) and
+    populates last_grade / last_tested / last_phase / triage just like
+    the local `_installed_card` does. Pre-v0.11.9 these fields were
+    hardcoded to None with a TODO comment ("those arrive with v0.10.3
+    cert forwarding"); the forwarding shipped, the render didn't catch
+    up — so the operator's dashboard always showed the agent's drive
+    as "idle · never tested" even after a real run had completed and
+    been ingested into the DB.
+
+    `session` is optional for backwards compatibility with the small
+    number of internal callers that don't have one handy; when None,
+    the card renders without history (same shape as v0.10.1 → v0.11.8).
+    The dashboard view layer (`_drive_view`) always passes a session.
+    """
     import time as _time
+    last_grade = None
+    last_tested = None
+    last_phase = None
+    last_quick = False
+    last_triage = None
+    last_error = None
+    drive_age_label = None
+    remapped_during_run: int | None = None
+    if session is not None:
+        last_run = (
+            session.query(m.TestRun)
+            .filter_by(drive_serial=drive_state.serial, host_id=agent_state.agent_id)
+            .filter(m.TestRun.completed_at.isnot(None))
+            .order_by(m.TestRun.completed_at.desc())
+            .first()
+        )
+        if last_run is not None:
+            last_grade = last_run.grade
+            last_tested = last_run.completed_at
+            last_phase = last_run.phase
+            last_quick = bool(last_run.quick_mode)
+            last_triage = last_run.triage_result
+            if last_run.error_message:
+                msg = last_run.error_message.strip().split("\n", 1)[0]
+                last_error = msg[:80] + ("…" if len(msg) > 80 else "")
+            if (
+                last_run.reallocated_sectors is not None
+                and last_run.pre_reallocated_sectors is not None
+            ):
+                remapped_during_run = (
+                    last_run.reallocated_sectors - last_run.pre_reallocated_sectors
+                )
+            last_poh = last_run.power_on_hours_at_test
+            if last_poh and last_poh >= 100:
+                years = last_poh / 8766.0
+                if years >= 0.9:
+                    drive_age_label = f"{years:.1f}y"
+                else:
+                    drive_age_label = (
+                        f"{int(last_poh / 1000)}k POH" if last_poh >= 1000
+                        else f"{last_poh} POH"
+                    )
     return {
         "state": "installed",
         "key": f"{agent_state.agent_id}:{drive_state.serial}",
@@ -327,17 +385,14 @@ def _remote_installed_card(agent_state, drive_state) -> dict:
         "manufacturer": drive_state.manufacturer,
         "capacity_tb": round(drive_state.capacity_bytes / 1_000_000_000_000, 2) if drive_state.capacity_bytes else 0.0,
         "transport": drive_state.transport,
-        # Remote installed drives don't carry last-grade / triage yet
-        # (those arrive with v0.10.3 cert forwarding). For v0.10.1 we
-        # just show the drive is present on the remote agent.
-        "last_grade": None,
-        "last_tested": None,
-        "last_phase": None,
-        "last_quick": False,
-        "last_triage": None,
-        "remapped_during_run": None,
-        "last_error": None,
-        "drive_age_label": None,
+        "last_grade": last_grade,
+        "last_tested": last_tested,
+        "last_phase": last_phase,
+        "last_quick": last_quick,
+        "last_triage": last_triage,
+        "remapped_during_run": remapped_during_run,
+        "last_error": last_error,
+        "drive_age_label": drive_age_label,
         "just_completed": False,
         # v0.10.2+ — protocol now carries `identifying` per-drive so
         # the operator's toggle button reflects agent reality.
@@ -412,7 +467,13 @@ def _drive_view(state, session, *, host_filter: str | None = None) -> dict:
                 if drive_state.phase:
                     active_cards.append(_remote_active_card(ra, drive_state))
                 else:
-                    installed_cards.append(_remote_installed_card(ra, drive_state))
+                    # v0.11.9+: pass session so the card render can pull
+                    # last-grade / last-tested / triage from the operator's
+                    # DB (where agent completions are ingested as TestRun
+                    # rows tagged with host_id=agent_id).
+                    installed_cards.append(
+                        _remote_installed_card(ra, drive_state, session=session)
+                    )
 
     return {
         "active": active_cards,
@@ -883,6 +944,7 @@ def _new_cmd_id() -> str:
 
 async def _forward_start_pipeline_to_agent(
     state, agent_id: str, serial: str, *, quick: bool, source: str | None,
+    batch_id: str | None = None,
 ) -> None:
     """Enqueue a StartPipelineCmd on the target agent's outbound
     queue. Fire-and-forget; the drive's state appears in the next
@@ -892,11 +954,16 @@ async def _forward_start_pipeline_to_agent(
 
     Raises `fleet_server.CommandDispatchError` if the agent has no
     active session. Callers catch + surface to the operator.
+
+    v0.11.9+: `batch_id` carries the operator-minted batch id so the
+    agent's TestRun row joins back to the operator's Batch row on
+    completion ingestion.
     """
     from driveforge.core import fleet_protocol as proto
     from driveforge.daemon import fleet_server
     cmd = proto.StartPipelineCmd(
         cmd_id=_new_cmd_id(), serial=serial, quick_mode=quick, source=source,
+        batch_id=batch_id,
     )
     await fleet_server.send_command_to_agent(state, agent_id, cmd)
 
@@ -960,10 +1027,32 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
     if not local_drives and not remote_dispatch:
         local_drives = drive_mod.discover()
 
+    # v0.11.9+: pre-mint the batch_id at the operator level so both the
+    # local orchestrator AND every agent in the fan-out tag their TestRun
+    # rows under the same id. Pre-v0.11.9 the agent minted its own id and
+    # the operator's ingestion dropped it (`batch_id=None` hardcode in
+    # fleet_server), making remote runs invisible from the batch detail
+    # page. With a shared id, the operator's batch view shows the full
+    # roster of drives — local + every agent — under one batch click.
+    import uuid as _uuid
+    from datetime import UTC, datetime
+    from driveforge.db import models as m
+    batch_id = _uuid.uuid4().hex[:12]
+    # Create the Batch row up front so agent ingestion has a Batch row
+    # to FK against, even when there are no local drives in this batch
+    # (pure-remote dispatch). Idempotent via INSERT IGNORE-style guard
+    # below in case start_batch beats us to the row.
+    with state.session_factory() as session:
+        if session.get(m.Batch, batch_id) is None:
+            session.add(m.Batch(id=batch_id, source=source, started_at=datetime.now(UTC)))
+            session.commit()
+
     orch = request.app.state.orchestrator
     if local_drives:
         try:
-            await orch.start_batch(local_drives, source=source, quick=quick)
+            await orch.start_batch(
+                local_drives, source=source, quick=quick, batch_id=batch_id,
+            )
         except BatchRejected:
             # Only error if there's NO remote dispatch either; otherwise
             # the remote path is still valid and we continue.
@@ -973,6 +1062,7 @@ async def new_batch_submit(request: Request) -> RedirectResponse:
         try:
             await _forward_start_pipeline_to_agent(
                 state, agent_id, serial, quick=quick, source=source,
+                batch_id=batch_id,
             )
         except fleet_server.CommandDispatchError as exc:
             logger.warning("fleet: start_batch forward to %s failed: %s", agent_id, exc)
@@ -1239,8 +1329,33 @@ async def frozen_remediation_mark_unrecoverable(
         session.commit()
 
     frozen_remediation.clear(state.frozen_remediation, serial)
+
+    # v0.11.9+ — fire a physical UNRECOVERABLE label print so the
+    # operator's hand has a sticker to slap on the drive going into
+    # the destroy bin. Best-effort; print failure does NOT undo the
+    # F-grade stamp (DB is the source of truth, sticker is the
+    # physical bridge to that decision). Failure surfaces in the
+    # redirect's `print` query param so the drive-detail flash area
+    # can show what happened.
+    print_status = ""
+    try:
+        from driveforge.core import printer as printer_mod
+        with state.session_factory() as session:
+            drive_row = session.get(m.Drive, serial)
+        if drive_row is not None:
+            ok, msg = printer_mod.auto_print_unrecoverable_for_drive(
+                state, drive_row, reason=error_msg,
+            )
+            print_status = "ok" if ok else f"err:{msg[:80]}"
+        else:
+            print_status = "err:no-drive-row"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("frozen mark-unrecoverable: print failed for %s", serial)
+        print_status = f"err:{exc}"
+
+    from urllib.parse import quote as _q
     return RedirectResponse(
-        url=f"/drives/{serial}?frozen=marked-unrecoverable",
+        url=f"/drives/{serial}?frozen=marked-unrecoverable&print={_q(print_status)}",
         status_code=303,
     )
 
@@ -1418,10 +1533,30 @@ async def password_locked_mark_unrecoverable(
         session.commit()
 
     pwd_lock.clear(state.password_locked, serial)
+
+    # v0.11.9+ — physical UNRECOVERABLE label print, same shape as the
+    # frozen-SSD path above. Best-effort; print failure doesn't roll
+    # back the F-grade stamp.
+    print_status = ""
+    try:
+        from driveforge.core import printer as printer_mod
+        with state.session_factory() as session:
+            drive_row = session.get(m.Drive, serial)
+        if drive_row is not None:
+            ok, msg = printer_mod.auto_print_unrecoverable_for_drive(
+                state, drive_row, reason=error_msg,
+            )
+            print_status = "ok" if ok else f"err:{msg[:80]}"
+        else:
+            print_status = "err:no-drive-row"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("password-locked mark-unrecoverable: print failed for %s", serial)
+        print_status = f"err:{exc}"
+
     return RedirectResponse(
         url=f"/drives/{serial}?pwd_ok=" + quote(
             "drive marked unrecoverable; F grade stamped, auto-enroll will skip this serial"
-        ),
+        ) + f"&print={quote(print_status)}",
         status_code=303,
     )
 

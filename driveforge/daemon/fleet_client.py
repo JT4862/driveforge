@@ -484,8 +484,19 @@ class FleetClient:
             if found is None:
                 return cmd.cmd_id, False, f"drive {cmd.serial} not present on this agent"
             try:
+                # v0.11.9+: thread the operator's batch_id through.
+                # Pre-v0.11.9 agents minted their own batch ids and the
+                # operator dropped them on ingestion, making fleet runs
+                # invisible from the batch detail page. Now both sides
+                # share the operator-owned id and the agent's TestRun
+                # row joins cleanly back to the operator's Batch row.
+                # `cmd.batch_id` is None for pre-v0.11.9 operators, in
+                # which case start_batch falls back to minting locally.
                 await orch.start_batch(
-                    [found], source=cmd.source or "fleet-operator", quick=cmd.quick_mode,
+                    [found],
+                    source=cmd.source or "fleet-operator",
+                    quick=cmd.quick_mode,
+                    batch_id=cmd.batch_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 return cmd.cmd_id, False, f"start_batch failed: {exc}"
