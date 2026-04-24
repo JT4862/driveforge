@@ -27,14 +27,22 @@
   </label>
   <table class="runs">
     <thead>
-      <tr><th>Include</th><th>Serial</th><th>Model</th><th>Capacity</th><th>Transport</th><th>Status</th></tr>
+      <tr>
+        <th>Include</th>
+        <th>Serial</th>
+        <th>Model</th>
+        <th>Capacity</th>
+        <th>Transport</th>
+        {% if is_operator %}<th>Host</th>{% endif %}
+        <th>Status</th>
+      </tr>
     </thead>
     <tbody>
     {% for d in drives %}
       <tr{% if d.active %} class="muted"{% endif %}>
         <td>
           {% if d.active %}
-            <input type="checkbox" disabled title="Currently under test in another batch">
+            <input type="checkbox" disabled title="{% if d.host_offline %}Agent is offline — can't dispatch right now{% else %}Currently under test in another batch{% endif %}">
           {% else %}
             <input type="checkbox" name="drive" value="{{ d.serial }}" checked>
           {% endif %}
@@ -42,8 +50,20 @@
         <td>{{ d.serial }}</td>
         <td>{{ d.model }}</td>
         <td>{{ "%.1f"|format(d.capacity_tb) }} TB</td>
-        <td>{{ d.transport.value|upper }}</td>
-        <td>{% if d.active %}<span class="pill">testing</span>{% else %}available{% endif %}</td>
+        <td>{{ d.transport|upper }}</td>
+        {% if is_operator %}
+          <td>
+            <span class="host-badge" style="position: static; display: inline-flex;">
+              <span class="host-dot {% if d.host_offline %}host-dot--offline{% endif %}"></span>{{ d.host_display }}
+            </span>
+          </td>
+        {% endif %}
+        <td>
+          {% if d.host_offline %}<span class="pill warn">offline</span>
+          {% elif d.active %}<span class="pill">testing</span>
+          {% else %}available
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>

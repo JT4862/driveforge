@@ -770,22 +770,78 @@ def batches(request: Request) -> HTMLResponse:
 
 @router.get("/batches/new", response_class=HTMLResponse)
 def new_batch_form(request: Request) -> HTMLResponse:
-    drives = drive_mod.discover()
+    """Batch creation form.
+
+    v0.11.7+ — when the daemon is running as a fleet operator, the
+    drive list merges:
+      - the operator's own locally-discovered drives, and
+      - every drive reported by every connected agent
+        (`state.remote_agents[*].drives`).
+
+    The POST handler (`new_batch_submit`) already routes per-serial
+    via `fleet_server.find_agent_for_serial`, so the form just needs
+    to expose the agent drives so they can be ticked. Each row carries
+    a `host_display` so the operator can tell at a glance which box
+    a drive lives on. Remote drives that are mid-pipeline render with
+    a disabled checkbox, mirroring the local-busy behavior.
+    """
+    state = get_state()
     err = request.query_params.get("err")
     orch = request.app.state.orchestrator
     busy = orch.active_serials()
-    drives_view = [
-        {
+    fleet_role = state.settings.fleet.role
+    is_operator = fleet_role == "operator"
+
+    drives_view: list[dict] = []
+    # Local drives — operators + standalone include their own chassis.
+    # An agent-role daemon never serves the dashboard (the lockdown
+    # middleware blocks /batches/new entirely), so we don't have to
+    # special-case it here, but the `is_operator` flag controls whether
+    # we render the host badge for local rows so single-host setups
+    # don't get visual clutter.
+    for d in drive_mod.discover():
+        drives_view.append({
             "serial": d.serial,
             "model": d.model,
             "capacity_tb": d.capacity_tb,
-            "transport": d.transport,
+            "transport": d.transport.value if hasattr(d.transport, "value") else str(d.transport),
             "active": d.serial in busy,
-        }
-        for d in drives
-    ]
+            "host_display": "this operator" if is_operator else None,
+            "host_offline": False,
+        })
+
+    # v0.11.7+ — operator-mode fleet drives. Iterate every known agent
+    # (online or offline; offline agents still surface their last-seen
+    # drives so the operator can tell what's missing). Each agent's
+    # `drives` dict is the most-recent DriveSnapshotMsg the operator
+    # received — `phase` is None for idle drives, set for active ones.
+    if is_operator:
+        from driveforge.daemon import fleet_server
+        import time as _time
+        now = _time.monotonic()
+        for ra in fleet_server.all_known_agents(state):
+            offline = not ra.is_online(now)
+            for ds in ra.drives.values():
+                drives_view.append({
+                    "serial": ds.serial,
+                    "model": ds.model,
+                    "capacity_tb": (
+                        round(ds.capacity_bytes / 1_000_000_000_000, 2)
+                        if ds.capacity_bytes else 0.0
+                    ),
+                    "transport": (ds.transport or "").upper() or "UNKNOWN",
+                    # A remote drive is "active" (uncheckable) if its
+                    # most-recent snapshot showed it mid-pipeline OR if
+                    # the agent is offline (we can't dispatch to it
+                    # right now).
+                    "active": (ds.phase is not None) or offline,
+                    "host_display": ra.display_name,
+                    "host_offline": offline,
+                })
+
     return templates.TemplateResponse(
-        request, "new_batch.html", {"drives": drives_view, "err": err}
+        request, "new_batch.html",
+        {"drives": drives_view, "err": err, "is_operator": is_operator},
     )
 
 
