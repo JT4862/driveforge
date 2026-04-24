@@ -463,6 +463,35 @@ def _chassis_snapshot(state) -> dict | None:
     }
 
 
+def _render_agent_status(request: Request, state) -> HTMLResponse:
+    """v0.10.7+ agent-mode landing page.
+
+    Intentionally sparse: operator's dashboard is where drive
+    management happens. This page confirms the daemon is alive,
+    shows connection state + pending-forward count, and links to
+    the operator. No batch UI, no drive cards.
+    """
+    client = getattr(state, "fleet_client", None)
+    client_status = client.status if client is not None else None
+    pending_forward_count = 0
+    with state.session_factory() as session:
+        pending_forward_count = (
+            session.query(m.TestRun)
+            .filter(m.TestRun.pending_fleet_forward.is_(True))
+            .count()
+        )
+    return templates.TemplateResponse(
+        request,
+        "agent_status.html",
+        {
+            "settings": state.settings,
+            "client_status": client_status,
+            "pending_forward_count": pending_forward_count,
+            "operator_url": state.settings.fleet.operator_url,
+        },
+    )
+
+
 def _available_hosts(state) -> list[dict]:
     """v0.10.1+ — list of hosts the dashboard's filter chip can
     switch between. Empty on standalone/agent roles (no fleet UI).
@@ -493,6 +522,12 @@ def _available_hosts(state) -> list[dict]:
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
     state = get_state()
+    # v0.10.7+ — agent role renders a minimal read-only status page
+    # instead of the full dashboard. Operator is the canonical
+    # surface; local UI just confirms "yes I'm running, yes I'm
+    # connected, here's how to reach the operator."
+    if state.settings.fleet.role == "agent":
+        return _render_agent_status(request, state)
     host_filter = request.query_params.get("host") or None
     with state.session_factory() as session:
         view = _drive_view(state, session, host_filter=host_filter)
