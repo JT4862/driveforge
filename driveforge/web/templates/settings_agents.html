@@ -189,15 +189,17 @@
         </td>
         <td>
           {% if not a.revoked_at %}
+          {# v0.11.10: confirm() removed (browser-blocked). Both
+             actions are recoverable — operator can re-enroll the
+             agent after rotate/revoke. Tooltips on the buttons
+             still describe the side-effect. #}
           <form method="post" action="/settings/agents/{{ a.id }}/rotate" class="inline-form"
-                style="display: inline-block; margin-right: 6px;"
-                onsubmit="return confirm('Rotate credential for agent {{ a.display_name }}? The current token will be revoked immediately and the session dropped. You will receive a new enrollment token to paste on the agent''s console.');">
+                style="display: inline-block; margin-right: 6px;">
             <button type="submit" class="btn" title="Revoke the current credential and issue a new enrollment token.">Rotate</button>
           </form>
           <form method="post" action="/settings/agents/{{ a.id }}/revoke" class="inline-form"
-                style="display: inline-block;"
-                onsubmit="return confirm('Revoke agent {{ a.display_name }}? Its connection will drop and it can no longer send drive state. Historical records stay.');">
-            <button type="submit" class="btn btn-danger">Revoke</button>
+                style="display: inline-block;">
+            <button type="submit" class="btn btn-danger" title="Drop this agent's connection. Historical drive records stay; agent can be re-enrolled later.">Revoke</button>
           </form>
           {% endif %}
         </td>

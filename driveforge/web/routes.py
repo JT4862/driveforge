@@ -703,6 +703,92 @@ SUGGESTED_USE = {
 }
 
 
+def _resolve_frozen_remediation(state, serial: str, latest_run):
+    """v0.11.10+ — return a frozen-SSD remediation panel state for
+    this serial, or None.
+
+    Strategy:
+      1. Live in-memory entry on `state.frozen_remediation` wins —
+         carries the real retry_count from the current daemon
+         lifetime.
+      2. If no live entry exists, look at the latest TestRun. If it
+         failed with the libata-freeze pattern AND the drive is an
+         SSD (rotational==False or unknown), synthesize a fresh
+         FrozenRemediationState so the panel renders. retry_count
+         is conservatively 0 (we lost the live count, but the
+         operator-actionable shape is what matters).
+      3. Otherwise None — no panel.
+
+    This unblocks two cases that previously left the operator with
+    no Mark-as-unrecoverable button:
+      - Daemon restart between failure and operator action wiped
+        the in-memory entry.
+      - Drive lives on a fleet agent — the agent registered on
+        ITS state.frozen_remediation, never on this operator's.
+    """
+    live = state.frozen_remediation.get(serial)
+    if live is not None:
+        return live
+    if latest_run is None or not latest_run.error_message:
+        return None
+    from driveforge.core import erase as erase_mod
+    if not erase_mod.is_libata_freeze_pattern(latest_run.error_message):
+        return None
+    # SSDs only — for HDDs the libata-freeze fallback handles
+    # sanitization in full mode (see orchestrator.py:1565+) so the
+    # SSD-specific remediation panel doesn't apply. We err on the
+    # side of "show the panel" when rotational is unknown — better
+    # to show the operator their options than to silently hide them
+    # because we can't classify the drive.
+    drive_row = None
+    with state.session_factory() as session:
+        from driveforge.db import models as m
+        drive_row = session.get(m.Drive, serial)
+    if drive_row and drive_row.rotational is True:
+        return None
+    from driveforge.core import frozen_remediation
+    return frozen_remediation.FrozenRemediationState(
+        serial=serial,
+        drive_model=(drive_row.model if drive_row else "unknown"),
+        first_seen_at=latest_run.started_at or latest_run.completed_at,
+        last_seen_at=latest_run.completed_at or latest_run.started_at,
+        retry_count=0,
+        status=frozen_remediation.FrozenRemediationStatus.NEEDS_ACTION,
+    )
+
+
+def _resolve_password_locked(state, serial: str, latest_run):
+    """v0.11.10+ — sibling of `_resolve_frozen_remediation` for the
+    v0.9.0 password-locked remediation panel. Same restart/fleet
+    rationale; falls back to deriving a synthetic
+    PasswordLockedState from the latest TestRun when no in-memory
+    entry exists and the run's error matches
+    `is_security_locked_pattern`."""
+    live = state.password_locked.get(serial)
+    if live is not None:
+        return live
+    if latest_run is None or not latest_run.error_message:
+        return None
+    from driveforge.core import erase as erase_mod
+    if not erase_mod.is_security_locked_pattern(latest_run.error_message):
+        return None
+    drive_row = None
+    with state.session_factory() as session:
+        from driveforge.db import models as m
+        drive_row = session.get(m.Drive, serial)
+    from driveforge.core import password_locked_remediation as pwd_lock
+    return pwd_lock.PasswordLockedState(
+        serial=serial,
+        drive_model=(drive_row.model if drive_row else "unknown"),
+        first_seen_at=latest_run.started_at or latest_run.completed_at,
+        last_seen_at=latest_run.completed_at or latest_run.started_at,
+        retry_count=0,
+        manual_attempts=0,
+        last_attempt_note=None,
+        status=pwd_lock.PasswordLockedStatus.NEEDS_ACTION,
+    )
+
+
 @router.get("/drives/{serial}", response_class=HTMLResponse)
 def drive_detail(request: Request, serial: str) -> HTMLResponse:
     state = get_state()
@@ -765,12 +851,32 @@ def drive_detail(request: Request, serial: str) -> HTMLResponse:
             # v0.6.9+ frozen-SSD remediation state. None when this drive
             # isn't currently flagged as frozen; populated when the
             # orchestrator registered it after a libata-freeze pattern.
-            "frozen_remediation_state": state.frozen_remediation.get(serial),
+            #
+            # v0.11.10+: in-memory state on this operator might be empty
+            # for two distinct reasons:
+            #   1. The daemon restarted (in-app update, polkit reload)
+            #      after the freeze was registered. State was wiped.
+            #   2. The drive lives on a fleet AGENT — the agent's
+            #      orchestrator registered the entry on the AGENT's
+            #      DaemonState, never on this operator's. The operator
+            #      received the TestRun completion via fleet ingestion
+            #      but never got a remediation entry.
+            # Both cases hand the operator a drive-detail page with no
+            # remediation panel and no Mark-as-unrecoverable button —
+            # exactly the state JT hit during the v0.11.9 walkthrough.
+            # Fix: if the in-memory entry is missing, synthesize one
+            # from the latest TestRun's error pattern.
+            "frozen_remediation_state": _resolve_frozen_remediation(
+                state, serial, latest,
+            ),
             # v0.9.0+ password-locked remediation state. None when this
             # drive isn't currently flagged as security-locked; populated
             # when secure_erase preflight failed with the locked pattern
             # AND the vendor-factory-master auto-recovery also failed.
-            "password_locked_state": state.password_locked.get(serial),
+            # v0.11.10+: same DB-fallback as frozen above.
+            "password_locked_state": _resolve_password_locked(
+                state, serial, latest,
+            ),
             # v0.7.0+ active-pipeline phase for this drive. None when
             # the drive isn't in _tasks (most common case — the drive
             # was tested earlier, the card is informational). The

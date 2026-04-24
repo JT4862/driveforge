@@ -35,9 +35,10 @@
        per-drive failures are logged but don't abort the batch. #}
     <form method="post" action="/regrade-all-idle" class="inline"
           style="margin: 0;">
+      {# v0.11.10: confirm() removed (browser-blocked). Bulk regrade
+         is read-only on the drives — no risk worth a dialog. #}
       <button type="submit" class="btn"
-              title="Re-apply current grading thresholds to every installed, idle drive with a prior A/B/C run. Non-destructive; ~5 seconds per drive."
-              onclick="return confirm('Regrade every installed idle drive using current Settings → Grading thresholds? Pulls fresh SMART and re-grades each one (no destructive operations). Typical duration: ~5 seconds per drive.')">
+              title="Re-apply current grading thresholds to every installed, idle drive with a prior A/B/C run. Non-destructive; ~5 seconds per drive.">
         Regrade idle drives
       </button>
     </form>

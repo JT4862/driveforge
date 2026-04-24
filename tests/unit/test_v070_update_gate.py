@@ -122,7 +122,15 @@ def test_settings_page_renders_disabled_button_when_pipelines_active(tmp_path) -
 
 def test_settings_page_renders_normal_button_when_idle(tmp_path) -> None:
     """No active drives → Install button renders without the
-    `disabled` attribute; confirm() JS is bound."""
+    `disabled` attribute (and is not gated by a confirm dialog).
+
+    v0.11.10+ note: pre-v0.11.8 this also asserted `confirm(` was
+    bound as the JS handler; v0.11.8 dropped window.confirm() from
+    the install-update form because browsers were silently blocking
+    it after repeated use, and v0.11.10 swept the same pattern from
+    every other form. The assertion now checks the working signal
+    directly: no `disabled` attribute on the submit button.
+    """
     from driveforge.core import updates as updates_mod
     from driveforge.daemon.state import get_state
 
@@ -146,8 +154,13 @@ def test_settings_page_renders_normal_button_when_idle(tmp_path) -> None:
         assert resp.status_code == 200
         body = resp.text
         assert "Install update now" in body
-        # Confirm() onclick handler fires instead of disabled attribute.
-        assert "confirm(" in body
+        # Locate the install-update form and check the submit
+        # button for the absence of `disabled`.
+        idx = body.find('action="/settings/install-update"')
+        assert idx != -1
+        form_chunk = body[idx:idx + 1500]
+        assert "Install update now" in form_chunk
+        assert "disabled" not in form_chunk
     finally:
         updates_mod._cached = None  # type: ignore[attr-defined]
         updates_mod._cached_at = 0.0  # type: ignore[attr-defined]

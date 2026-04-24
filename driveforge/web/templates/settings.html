@@ -838,8 +838,12 @@
     does not touch A/B/C, F, error, or aborted runs. Cascades to
     SMART snapshots + telemetry samples for those runs.
   </p>
-  <form method="post" action="/settings/clear-legacy-fails"
-        onsubmit="return confirm('Purge all legacy grade=fail TestRuns? This cannot be undone. Only affects rows from pre-v0.5.1 code; A/B/C/F/error/aborted runs are preserved.\n\nAfter purge, affected drives show as &quot;never tested&quot; until re-run.');">
+  {# v0.11.10: confirm() removed (browser-blocked). The paragraph
+     above explains exactly what is + isn't touched by this purge.
+     This is an admin-corner operation rarely clicked; if real
+     friction is ever needed here a typed-confirmation pattern (like
+     Start Batch's "Type ERASE") is the right shape, not confirm(). #}
+  <form method="post" action="/settings/clear-legacy-fails">
     <div class="form-actions">
       <button type="submit" class="btn">Purge legacy fail rows</button>
     </div>
