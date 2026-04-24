@@ -8,12 +8,15 @@ returns a list of `Drive` records. Used on daemon start and on udev
 from __future__ import annotations
 
 import json
+import logging
 from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from driveforge.core.process import run
+
+logger = logging.getLogger(__name__)
 
 
 class Transport(str, Enum):
@@ -292,6 +295,46 @@ def discover(include_root: bool = False) -> list[Drive]:
         if not serial:
             # Drives without a serial are usually virtual / unusable for cert
             continue
+        # v0.11.12+: filter out BMC virtual-media devices. iDRAC + IPMI +
+        # Supermicro BMC all expose "Virtual Floppy", "Virtual CDROM",
+        # "Virtual HDisk" etc. as USB block devices with synthetic
+        # serials like "AAAABBBBCCCC2". They DO pass the "has serial"
+        # check above because BMCs mint fake serials, but they:
+        #   - report size=0 when no media is mounted (our common case)
+        #   - report model starting with "Virtual " (the vendor convention)
+        # Both signals are safe to filter on:
+        #   - size=0: a real drive always reports a non-zero physical
+        #     capacity via lsblk, even when empty. Zero means there's
+        #     nothing to pipeline regardless of cause (virtual media,
+        #     dead drive, card reader with no card).
+        #   - model.startswith("Virtual "): catches the case where a BMC
+        #     has an ISO mounted so size is non-zero. DriveForge would
+        #     otherwise try to secure-erase the virtual-mount — not
+        #     just wrong, actively destructive if someone has the ISO
+        #     backed by a file.
+        # JT surfaced this 2026-04-24 when his xVault (Seneca / IPMI BMC)
+        # enrolled as a fleet agent and two virtual devices showed on
+        # the operator's dashboard alongside a real Seagate 4TB SAS.
+        # He'd tried disabling virtual media in BIOS but that disabled
+        # all USB ports, preventing ISO installs.
+        size_bytes = int(entry.get("size") or 0)
+        model_str = (entry.get("model") or "Unknown").strip()
+        if size_bytes == 0:
+            logger.info(
+                "discover: skipping %s (serial=%s, model=%r) — zero capacity "
+                "(BMC virtual media with no ISO mounted, dead drive, or empty "
+                "card reader)",
+                name, serial, model_str,
+            )
+            continue
+        if model_str.startswith("Virtual "):
+            logger.info(
+                "discover: skipping %s (serial=%s, model=%r) — matches "
+                "BMC virtual-media naming convention; refusing to pipeline "
+                "a hypervisor-mounted ISO",
+                name, serial, model_str,
+            )
+            continue
         rota = entry.get("rota")
         if isinstance(rota, str):
             rota_int: int | None = int(rota)
@@ -308,13 +351,14 @@ def discover(include_root: bool = False) -> list[Drive]:
         # (HTMX polls every 3s), piling up concurrent smartctl processes on
         # the same drive and timing out. Instead, the orchestrator re-probes
         # right before dispatching secure_erase — the only place it matters.
-        model_str = (entry.get("model") or "Unknown").strip()
+        # model_str + size_bytes already computed above for the virtual-media
+        # filter; reuse here.
         firmware = entry.get("rev")
         drives.append(
             Drive(
                 serial=serial,
                 model=model_str,
-                capacity_bytes=int(entry.get("size") or 0),
+                capacity_bytes=size_bytes,
                 transport=transport,
                 device_path=device_path,
                 rotation_rate=(0 if rota_int == 0 else (7200 if rota_int == 1 else None)),
