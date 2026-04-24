@@ -657,10 +657,25 @@
     {% if fleet_pushed %}
     <p class="muted small" style="margin-top: 0;">
       Pushed update to <strong>{{ fleet_pushed }}</strong> online
-      agent{% if fleet_pushed != 1 %}s{% endif %} in parallel; each
-      will restart on its new version automatically. Watch the
-      Agents page for the connection-cycle.
+      agent{% if fleet_pushed != 1 %}s{% endif %};
+      <strong>{{ fleet_acked }}</strong> confirmed receipt before
+      this operator restarted. Each agent restarts on its new
+      version independently — watch the Agents page for the
+      connection-cycle.
     </p>
+    {% endif %}
+    {% if fleet_failed %}
+    <div class="banner warn-banner" style="margin-top: 8px;">
+      &#9888; {{ fleet_failed|length }} agent{% if fleet_failed|length != 1 %}s{% endif %}
+      did not confirm the update push:
+      <ul style="margin: 4px 0 0 18px;">
+        {% for f in fleet_failed %}
+        <li><code>{{ f }}</code></li>
+        {% endfor %}
+      </ul>
+      These agents may need a manual update via SSH:
+      <code>sudo systemctl start driveforge-update.service</code>
+    </div>
     {% endif %}
     <div hx-get="/_partials/update-log"
          hx-trigger="load, every 2s"
