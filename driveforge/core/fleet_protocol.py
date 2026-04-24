@@ -96,6 +96,14 @@ class DriveState(BaseModel):
     # When the current phase started, for the dashboard's pulse
     # animation. Operator renders relative to its own clock.
     phase_change_ts_epoch: float | None = None
+    # v0.11.11+: wall-clock UTC datetime when the agent's pipeline
+    # for this drive started (preflight, recovery, or first phase
+    # transition — whichever fired first). Operator computes elapsed
+    # time as `now - pipeline_started_at` for the remote-active card.
+    # Pre-v0.11.11 the operator hardcoded `elapsed_label=""` for
+    # remote drives because it had no way to know wall-clock start.
+    # Optional for backwards compat with pre-v0.11.11 agents.
+    pipeline_started_at: datetime | None = None
     # v0.10.2+ — is the agent currently running an LED identify
     # blinker on this drive? Exposed so the operator's toggle button
     # on remote drives reflects the true agent state (rather than the

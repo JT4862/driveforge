@@ -631,6 +631,12 @@ class FleetClient:
                 io_rate=state.active_io_rate.get(serial),
                 drive_temp_c=state.active_drive_temp.get(serial),
                 phase_change_ts_epoch=state.phase_change_ts.get(serial),
+                # v0.11.11+: ship wall-clock pipeline start so the
+                # operator can render elapsed time on the remote-
+                # active card. None when the drive isn't currently
+                # active (idle/installed) or pre-v0.11.11 startup
+                # path missed the stamp.
+                pipeline_started_at=state.active_started_at_utc.get(serial),
                 identifying=_is_identifying_safe(state, serial),
             ))
         return proto.DriveSnapshotMsg(drives=drives, seq=self._seq)

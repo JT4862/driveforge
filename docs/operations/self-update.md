@@ -82,6 +82,39 @@ The pre-v0.3.1 copy-paste commands are still available — click
 expand them. Useful if the in-app flow is broken and you need to
 update the box that fixes it.
 
+## Updating a fleet (v0.11.4+)
+
+When the daemon is running as a fleet operator, the Install update
+button **also pushes the update to every connected agent** in
+parallel before triggering its own update. v0.11.6+ adds verified
+delivery: the operator queues an `UpdateCmd` on each agent's
+outbound WebSocket queue, waits up to 5 seconds per agent for an
+ACK (`CommandResultMsg`), then fires its own update. The resulting
+redirect URL carries `fleet_pushed=N&fleet_acked=M&fleet_failed=X,Y`
+so the Settings page can render a per-agent failure banner with
+manual recovery commands.
+
+Failed/timed-out agents do NOT block the operator's own update;
+they just appear in the failed list with the SSH command needed
+to retry by hand. See [Fleet mode → Upgrading the fleet](fleet.md#upgrading-the-fleet)
+for the full flow.
+
+## When the button itself was broken
+
+v0.11.8 fixed a class of dead-button bugs caused by browsers
+silently blocking `window.confirm()` after repeated use — the form's
+`onsubmit` handler returned undefined, the form never submitted,
+and the operator was stuck with a button that did nothing. The fix
+dropped the JS confirm dialog (the green "update available" panel
+above the button + the "Restarts the daemon" subtitle below
+already explain what's about to happen). v0.11.10 swept the same
+pattern from every other form across the app.
+
+If you're on a pre-v0.11.8 install whose Install button does
+nothing when clicked, the SSH fallback at the bottom of the
+Updates panel is the bootstrap path — use it once to get to
+v0.11.8+, then the button works for everything after that.
+
 ## Still not done
 
 - **No partial / per-component updates.** It's all or nothing —
@@ -89,9 +122,11 @@ update the box that fixes it.
 - **No rollback button.** If an update breaks something, you SSH in
   and `cd /opt/driveforge-src && git checkout <prev-tag> &&
   sudo ./scripts/install.sh`.
-- **No staged rollouts** across multiple boxes. Each box updates
-  independently when its operator clicks the button (or sees the
-  navbar's green "Update Available" pill — added in v0.6.0).
+- **No staged rollouts.** Fleet update is parallel-all-at-once, not
+  canary-then-rollout. Operators who want canary-style update can
+  pre-revoke specific agents from the operator's Agents page,
+  upgrade the rest via the button, then re-enroll the canary
+  manually after validation.
 
 ## Security model
 

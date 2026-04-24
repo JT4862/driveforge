@@ -79,6 +79,16 @@ class DaemonState:
     # changes — a visual cue that progress is happening, without having to
     # watch the phase label closely.
     phase_change_ts: dict[str, float] = field(default_factory=dict)
+    # v0.11.11+: wall-clock UTC datetime captured the FIRST time a drive
+    # transitions into active state for the current pipeline run.
+    # Set via setdefault() at every active_phase write site (preflight,
+    # recovery, _advance, etc.) so the entry is created once at run
+    # start and not overwritten on subsequent phase transitions.
+    # Cleared whenever active_phase is cleared. Read by the local
+    # `_active_card` AND included in the fleet snapshot's DriveState
+    # so remote-active cards can render elapsed time on the operator
+    # dashboard (was hardcoded to "" pre-v0.11.11).
+    active_started_at_utc: dict[str, "object"] = field(default_factory=dict)  # dict[serial, datetime]
     # Wall-clock (monotonic) when each drive's pipeline last completed.
     # Used to flash a card's "just completed" state for a short window
     # after it transitions from Active → Installed.

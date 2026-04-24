@@ -307,7 +307,17 @@ def _remote_active_card(agent_state, drive_state) -> dict:
         "percent": drive_state.percent or 0.0,
         "sublabel": drive_state.sublabel,
         "io_rate": drive_state.io_rate,
-        "elapsed_label": "",  # operator doesn't know run start time for remote runs yet
+        # v0.11.11+: compute elapsed from the wall-clock pipeline_started_at
+        # the agent now ships in DriveState. Same _format_duration call as
+        # the local _active_card. Pre-v0.11.11 agents (and any newly-
+        # arrived drive whose first snapshot hasn't carried the field yet)
+        # fall back to "" — same shape as the old hardcoded value, so the
+        # template renders nothing.
+        "elapsed_label": (
+            _format_duration(int(
+                (datetime.now(UTC) - drive_state.pipeline_started_at).total_seconds()
+            )) if drive_state.pipeline_started_at else ""
+        ),
         "eta_label": None,
         # v0.10.1+ host identity
         "host_id": agent_state.agent_id,

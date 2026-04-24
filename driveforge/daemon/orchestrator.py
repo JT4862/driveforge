@@ -474,6 +474,7 @@ class Orchestrator:
         self.state.active_sublabel.clear()
         self.state.active_drive_temp.clear()
         self.state.phase_change_ts.clear()
+        self.state.active_started_at_utc.clear()
         self.state.recovery_serials.clear()
         # Stop all post-pipeline blinkers too — abort implies "don't touch
         # anything on these devices anymore."
@@ -631,6 +632,11 @@ class Orchestrator:
         self.state.device_basenames[serial] = drive.device_path.rsplit("/", 1)[-1]
         import time as _time
         self.state.phase_change_ts[serial] = _time.monotonic()
+        # v0.11.11+: stamp wall-clock pipeline start (idempotent — first
+        # call wins). Cleared in the failure-path pop block below + in
+        # start_batch's recovery cleanup.
+        from datetime import UTC as _UTC, datetime as _dt
+        self.state.active_started_at_utc.setdefault(serial, _dt.now(_UTC))
 
         try:
             if interrupted_phase == "secure_erase":
@@ -651,6 +657,7 @@ class Orchestrator:
             self.state.active_phase.pop(serial, None)
             self.state.active_percent.pop(serial, None)
             self.state.active_sublabel.pop(serial, None)
+            self.state.active_started_at_utc.pop(serial, None)
             self.state.device_basenames.pop(serial, None)
             self.state.recovery_serials.discard(serial)
             return
@@ -659,6 +666,7 @@ class Orchestrator:
         self.state.active_phase.pop(serial, None)
         self.state.active_percent.pop(serial, None)
         self.state.active_sublabel.pop(serial, None)
+        self.state.active_started_at_utc.pop(serial, None)
         # Fresh pipeline run. Same quick flag as the interrupted run.
         await self.start_batch(
             [drive],
@@ -735,6 +743,9 @@ class Orchestrator:
             self.state.active_sublabel[serial] = (
                 "recovery: probing security state + unlocking if needed"
             )
+            # v0.11.11+: stamp wall-clock pipeline start (idempotent).
+            from datetime import UTC as _UTC, datetime as _dt
+            self.state.active_started_at_utc.setdefault(serial, _dt.now(_UTC))
             loop = asyncio.get_event_loop()
             try:
                 await loop.run_in_executor(
@@ -884,6 +895,7 @@ class Orchestrator:
                 self.state.active_sublabel.pop(drive.serial, None)
                 self.state.active_drive_temp.pop(drive.serial, None)
                 self.state.phase_change_ts.pop(drive.serial, None)
+                self.state.active_started_at_utc.pop(drive.serial, None)
                 # End of recovery-triggered pipeline — clear the amber
                 # glow flag. No-op for normal (non-recovery) pipelines.
                 self.state.recovery_serials.discard(drive.serial)
@@ -1281,6 +1293,14 @@ class Orchestrator:
             import time as _time
             self.state.phase_change_ts[drive.serial] = _time.monotonic()
         self.state.active_phase[drive.serial] = phase
+        # v0.11.11+: stamp wall-clock pipeline start the first time
+        # this drive transitions into ANY active phase. setdefault
+        # guarantees only the first transition wins so the elapsed
+        # time on the dashboard reflects "time since pipeline start"
+        # not "time in current phase". Cleared in `_run_drive`'s
+        # finally block alongside active_phase.pop().
+        from datetime import UTC as _UTC, datetime as _dt
+        self.state.active_started_at_utc.setdefault(drive.serial, _dt.now(_UTC))
         self.state.active_percent[drive.serial] = 0.0
         self.state.active_sublabel.pop(drive.serial, None)
         self._log(drive.serial, f"→ phase: {phase}")
@@ -1406,6 +1426,9 @@ class Orchestrator:
         # on drives stuck in LOCKED state (SAT unlock + disable-password).
         self.state.active_phase[serial] = "preflight"
         self.state.active_sublabel[serial] = "preflight: probing security state"
+        # v0.11.11+: stamp wall-clock pipeline start (idempotent).
+        from datetime import UTC as _UTC, datetime as _dt
+        self.state.active_started_at_utc.setdefault(serial, _dt.now(_UTC))
 
         # v0.6.3+: advisory-print for known-flaky drive families. ST3000DM001
         # et al — surface the heads-up in the drive log before any erase
