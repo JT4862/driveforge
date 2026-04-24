@@ -425,19 +425,14 @@ def fleet_adopt(req: FleetAdoptRequest) -> FleetAdoptResponse:
 
     # Schedule daemon restart so agent mode takes effect. Fire-and-
     # forget; the response to the operator MUST land first, else
-    # they think adoption failed.
-    import subprocess
-    import threading
-
-    def _delayed_restart():
-        import time
-        time.sleep(1.5)  # give HTTP response time to flush
-        subprocess.run(
-            ["systemctl", "restart", "driveforge-daemon"],
-            check=False,
-        )
-
-    threading.Thread(target=_delayed_restart, daemon=True).start()
+    # they think adoption failed. v0.11.2+: uses the same polkit-
+    # authorized path as the wizard + settings role-toggle, so this
+    # works when the daemon runs as the unprivileged `driveforge`
+    # user (pre-v0.11.2 this was a latent bug — worked in dev where
+    # the daemon ran as the invoking user, but would have failed on
+    # install.sh-provisioned boxes).
+    from driveforge.core import self_restart
+    self_restart.schedule_self_restart(reason=f"adopted by operator {req.operator_url}")
     return FleetAdoptResponse(ok=True, detail="adoption accepted; restarting")
 
 

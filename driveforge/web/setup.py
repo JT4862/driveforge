@@ -123,6 +123,13 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
     state = get_state()
     form = await request.form()
     settings = state.settings
+    # v0.11.2+ — capture the role BEFORE the form handler mutates it,
+    # so the restart decision sees "pre-wizard role" vs "post-wizard
+    # role" correctly. Stash on state so multi-step wizards still
+    # compare to the ORIGINAL boot-time role, not step-N's mid-state.
+    if not hasattr(state, "_boot_role"):
+        state._boot_role = settings.fleet.role  # type: ignore[attr-defined]
+    role_before = state._boot_role  # type: ignore[attr-defined]
 
     if step == 1:
         # v0.10.0+ Role + hostname. v0.11.0+: adds "candidate" as a
@@ -181,6 +188,11 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
             cfg.save(settings)
         except PermissionError:
             pass
+        if settings.fleet.role != role_before:
+            from driveforge.core import self_restart
+            self_restart.schedule_self_restart(
+                reason=f"wizard: {role_before} → candidate",
+            )
         # Don't redirect to / — the API-only lockdown middleware
         # will serve a plaintext "waiting for adoption" message
         # there, which is exactly what we want as the post-wizard
@@ -196,6 +208,16 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
             # Dev-mode path; config writes land under /etc which isn't writable
             # without the installer. The in-memory setting still takes effect.
             pass
+        # Fresh-install wizard completion: if the final role is
+        # different from what the daemon booted under, trigger a
+        # restart so fleet role-conditional tasks start correctly.
+        # v0.11.2 fix for JT's "NX-3200 operator discovery never
+        # fired after wizard picked Operator" bug.
+        if settings.fleet.role != role_before:
+            from driveforge.core import self_restart
+            self_restart.schedule_self_restart(
+                reason=f"wizard: {role_before} → {settings.fleet.role}",
+            )
         return RedirectResponse(url="/", status_code=303)
     try:
         cfg.save(settings)
