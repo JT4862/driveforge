@@ -446,6 +446,15 @@ if [[ -d /etc/polkit-1/rules.d ]]; then
   install -m 0644 "$(dirname "$0")/../config/driveforge-udev-restart.polkit-rules" \
     /etc/polkit-1/rules.d/51-driveforge-udev-restart.rules
   ok "polkit rule installed (allows daemon → start udev-restart unit only)"
+  # v0.11.2+: third polkit rule — authorizes the daemon user to
+  # restart ITSELF. Required for the setup wizard and Settings →
+  # Fleet role toggle to auto-restart when switching modes, since
+  # the role-conditional lifespan tasks (mDNS publish, operator
+  # discovery, fleet client) only spawn at boot. See
+  # config/driveforge-daemon-restart.polkit-rules for the scope.
+  install -m 0644 "$(dirname "$0")/../config/driveforge-daemon-restart.polkit-rules" \
+    /etc/polkit-1/rules.d/52-driveforge-daemon-restart.rules
+  ok "polkit rule installed (allows daemon → restart itself on role change)"
   # polkit re-reads rules on file change via inotify, so no explicit
   # reload is required. systemctl --user daemon-reload is NOT what
   # reloads polkit rules.

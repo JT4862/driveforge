@@ -1,0 +1,42 @@
+// DriveForge daemon-restart polkit rule (v0.11.2+).
+// Installed to /etc/polkit-1/rules.d/52-driveforge-daemon-restart.rules
+// by scripts/install.sh.
+//
+// Grants the unprivileged `driveforge` user the ability to call
+// `systemctl restart driveforge-daemon.service` via systemd's D-Bus
+// interface. Used by:
+//
+//   - The setup wizard — after picking Operator or Agent role, the
+//     lifespan's role-conditional tasks (mDNS publish / discovery /
+//     fleet client) need a fresh boot to spawn. Pre-v0.11.2 the
+//     wizard silently left the daemon in its standalone-mode
+//     lifespan and the operator discovery never started, leading
+//     to JT's "R720 candidate shows up in avahi-browse but doesn't
+//     appear on the operator's Discovered panel" bug.
+//
+//   - Settings → Fleet role toggle (v0.10.5+) — same reason.
+//     Previously users had to SSH in and manually restart; this
+//     rule lets the Settings POST handler trigger the restart
+//     automatically.
+//
+//   - Candidate adoption flow (v0.11.0+) — the `/api/fleet/adopt`
+//     endpoint's `_delayed_restart` subprocess would have failed
+//     EACCES pre-v0.11.2 because the daemon user had no way to
+//     systemctl restart itself. This rule fixes that path too.
+//
+// Blast radius: an attacker who compromises the daemon can bounce
+// the daemon. That's already implicit in the v0.6.0 update rule
+// (attacker can force a re-install from origin/main which restarts
+// the daemon anyway). No net new privilege surface.
+//
+// File number: 52 — after the 50-update and 51-udev-restart rules,
+// before any 90- site overrides.
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") === "driveforge-daemon.service" &&
+        action.lookup("verb") === "restart" &&
+        subject.user === "driveforge") {
+        return polkit.Result.YES;
+    }
+});

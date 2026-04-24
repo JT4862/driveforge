@@ -2540,6 +2540,15 @@ async def save_fleet_role(request: Request) -> RedirectResponse:
         # history. Only wipe on explicit `driveforge fleet leave`.
         pass
     await _save_settings_or_ignore(request)
+    # v0.11.2+ — auto-restart so the new role's lifespan tasks
+    # (operator discovery, candidate mDNS publish, fleet client)
+    # actually spawn. Pre-v0.11.2 the user had to SSH in or click
+    # Install Update; silent failure mode where nothing seemed wrong
+    # but fleet features didn't work.
+    from driveforge.core import self_restart
+    self_restart.schedule_self_restart(
+        reason=f"settings: fleet role → {new_role}",
+    )
     return RedirectResponse(
         url="/settings?saved=fleet_role&restart=1", status_code=303,
     )
