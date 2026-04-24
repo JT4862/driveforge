@@ -247,8 +247,10 @@
          a Jinja filter call (Jinja's attribute-context parser
          doesn't handle the backslash-escaped quotes). #}
       {% set phase_display = card.phase|replace("_", " ") %}
+      {# v0.11.10: confirm() removed (browser-blocked). Abort is
+         disabled mid-secure_erase by the branch above; other phases
+         are cleanly interruptible. #}
       <button class="btn danger btn-small" type="submit"
-              onclick="return confirm('Abort {{ card.serial }}? Current phase ({{ phase_display }}) will be cancelled and any partial progress lost. A banner at the top of the page will confirm the abort landed.')"
               title="Cancel this drive's pipeline.">
         Abort
       </button>

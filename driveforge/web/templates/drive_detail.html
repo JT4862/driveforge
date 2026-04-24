@@ -88,9 +88,14 @@
          the v0.11.9 walkthrough. #}
       <button type="submit" class="btn primary">I tried one of these — retest</button>
     </form>
+    {# v0.11.10: dropped the onsubmit confirm() — browsers silently
+       block window.confirm() after repeated use, leaving operators
+       with a dead button (same root cause as the v0.11.8 install-
+       update fix). The action is recoverable (operator can later
+       regrade if they change their mind) and the panel context
+       above already explains what stamping F means. #}
     <form method="post" action="/drives/{{ drive.serial }}/frozen/mark-unrecoverable"
-          style="margin:0;"
-          onsubmit="return confirm('Mark {{ drive.serial }} as unrecoverable? This stamps an F grade so auto-enroll will skip this serial on future inserts.');">
+          style="margin:0;">
       <button type="submit" class="btn btn-danger">Mark as unrecoverable</button>
     </form>
     <span class="muted small">
@@ -160,16 +165,18 @@
                placeholder="enter the password that was set, then click Try unlock"
                style="padding: 6px 10px; font-family: var(--mono);">
       </label>
-      <button type="submit" class="btn"
-              onclick="return confirm('Try password unlock on {{ drive.serial }}? Burns one of the drive\u2019s ~5 lockout strikes. Drives typically lock out permanently after 5 wrong tries.');">
+      {# v0.11.10: confirm() removed (browser-blocked). Operator typed
+         the password before clicking — that's the implicit confirm.
+         Lockout-strike risk is documented in the surrounding panel. #}
+      <button type="submit" class="btn">
         Try unlock
       </button>
     </form>
 
-    {# Mark-unrecoverable — same escape hatch as frozen panel. #}
+    {# Mark-unrecoverable — same escape hatch as frozen panel.
+       v0.11.10: confirm() removed (see above). #}
     <form method="post" action="/drives/{{ drive.serial }}/password-locked/mark-unrecoverable"
-          style="margin: 0;"
-          onsubmit="return confirm('Mark {{ drive.serial }} as unrecoverable? This stamps an F grade so auto-enroll will skip this serial on future inserts. The drive is NOT sanitized by this action — it must be physically destroyed to meet NIST 800-88 Clear.');">
+          style="margin: 0;">
       <button type="submit" class="btn btn-danger">Mark as unrecoverable</button>
     </form>
 
@@ -215,8 +222,10 @@
   {% set active_phase_display = active_phase|replace("_", " ") %}
   <form method="post" action="/drives/{{ drive.serial }}/abort"
         style="margin: 0;">
-    <button type="submit" class="btn danger"
-            onclick="return confirm('Abort {{ drive.serial }}? Current phase ({{ active_phase_display }}) will be cancelled and any partial progress lost. A banner at the top of the page will confirm the abort landed.')">
+    {# v0.11.10: confirm() removed (browser-blocked). secure_erase is
+       already gated by the disabled-button branch above; non-erase
+       phases are safely interruptible. #}
+    <button type="submit" class="btn danger">
       Abort pipeline
     </button>
     <span class="muted small" style="margin-left: 12px;">
@@ -504,8 +513,10 @@
     so the history column shows the grade transition.
   </p>
   <form method="post" action="/drives/{{ drive.serial }}/regrade" style="margin: 0;">
-    <button type="submit" class="btn"
-            onclick="return confirm('Regrade {{ drive.serial }}? Pulls fresh SMART and re-applies the current grading thresholds. Typical duration: 5 seconds. A banner at the top of the page will confirm.')">
+    {# v0.11.10: confirm() removed (browser-blocked). Regrade is
+       read-only on the drive (just re-applies rules to existing
+       SMART) — no risk worth a confirm dialog. #}
+    <button type="submit" class="btn">
       Regrade this drive
     </button>
   </form>
