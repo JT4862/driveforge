@@ -290,6 +290,13 @@ class FleetClient:
         ack clears the agent's WAL flag on that TestRun."""
         import json
         async for raw_text in ws:
+            # v0.11.5+ — log every received frame so we can prove the
+            # WebSocket is actually delivering messages. Helped
+            # diagnose the v0.11.4 fleet-update issue where the
+            # operator queued + counted UpdateCmd as sent, but the
+            # agent showed no evidence of ever receiving it.
+            preview = raw_text[:80] if isinstance(raw_text, (str, bytes)) else repr(raw_text)[:80]
+            logger.info("fleet-client: received frame → %s", preview)
             try:
                 raw = json.loads(raw_text) if isinstance(raw_text, (str, bytes)) else raw_text
             except (TypeError, ValueError):
@@ -297,6 +304,7 @@ class FleetClient:
                 continue
             msg_type = raw.get("msg") if isinstance(raw, dict) else None
             if msg_type in {"start_pipeline", "abort", "identify", "regrade", "update"}:
+                logger.info("fleet-client: dispatching %s command", msg_type)
                 # Fire-and-forget dispatch so a slow abort doesn't
                 # block the next incoming command.
                 asyncio.create_task(self._dispatch_command(ws, msg_type, raw))
