@@ -52,20 +52,45 @@ for the full multi-node guide.
 
 ## Minimum hardware requirements
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| **CPU** | Any x86_64, 2 cores | 4+ cores — DriveForge is I/O-bound, CPU rarely the bottleneck |
-| **RAM** | 1 GB (single-drive testing) | 4 GB (32-drive parallel batches; ~32 MB per concurrent `badblocks` process) |
-| **Boot drive** | 16 GB SSD on non-test bay | 32+ GB SSD, internal/rear slot (never a front bay — those are for drives under test) |
-| **HBA** | IT-mode LSI 9200 / 9207 / 9300, or direct motherboard SATA | LSI 9207-8i (PERC H710 crossflashed) or LSI SAS2308 in IT mode |
-| **Network** | Wired Ethernet (DHCP assumed) | Wired + mDNS-capable LAN so `driveforge.local` resolves |
-| **OS** | Debian 12 (bookworm), x86_64 | Same |
+Hardware requirements depend on the **role** the box will play in
+your deployment. A single-box install runs as **standalone**. A
+fleet deployment has one **operator** (the box serving the
+dashboard + running the printer) and N **agents** (headless
+workers that actually run the pipeline on local drives).
 
-Hardware RAID controllers are not supported — you need raw pass-through
-access for SMART, SAT passthrough, and `sg_format`. Crossflash to IT
-mode. See
+| Component | Standalone / Agent | Operator-only (no local drives) |
+|-----------|-------------------|-------------------------------|
+| **CPU** | x86_64, 2+ cores | Any 1+ GHz CPU (ARM64 works — see [Fleet mode → ARM operator](#fleet-mode-operator-on-arm-raspberry-pi-etc)). The operator is I/O-bound on WebSocket traffic, not CPU. |
+| **RAM** | 4 GB (32-drive parallel batches; ~32 MB per concurrent `badblocks` process) | 512 MB is plenty. FastAPI + SQLite + N WebSocket sessions = ~260 MB resident for a 12-agent fleet. |
+| **Boot drive** | 16 GB SSD on non-test bay | 8 GB SD card / USB SSD / eMMC |
+| **HBA** | IT-mode LSI 9200 / 9207 / 9300, or direct motherboard SATA — required for raw SMART, SAT passthrough, `sg_format` | None needed — operator doesn't test drives |
+| **Network** | Wired Ethernet (DHCP) | Same. All agents must be on the operator's broadcast domain for mDNS auto-discovery (manual IP enrollment works across VLANs). |
+| **OS** | Debian 12 (bookworm), x86_64 | Debian 12 bookworm on x86_64 or arm64 |
+| **Chassis bays** | As many as you want to test in parallel, capped at **32 per agent** (see [MAX_PARALLEL](driveforge/daemon/orchestrator.py)) | N/A |
+
+**Per-agent MAX_PARALLEL = 32** is the code-level ceiling on
+concurrent pipelines per box. Fleet total = Σ(per-agent capacity).
+So if you run 12 agents × 14 chassis bays each, the operator
+aggregates 168 drives in parallel without breaking a sweat —
+there's no ceiling on the operator side because it just ingests
+snapshots + persists completion rows.
+
+Hardware RAID controllers are not supported on agents — you need
+raw pass-through access for SMART, SAT passthrough, and
+`sg_format`. Crossflash to IT mode. See
 [Supported HBAs](https://jt4862.github.io/driveforge/hardware/supported-hbas.html)
 for per-controller notes.
+
+### Fleet mode: operator on ARM (Raspberry Pi, etc)
+
+A Raspberry Pi 4 / 5 with a touchscreen makes an excellent
+operator for a fleet of heavyweight Dell / Supermicro agents:
+agents do the I/O-heavy work (badblocks, secure-erase, burn-in),
+the Pi just orchestrates + runs the label printer + serves the
+dashboard. ISO builds are amd64-only today, so arm64 operators
+use the **manual install path**: Debian 12 arm64 → clone the
+repo → `sudo ./scripts/install.sh`. All Python dependencies have
+arm64 wheels on PyPI. An arm64 ISO matrix is planned post-v1.0.
 
 **Validated reference hardware**: Dell R720 (PERC H710 → LSI 9207-8i) and
 Supermicro/Nutanix NX-3200 (LSI SAS2308). Other IT-mode LSI cards plus

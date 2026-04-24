@@ -21,11 +21,34 @@ preseed wizard pieces are skipped.
 - **Root access** (or `sudo`).
 - **Internet egress** for `apt` and `pip` to fetch dependencies. For
   air-gapped hosts, see the [air-gapped install](air-gapped.md).
-- **An IT-mode SAS HBA** (if you're using one — direct motherboard
-  SATA also works). See [supported HBAs](../hardware/supported-hbas.md).
+- **An IT-mode SAS HBA** (if you're installing an agent or
+  standalone box — direct motherboard SATA also works). See
+  [supported HBAs](../hardware/supported-hbas.md). **Operator-only
+  boxes don't need an HBA at all** — they don't test drives.
 - **A separate boot drive** that's NOT in any front bay you'll test.
   Booting from a test bay is unsafe — the front bays are
   drive-erasure territory.
+
+### arm64 / Raspberry Pi operator
+
+The manual install is also the supported path for arm64 hosts —
+typically a Raspberry Pi 4 / 5 acting as a fleet **operator** for
+a batch of x86_64 agent servers. ISO builds are amd64-only, but the
+DriveForge package is pure Python and every dependency
+(Pillow, brother_ql, FastAPI, SQLAlchemy, pydantic) ships arm64
+wheels on PyPI. Concretely:
+
+```
+sudo apt install git
+git clone https://github.com/JT4862/driveforge.git /opt/driveforge-src
+cd /opt/driveforge-src
+sudo ./scripts/install.sh
+```
+
+Then run the setup wizard at `http://<pi-hostname>.local:8080`,
+pick the **operator** role, and enroll agents from the Settings →
+Agents page as they candidate-advertise on the LAN. An arm64 ISO
+matrix is planned post-v1.0.
 
 ## The install command
 
