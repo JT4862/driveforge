@@ -318,6 +318,33 @@ if [[ "$(hostname)" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; th
   fi
 fi
 
+# v0.10.8+ — /etc/hosts canonicalization. Runs on every install.sh
+# invocation (install AND in-app update). The daemon's Python self-heal
+# can't fix drifted 127.0.1.1 lines because /etc/hosts is root-owned
+# 644 and the daemon runs as `driveforge`; systemd ReadWritePaths
+# grants namespace access, not DAC override. install.sh runs as root
+# so the fix lands cleanly here.
+#
+# Drift sources observed: v0.10.0's uniquifier sed left extra tokens
+# on boxes that already had `.local` aliases appended by some earlier
+# rename flow (NX-3200 ended up with
+# `127.0.1.1 driveforge-44242c.local driveforge` which breaks sudo).
+current_hostname="$(hostname 2>/dev/null || echo "")"
+if [[ -n "$current_hostname" ]] && [[ -w /etc/hosts ]]; then
+  # Canonical Debian form: single token on the 127.0.1.1 line matching
+  # the current short hostname. avahi handles the `.local` alias via
+  # mDNS; it does NOT belong in /etc/hosts.
+  canonical_re="^127\.0\.1\.1[[:space:]]+${current_hostname}[[:space:]]*\$"
+  if ! grep -qE "$canonical_re" /etc/hosts; then
+    log "canonicalizing /etc/hosts 127.0.1.1 entry to '${current_hostname}'"
+    # Remove any existing 127.0.1.1 line(s), then append the canonical
+    # one. Preserves every other line.
+    sed -i -E '/^127\.0\.1\.1[[:space:]]/d' /etc/hosts
+    printf "127.0.1.1\t%s\n" "$current_hostname" >> /etc/hosts
+    ok "/etc/hosts canonicalized"
+  fi
+fi
+
 log "Installing systemd units..."
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-daemon.service" /etc/systemd/system/
 install -m 0644 "$(dirname "$0")/../systemd/driveforge-tui.service" /etc/systemd/system/

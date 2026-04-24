@@ -248,6 +248,22 @@ def ensure_hosts_entry_matches_hostname() -> bool:
         pass
     try:
         _patch_etc_hosts(current)
+    except PermissionError as exc:
+        # v0.10.8: downgraded from WARNING to DEBUG. The daemon runs
+        # as `driveforge` user; /etc/hosts is root-owned 644. Systemd
+        # ReadWritePaths grants namespace access but not DAC override,
+        # so this call fails by design at the filesystem layer. The
+        # canonical fix lives in install.sh (which runs as root and
+        # reruns on every in-app update). Logging this as WARNING
+        # spammed the journal with noise that operators couldn't
+        # action. DEBUG keeps the diagnostic trail available when
+        # needed without looking like something broke.
+        logger.debug(
+            "hosts self-heal: %s (expected for non-root daemon — "
+            "install.sh fixes /etc/hosts on update; see v0.10.8 notes)",
+            exc,
+        )
+        return False
     except OSError as exc:
         logger.warning("could not self-heal /etc/hosts: %s", exc)
         return False
