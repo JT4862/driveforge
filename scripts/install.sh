@@ -59,7 +59,7 @@ done
 APT_PACKAGES=(
   python3 python3-venv python3-pip
   smartmontools hdparm sg3-utils nvme-cli e2fsprogs fio
-  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils
+  tmux lshw lsscsi ipmitool avahi-daemon avahi-utils libnss-mdns
   # ledmon provides `ledctl` for SGPIO/IBPI LED control on SES-capable
   # backplanes. Expander-only backplanes (e.g. some NX-3200 SKUs) fall
   # back silently — see driveforge/core/blinker.py _try_ledctl().

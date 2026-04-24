@@ -169,16 +169,22 @@
         <td>
           {# v0.10.4+ live connection status pulled from the in-memory
              state map. Distinct from DB `last_seen_at` (which is
-             minutes-precision DB-committed metadata). #}
+             minutes-precision DB-committed metadata).
+             v0.11.3+: distinguish "never connected" (just enrolled,
+             agent hasn't dialed in yet) from "offline" (was
+             connected, has gone away). Pre-v0.11.3 both rendered as
+             "offline" which was confusing right after adoption. #}
           {% if a.revoked_at %}
             <span class="muted small">—</span>
           {% elif live and live.connected %}
             <span class="badge badge-ok" title="Active WebSocket session">connected</span>
             <span class="muted small">· {{ live.drives }} drives</span>
           {% elif live and live.online %}
-            <span class="badge" title="Recent activity but socket not currently attached">online</span>
+            <span class="badge" title="Recent activity but socket not currently attached">reconnecting</span>
+          {% elif not a.last_seen_at %}
+            <span class="badge" title="Agent enrolled but has not yet established a fleet WebSocket — usually means the agent hasn't restarted yet, or it can't resolve the operator's hostname. Check the agent's `driveforge fleet status` for last_error.">awaiting first connect</span>
           {% else %}
-            <span class="badge badge-muted">offline</span>
+            <span class="badge badge-muted" title="Agent connected previously but is not currently reachable. Last seen: {{ a.last_seen_at }}">offline</span>
           {% endif %}
         </td>
         <td>
