@@ -2017,6 +2017,17 @@ def settings_page(request: Request) -> HTMLResponse:
         fleet_pushed = int(request.query_params.get("fleet_pushed") or 0)
     except ValueError:
         fleet_pushed = 0
+    # v0.11.6+ verified delivery — `fleet_acked` is the count of
+    # agents that returned a successful CommandResultMsg before the
+    # operator's own update fired. `fleet_failed` is a comma-
+    # separated list of agent display names that errored or timed
+    # out, surfaced as a warn banner.
+    try:
+        fleet_acked = int(request.query_params.get("fleet_acked") or 0)
+    except ValueError:
+        fleet_acked = 0
+    fleet_failed_raw = (request.query_params.get("fleet_failed") or "").strip()
+    fleet_failed = [s for s in fleet_failed_raw.split(",") if s]
     # v0.6.1+: test-print flow uses `saved=test_print` on success and
     # `test_print_error=<msg>` on failure so the template can render a
     # green "sent to printer" pill or a warn banner with the specific
@@ -2058,6 +2069,8 @@ def settings_page(request: Request) -> HTMLResponse:
             "install_error": install_error,
             "install_started": install_started,
             "fleet_pushed": fleet_pushed,
+            "fleet_acked": fleet_acked,
+            "fleet_failed": fleet_failed,
             "test_print_error": test_print_error,
             # v0.7.0+ Safety-gate UX. Hand the template the live
             # active-drive + recovery counts so it can render the
@@ -2142,15 +2155,39 @@ async def install_update(request: Request) -> RedirectResponse:
     # v0.11.4+ — when this daemon is the fleet operator, push the
     # update to every connected agent FIRST, then update ourselves.
     # JT's design intent: one button updates the entire fleet, no
-    # version skew between operator + agents. Agent updates run in
-    # parallel (each agent fires its own polkit update locally,
-    # restarts independently). Operator's update fires last so the
-    # operator's daemon-restart-induced WebSocket drop doesn't
-    # interrupt the agents' UpdateCmd delivery.
-    fleet_pushed = 0
+    # version skew between operator + agents.
+    #
+    # v0.11.6+ verified delivery: pre-v0.11.6 this was "fire and
+    # hope" — queue UpdateCmd, immediately fire operator's own
+    # update. The operator's daemon-restart could SIGTERM the
+    # WebSocket sender_loop before queued bytes flushed, silently
+    # dropping the broadcast (race we hit during the v0.11.4
+    # walkthrough). Now we:
+    #
+    #   1. Queue UpdateCmd on each online agent
+    #   2. Wait briefly for the sender_loop to drain the queues
+    #      (asyncio.sleep yields control to the event loop;
+    #      sender's `await ws.send_text` runs)
+    #   3. Wait up to ACK_TIMEOUT for each agent's CommandResultMsg
+    #      to arrive in `recent_command_results`
+    #   4. Surface failures (timeouts + ack errors) to the URL so
+    #      the post-redirect banner can warn about partial-fleet
+    #      updates
+    #   5. Then trigger the operator's own update
+    #
+    # Trade-off: adds ~ACK_TIMEOUT seconds to the install-update
+    # POST latency in the worst case. Worth it — silent fleet
+    # version skew is the bigger sin.
+    fleet_pushed: list[str] = []      # cmd_ids successfully queued
+    fleet_acked: list[str] = []       # cmd_ids confirmed delivered
+    fleet_failed: list[str] = []      # agent display names that failed
     if state.settings.fleet.role == "operator":
+        import asyncio as _asyncio
         from driveforge.core import fleet_protocol as proto
         from driveforge.daemon import fleet_server
+
+        cmd_to_agent: dict[str, str] = {}  # cmd_id → agent_id
+
         for agent_id in list(state.remote_agents.keys()):
             ra = state.remote_agents[agent_id]
             if ra.outbound_queue is None:
@@ -2158,13 +2195,52 @@ async def install_update(request: Request) -> RedirectResponse:
             cmd = proto.UpdateCmd(cmd_id=_new_cmd_id())
             try:
                 await fleet_server.send_command_to_agent(state, agent_id, cmd)
-                fleet_pushed += 1
+                fleet_pushed.append(cmd.cmd_id)
+                cmd_to_agent[cmd.cmd_id] = agent_id
             except fleet_server.CommandDispatchError:
-                # Agent might've disconnected mid-broadcast; non-
-                # fatal. They'll need a manual update.
                 logger.warning(
                     "fleet update: failed to push UpdateCmd to %s", agent_id,
                 )
+                fleet_failed.append(ra.display_name)
+
+        # Wait briefly for the sender_loops to drain. Empty 250ms
+        # tick gives the asyncio scheduler a chance to actually
+        # run each session's _sender_loop coroutine.
+        if fleet_pushed:
+            await _asyncio.sleep(0.25)
+
+        # Now poll for CommandResultMsg arrivals up to ACK_TIMEOUT.
+        # Operators with N agents on a busy LAN typically see acks
+        # back well under 1 second; 5s is a generous worst-case cap.
+        ACK_TIMEOUT = 5.0
+        POLL_INTERVAL = 0.1
+        deadline = _asyncio.get_event_loop().time() + ACK_TIMEOUT
+        pending = set(fleet_pushed)
+        while pending and _asyncio.get_event_loop().time() < deadline:
+            for agent_id in list(state.remote_agents.keys()):
+                ra = state.remote_agents.get(agent_id)
+                if ra is None:
+                    continue
+                for result in ra.recent_command_results:
+                    if result.cmd_id in pending:
+                        pending.discard(result.cmd_id)
+                        if result.success:
+                            fleet_acked.append(result.cmd_id)
+                        else:
+                            fleet_failed.append(
+                                f"{ra.display_name} ({result.detail or 'no detail'})"
+                            )
+            if pending:
+                await _asyncio.sleep(POLL_INTERVAL)
+
+        # Anything still pending = timed out before ack. Note as
+        # such (agent might still be processing the update — the
+        # actual update could complete after the operator restarts).
+        for cmd_id in pending:
+            agent_id = cmd_to_agent.get(cmd_id, "?")
+            ra = state.remote_agents.get(agent_id)
+            display = ra.display_name if ra else agent_id
+            fleet_failed.append(f"{display} (no ack within {ACK_TIMEOUT:.0f}s)")
 
     ok, message = updates_mod.trigger_in_app_update()
     if not ok:
@@ -2172,11 +2248,20 @@ async def install_update(request: Request) -> RedirectResponse:
             url="/settings?install_error=" + quote(message),
             status_code=303,
         )
-    # Note in the success URL how many agents got the push so the
-    # banner can confirm fleet-wide vs operator-only behavior.
-    suffix = f"&fleet_pushed={fleet_pushed}" if fleet_pushed else ""
+
+    # URL params surface fleet-update outcome to the post-redirect
+    # banner. fleet_pushed = N agents the broadcast was queued for;
+    # fleet_acked = N agents that confirmed receipt; fleet_failed
+    # = comma-separated list of display names that errored or timed
+    # out (those agents need manual intervention).
+    parts = [f"install_started=1"]
+    if fleet_pushed:
+        parts.append(f"fleet_pushed={len(fleet_pushed)}")
+        parts.append(f"fleet_acked={len(fleet_acked)}")
+    if fleet_failed:
+        parts.append(f"fleet_failed={quote(','.join(fleet_failed))}")
     return RedirectResponse(
-        url=f"/settings?install_started=1{suffix}", status_code=303,
+        url="/settings?" + "&".join(parts), status_code=303,
     )
 
 
