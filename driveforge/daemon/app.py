@@ -657,6 +657,8 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         fleet_client_task: asyncio.Task | None = None
         fleet_client_instance = None
         prune_task: asyncio.Task | None = None
+        discovery_task: asyncio.Task | None = None
+        candidate_publish_task: asyncio.Task | None = None
         if settings.fleet.role == "agent":
             from driveforge.daemon.fleet_client import FleetClient
             from driveforge.daemon.agent_prune import prune_loop
@@ -667,6 +669,23 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             # forwarded-and-ack'd TestRuns older than 24h per JT's
             # original fleet-spec intent.
             prune_task = asyncio.create_task(prune_loop(state))
+        elif settings.fleet.role == "operator":
+            # v0.11.0+ — browse the LAN for candidates so the
+            # operator's Settings → Agents page can show a
+            # "Discovered on network" list with Enroll buttons.
+            # Background loop runs every 15 s via avahi-browse.
+            from driveforge.core import fleet_discovery
+            discovery_task = asyncio.create_task(
+                fleet_discovery.operator_discover_loop(state),
+            )
+        elif settings.fleet.role == "candidate":
+            # v0.11.0+ — candidate advertises itself via avahi so
+            # an operator on the LAN can adopt it with one click.
+            # Subprocess wrapper around avahi-publish-service.
+            from driveforge.core import fleet_discovery
+            candidate_publish_task = asyncio.create_task(
+                fleet_discovery.candidate_publish_loop(state),
+            )
         logger.info(
             "driveforge-daemon ready on %s:%d (dev_mode=%s, role=%s)",
             settings.daemon.host,
@@ -681,7 +700,10 @@ def make_app(settings: cfg.Settings) -> FastAPI:
         if fleet_client_instance is not None:
             await fleet_client_instance.stop()
         fleet_tasks: tuple[asyncio.Task, ...] = tuple(
-            t for t in (fleet_client_task, prune_task) if t is not None
+            t for t in (
+                fleet_client_task, prune_task,
+                discovery_task, candidate_publish_task,
+            ) if t is not None
         )
         for task in (io_task, hotplug_task, update_check_task, udev_health_task, *fleet_tasks):
             task.cancel()
@@ -719,57 +741,63 @@ def make_app(settings: cfg.Settings) -> FastAPI:
             return RedirectResponse(url="/setup/1", status_code=303)
         return await call_next(request)
 
-    # v0.10.7+ agent UI lockdown. When this daemon runs as an agent,
-    # all operator-surface mutating endpoints (start batch, abort,
-    # identify, regrade, etc.) return 403 — the operator is the
-    # single pane of glass for fleet management. A minimal allowlist
-    # covers the endpoints agents legitimately need for self-service
-    # (update, restart udev, fleet leave via CLI, health probes).
+    # v0.10.7+ agent UI lockdown, v0.11.0 tightened to API-only.
+    # Agent + candidate roles serve ONLY:
+    #   /api/*       — health, local-status, adoption (candidate)
+    #   /fleet/ws    — agent's operator WebSocket
+    #   /static/*    — CSS/logo (only for the plaintext fallback page)
+    # Everything else (dashboard, settings UI, batches, drives/...)
+    # returns 404 with a plaintext pointer to the operator. No HTML
+    # dashboard, no JSON API surfaces the operator wouldn't want
+    # available to a drive-by request.
     #
-    # Mounted as a separate middleware from setup_gate so the two
-    # concerns stay independent — setup gate still applies before
-    # role gate on a fresh install.
-    AGENT_ALLOWED_WRITE_PATHS = {
-        "/settings/install-update",  # self-update should work
-        "/settings/restart-udev",    # operator-in-SSH debug path
-        "/settings/check-updates",   # trigger update poll
-    }
-    AGENT_ALLOWED_WRITE_PREFIXES = (
-        "/setup/",                   # first-run setup always OK
-    )
+    # Rationale: the whole fleet value prop is "single pane of
+    # glass on the operator." Serving a full web UI on every agent
+    # contradicts that and invites split-brain (someone starts a
+    # pipeline from the agent's UI while the operator's UI thinks
+    # that drive is idle). Plus it keeps the per-agent attack
+    # surface tiny — no Jinja rendering, no settings save paths.
 
     @app.middleware("http")
     async def agent_role_gate(request: Request, call_next):
-        """Block mutating routes when role == agent."""
+        """v0.11.0+ — agent + candidate roles are API-only."""
         s = get_state().settings
-        if s.fleet.role != "agent":
-            return await call_next(request)
-        method = request.method.upper()
-        if method in ("GET", "HEAD", "OPTIONS"):
+        if s.fleet.role not in ("agent", "candidate"):
             return await call_next(request)
         path = request.url.path
-        if path in AGENT_ALLOWED_WRITE_PATHS:
+        # Allowed prefixes:
+        if path.startswith("/api/") or path == "/api":
             return await call_next(request)
-        if any(path.startswith(p) for p in AGENT_ALLOWED_WRITE_PREFIXES):
+        if path.startswith("/fleet/") or path == "/fleet/ws":
             return await call_next(request)
-        # Everything else — /batches/*, /drives/*, /settings/grading,
-        # /settings/printer, /regrade-all-idle, etc. — refuses with
-        # a 403 pointing back at the operator. HTML response so
-        # browser-accidental hits render a friendly page.
-        operator_url = s.fleet.operator_url or "(not configured)"
-        from fastapi.responses import HTMLResponse
-        html = f"""<!doctype html>
-<html lang=en><head><meta charset=utf-8><title>Agent locked</title>
-<link rel=stylesheet href=/static/app.css></head><body style='padding:40px;max-width:720px;margin:0 auto;'>
-<h1>Agent mode: managed by operator</h1>
-<p>This DriveForge box runs as a fleet <strong>agent</strong>. All
-drive management happens from the operator's dashboard at:</p>
-<p><a href='{operator_url}'>{operator_url}</a></p>
-<p class='muted'>Run <code>sudo driveforge fleet leave</code> on this
-box's console to detach from the fleet and restore standalone mode.</p>
-<p><a href='/'>&larr; back to local status</a></p>
-</body></html>"""
-        return HTMLResponse(content=html, status_code=403)
+        if path.startswith("/static/"):
+            return await call_next(request)
+        # GET / — return a plaintext one-liner so a curious browser
+        # request shows SOMETHING informative.
+        from fastapi.responses import PlainTextResponse
+        if path == "/":
+            role_msg = {
+                "agent": (
+                    f"DriveForge agent — managed by operator at "
+                    f"{s.fleet.operator_url or '(not configured)'}.\n"
+                    f"\n"
+                    f"On this box's console:\n"
+                    f"  driveforge fleet status  — diagnostics + live connection counters\n"
+                    f"  driveforge fleet leave   — detach + revert to standalone\n"
+                ),
+                "candidate": (
+                    "DriveForge candidate — waiting for operator adoption.\n"
+                    "\n"
+                    "Go to your operator's dashboard → Settings → Agents "
+                    "and click Enroll next to this box's hostname.\n"
+                ),
+            }[s.fleet.role]
+            return PlainTextResponse(role_msg, status_code=200)
+        return PlainTextResponse(
+            f"Not available on a DriveForge {s.fleet.role}.\n"
+            f"Use the operator's dashboard for drive management.\n",
+            status_code=404,
+        )
 
     app.include_router(api_router)
     app.include_router(setup_router)

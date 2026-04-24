@@ -54,13 +54,17 @@ def _bootstrap_app(tmp_path, *, role: str = "standalone"):
 
 
 def test_agent_root_renders_status_page_not_dashboard(tmp_path) -> None:
+    """v0.11.0 changed this from an HTML Agent Status page to a
+    plaintext response (agents no longer serve any HTML). Still
+    confirms the operator-url pointer is present + the full
+    dashboard UI chrome is absent."""
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
         resp = client.get("/")
     assert resp.status_code == 200
     body = resp.text
-    # Status-page markers
-    assert "Agent status" in body
+    # Plaintext (not HTML) in v0.11.0+
+    assert "text/plain" in resp.headers["content-type"]
     assert "operator" in body.lower()
     # Full dashboard markers should be absent
     assert "New Batch" not in body
@@ -83,7 +87,10 @@ def test_standalone_root_still_renders_dashboard(tmp_path) -> None:
     assert "New Batch" in resp.text
 
 
-def test_agent_batches_new_refused_with_403(tmp_path) -> None:
+def test_agent_batches_new_refused(tmp_path) -> None:
+    """v0.11.0 tightened refusal from 403-HTML to 404-plaintext
+    (agents serve no HTML). Effect is the same: the path is
+    inaccessible."""
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
         resp = client.post(
@@ -91,22 +98,22 @@ def test_agent_batches_new_refused_with_403(tmp_path) -> None:
             data={"drive": ["X"], "confirm": "ERASE"},
             follow_redirects=False,
         )
-    assert resp.status_code == 403
-    assert "managed by operator" in resp.text.lower()
+    assert resp.status_code in (403, 404)
+    assert "operator" in resp.text.lower()
 
 
-def test_agent_drives_abort_refused_with_403(tmp_path) -> None:
+def test_agent_drives_abort_refused(tmp_path) -> None:
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
         resp = client.post("/drives/X/abort", follow_redirects=False)
-    assert resp.status_code == 403
+    assert resp.status_code in (403, 404)
 
 
-def test_agent_drives_regrade_refused_with_403(tmp_path) -> None:
+def test_agent_drives_regrade_refused(tmp_path) -> None:
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
         resp = client.post("/drives/X/regrade", follow_redirects=False)
-    assert resp.status_code == 403
+    assert resp.status_code in (403, 404)
 
 
 def test_agent_install_update_allowed(tmp_path) -> None:

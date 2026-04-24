@@ -36,14 +36,34 @@
         agents from Settings &rarr; Agents after the wizard.
       </span>
     </label>
+
+    <label class="role-option">
+      <input type="radio" name="role" value="candidate"
+             {% if current_role == "candidate" %}checked{% endif %}>
+      <span class="role-head">Agent <span class="pill">headless</span></span>
+      <span class="role-sub">
+        Headless worker that joins an existing fleet. Pick this if
+        another DriveForge box on your network is already running as
+        the operator. The rest of the wizard is skipped — this box
+        will advertise itself via mDNS and wait for the operator to
+        adopt it from its <em>Settings &rarr; Agents</em> page.
+        {% if not avahi_available %}
+        <br><strong>Note:</strong> <code>avahi-publish-service</code>
+        doesn't appear to be installed on this box. Candidates
+        normally advertise via avahi/mDNS; without it the operator
+        won't see this box automatically and you'll need to manually
+        enroll it via <code>driveforge fleet join</code> CLI.
+        {% endif %}
+      </span>
+    </label>
   </fieldset>
 
   <p class="muted small">
-    Setting up an agent? Install DriveForge on the agent box the normal
-    way (leave this wizard in standalone mode), then on the operator
-    node go to Settings &rarr; Agents, generate an enrollment token, and
-    paste the <code>driveforge fleet join …</code> one-liner on the
-    agent's console. Agents don't need the web UI.
+    Most deployments install agents by booting the <em>DriveForge Agent</em>
+    menu entry from the ISO — that path skips this wizard entirely
+    and the box appears on the operator's Agents page automatically.
+    The radio option above covers the "I already installed this box
+    as standalone and want to convert it" case.
   </p>
 
   {# v0.10.0+ Hostname confirmation. install.sh uniquifies the hostname

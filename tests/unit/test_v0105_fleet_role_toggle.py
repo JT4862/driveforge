@@ -128,13 +128,21 @@ def test_settings_page_renders_role_form_on_standalone(tmp_path) -> None:
 
 
 def test_settings_page_shows_cli_hint_on_agent(tmp_path) -> None:
-    """Agents see the 'run fleet leave on the console' copy, not the
-    role form — flipping role on an agent from the web UI would
-    brick the credential relationship."""
+    """v0.10.7: agents saw a Settings page w/ a 'run fleet leave'
+    copy. v0.11.0: agents serve no HTML at all — they're API-only.
+    The fleet-leave hint moved to the plaintext response at GET /
+    so the operator-SSH debug path still finds it.
+
+    Regression guard: confirm the hint is on the plaintext landing
+    page. The old behavior (Settings page serving the hint) is
+    intentionally gone."""
     app = _bootstrap_app(tmp_path, role="agent")
     with TestClient(app) as client:
-        resp = client.get("/settings")
-    body = resp.text
-    assert "fleet leave" in body
-    # No form action for the role picker when agent
-    assert 'action="/settings/fleet-role"' not in body
+        resp = client.get("/")
+    assert resp.status_code == 200
+    # Plaintext contains the fleet-leave instruction
+    assert "fleet leave" in resp.text
+    # Settings page itself is 404 for agents
+    with TestClient(app) as client:
+        s_resp = client.get("/settings")
+    assert s_resp.status_code == 404

@@ -84,6 +84,12 @@ def setup_step(request: Request, step: int) -> HTMLResponse:
         from driveforge.core import hostname as hostname_mod
         ctx["current_hostname"] = hostname_mod.current_hostname() or "driveforge"
         ctx["current_role"] = state.settings.fleet.role
+        # v0.11.0+ — adding the Agent (headless) option requires
+        # knowing if mDNS tooling is available, so the template can
+        # hint the user toward the ISO path if their install was
+        # netboot/curl without avahi. Cheap shell check.
+        import shutil as _shutil
+        ctx["avahi_available"] = bool(_shutil.which("avahi-publish-service"))
     elif step == 2:
         ctx["drives"] = drive_mod.discover()
         ctx["network"] = _network_snapshot()
@@ -119,13 +125,13 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
     settings = state.settings
 
     if step == 1:
-        # v0.10.0+ Role + hostname. Role is required ("standalone" is
-        # the default if the form element is somehow missing); hostname
-        # is only applied when it actually changed, so we don't re-run
-        # hostnamectl on every wizard click. Agents are NOT configured
-        # through the wizard — see `driveforge fleet join` CLI.
+        # v0.10.0+ Role + hostname. v0.11.0+: adds "candidate" as a
+        # wizard-selectable role. Candidate mode skips the rest of
+        # the wizard entirely — an agent has no printer of its own,
+        # no grading thresholds to tune, no integrations config.
+        # The operator owns all of those fleet-wide.
         role = (form.get("role") or "standalone").strip()
-        if role in ("standalone", "operator"):
+        if role in ("standalone", "operator", "candidate"):
             settings.fleet.role = role
         # Hostname. `apply_hostname` no-ops when the requested name
         # equals the current one, so this is safe on every submit.
@@ -163,6 +169,23 @@ async def setup_submit(request: Request, step: int) -> RedirectResponse:
         settings.integrations.cloudflare_tunnel_hostname = (
             (form.get("cloudflare_tunnel_hostname") or "").strip() or None
         )
+
+    # v0.11.0+ — candidate role skips every remaining wizard step.
+    # An agent/candidate has nothing operator-specific to configure
+    # locally; the operator's wizard + Settings control everything
+    # fleet-wide. Mark setup_completed so the daemon boots into
+    # candidate mode immediately after this submit.
+    if step == 1 and settings.fleet.role == "candidate":
+        settings.setup_completed = True
+        try:
+            cfg.save(settings)
+        except PermissionError:
+            pass
+        # Don't redirect to / — the API-only lockdown middleware
+        # will serve a plaintext "waiting for adoption" message
+        # there, which is exactly what we want as the post-wizard
+        # landing page.
+        return RedirectResponse(url="/", status_code=303)
 
     next_step = step + 1
     if next_step > TOTAL_STEPS:

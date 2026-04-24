@@ -184,30 +184,37 @@ class FleetConfig(BaseModel):
     servers as drive-wipe hands, each with limited CPU/RAM that
     couldn't justify its own web-UI instance.
 
-    Three roles:
+    Four roles (v0.11.0+):
 
-    - `standalone` (default) — pre-v0.10.0 behavior. No fleet
-      endpoints, no enrollment, no remote aggregation. Upgrading from
-      v0.9.x leaves this untouched; the fleet feature is opt-in.
+    - `standalone` (default) — no fleet features. Single-box install;
+      behaves identically to pre-v0.10.0.
     - `operator` — serves the web UI, aggregates drives from any
-      enrolled agents, prints cert labels for the whole fleet. Also
-      runs its OWN local pipeline (operator == standalone + fleet
-      aggregation) so single-box deployments never see the fleet
-      concept.
-    - `agent` — headless; registers with an operator, reports local
-      drives + progress, executes commands the operator sends back.
-      No web UI served. Falls back to standalone behavior (just
-      without a UI) if the operator is unreachable for a long
-      time.
+      enrolled agents, prints cert labels for the whole fleet, AND
+      runs its own local pipeline. Discovers candidates on the LAN
+      via mDNS and adopts them with one click from Settings → Agents.
+    - `agent` — headless worker. Registers with an operator; executes
+      pipelines locally; forwards completions upstream. No web UI —
+      serves only `/api/*` + the fleet WebSocket.
+    - `candidate` (v0.11.0+) — a freshly-installed box that hasn't
+      joined any fleet yet. Advertises itself via mDNS so an
+      operator on the LAN can see it on their Agents page and click
+      Enroll. On adoption, becomes an agent. No wizard, no web UI
+      beyond a bare `/api/fleet/adopt` + `/api/health`.
+      Set automatically by install.sh when the ISO boots under the
+      "DriveForge Agent" menu entry (kernel cmdline
+      `driveforge.initial_role=candidate`); settable manually via
+      Settings → Fleet on other installs if someone wants to
+      convert a standalone into a pending agent.
 
-    Fleet transport (v0.10.1+) will be a persistent WebSocket from
-    agent → operator on `listen_port`. v0.10.0 only wires the config
-    + enrollment + DB plumbing.
+    Fleet transport is a persistent WebSocket from agent → operator
+    on the operator's web port. mDNS via avahi handles candidate
+    discovery; enrollment itself uses the existing v0.10.0
+    /api/fleet/enroll endpoint behind the scenes.
     """
 
     # Role this daemon plays. Default "standalone" means "no fleet
     # features" — same as pre-v0.10.0.
-    role: str = "standalone"  # "standalone" | "operator" | "agent"
+    role: str = "standalone"  # "standalone" | "operator" | "agent" | "candidate"
 
     # Agent-only: where the operator lives. Accepts http(s)://host:port
     # or ws(s)://host:port — the fleet transport normalizes both.
@@ -230,6 +237,21 @@ class FleetConfig(BaseModel):
     # Example: "r720", "nx3200", "xvault-west". Shown on drive-card
     # host badges + the Agents settings page.
     display_name: str | None = None
+
+    # v0.11.0+ — stable per-install random id. Mostly used by
+    # candidate boxes to advertise themselves via mDNS so an
+    # operator's "Discovered" list shows a consistent identifier
+    # across reboots even before the candidate has been adopted.
+    # Also distinguishes two DriveForge installs that happen to
+    # share a MAC-derived hostname (unlikely but possible on
+    # virtualized test setups). Generated lazily on first need.
+    install_id: str | None = None
+
+    # v0.11.0+ — operator's fleet identifier. Generated on first
+    # boot in operator role; advertised in the mDNS TXT record so
+    # candidates on a shared LAN can tell two DriveForge fleets
+    # apart. Ignored in non-operator roles.
+    fleet_id: str | None = None
 
     # Enrollment-token TTL. Tokens are one-use + short-lived; 15 min
     # is plenty of time for an operator to paste the command on an

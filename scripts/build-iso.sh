@@ -129,18 +129,34 @@ if [[ -d "$WORK/cd/isolinux" ]]; then
   # `prompt 1` keeps the prompt visible for 5s so the operator can type
   # `rescue` to fall through to the manual path.
   cat > "$WORK/cd/isolinux/isolinux.cfg" <<'EOF'
-# Single-entry boot config. After 5 seconds the DriveForge automated
-# install fires automatically. Type `rescue` + Enter at the boot prompt
-# to drop to a manual Debian installer instead.
+# DriveForge installer boot menu.
+#
+# Default entry (auto-fires after 5 sec of idle): standalone or
+# operator install — runs the first-boot wizard which asks for the
+# role.
+#
+# `agent` entry: boots directly into candidate mode via
+# `driveforge.initial_role=candidate` kernel cmdline. install.sh
+# reads this from /proc/cmdline and seeds driveforge.yaml with
+# role=candidate, skipping the wizard. The fresh box then
+# advertises itself via mDNS so an operator on the LAN can adopt
+# it in one click from Settings → Agents.
+#
+# Type `rescue` + Enter for a manual Debian install (no preseed).
+
 default driveforge
 prompt 1
 timeout 50
 
-say DriveForge installer — auto-firing in 5s. Type `rescue` for manual install.
+say DriveForge installer. Default auto-fires in 5s. Type `agent` to install as a fleet agent, `rescue` for manual Debian.
 
 label driveforge
     kernel /install.amd/vmlinuz
     append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical preseed/file=/cdrom/preseed.cfg --- quiet
+
+label agent
+    kernel /install.amd/vmlinuz
+    append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical preseed/file=/cdrom/preseed.cfg driveforge.initial_role=candidate --- quiet
 
 label rescue
     kernel /install.amd/vmlinuz
@@ -150,14 +166,20 @@ fi
 
 # UEFI boot (grub)
 if [[ -f "$WORK/cd/boot/grub/grub.cfg" ]]; then
-  echo "==> Replacing grub boot menu (UEFI, single entry, auto-fire)"
+  echo "==> Replacing grub boot menu (UEFI, with agent entry)"
   cat > "$WORK/cd/boot/grub/grub.cfg" <<'EOF'
-set timeout=5
+set timeout=8
 set default="0"
 
-menuentry "DriveForge automated install (Debian 12)" {
+menuentry "DriveForge (standalone / operator)" {
     set background_color=black
     linux  /install.amd/vmlinuz auto=true priority=critical preseed/file=/cdrom/preseed.cfg quiet
+    initrd /install.amd/initrd.gz
+}
+
+menuentry "DriveForge Agent (auto-join fleet on this network)" {
+    set background_color=black
+    linux  /install.amd/vmlinuz auto=true priority=critical preseed/file=/cdrom/preseed.cfg driveforge.initial_role=candidate quiet
     initrd /install.amd/initrd.gz
 }
 
