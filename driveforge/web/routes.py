@@ -2426,6 +2426,11 @@ def agents_page(request: Request) -> HTMLResponse:
     new_token = request.query_params.get("new_token")
     rotated = request.query_params.get("rotated")
     agents: list[m.Agent] = []
+    # v0.11.0+ — discovered candidates with filter for ignored ones.
+    discovered: list = []
+    # v0.11.0+ — flash-back query params for enroll success/failure.
+    enroll_error = request.query_params.get("enroll_error")
+    enrolled_host = request.query_params.get("enrolled")
     # v0.10.4+: live status per agent_id for the Agents page.
     #   connected: bool — is there an active WS session right now
     #   online: bool — has the agent sent a frame in the is_online
@@ -2451,6 +2456,13 @@ def agents_page(request: Request) -> HTMLResponse:
         # Copy the refusal buffer (newest first) — don't drain it;
         # operator may refresh the page to recheck.
         refusals = list(reversed(state.fleet_refusals))
+        # v0.11.0+ — candidate list, excluding ignored rows. Newest
+        # first so the operator sees freshly-booted boxes at the top.
+        discovered = sorted(
+            (c for c in state.discovered_candidates.values() if not c.ignored),
+            key=lambda c: c.last_seen_monotonic,
+            reverse=True,
+        )
     # Synthesize the operator URL for the token-display command. Prefer
     # the configured integrations.cloudflare_tunnel_hostname if set
     # (public hostname), else fall back to <hostname>.local:<port>.
@@ -2476,6 +2488,10 @@ def agents_page(request: Request) -> HTMLResponse:
             # v0.10.4+ live status map + refusals buffer
             "live_status": live_status,
             "refusals": refusals,
+            # v0.11.0+ Discovered panel
+            "discovered": discovered,
+            "enroll_error": enroll_error,
+            "enrolled_host": enrolled_host,
         },
     )
 
@@ -2558,6 +2574,143 @@ def agents_new_token(request: Request) -> RedirectResponse:
         url=f"/settings/agents?new_token={quote(issue.raw_token)}",
         status_code=303,
     )
+
+
+@router.post("/settings/agents/discovered/{install_id}/enroll")
+async def agents_enroll_discovered(install_id: str, request: Request) -> RedirectResponse:
+    """v0.11.0+ — one-click Enroll for a candidate the operator sees
+    on Settings → Agents → Discovered.
+
+    Flow:
+      1. Look up the DiscoveredCandidate by install_id; 404 if unknown.
+      2. Mint a fresh Agent row + long-lived token (same primitives
+         as the v0.10.0 enrollment path, but server-side — no
+         user-visible token).
+      3. POST /api/fleet/adopt on the candidate with the full
+         package (operator_url + agent_token + display_name +
+         install_id).
+      4. Candidate writes the token, flips role, restarts. Operator
+         sees it as a new online agent on its WebSocket within
+         ~10 s.
+
+    No user-pasted token anywhere. No shared secret on the wire that
+    the operator didn't generate seconds earlier.
+    """
+    from urllib.parse import quote
+    import httpx
+    from driveforge.core import fleet as fleet_mod
+
+    state = get_state()
+    if state.settings.fleet.role != "operator":
+        raise HTTPException(status_code=400, detail="fleet role is not operator")
+
+    candidate = state.discovered_candidates.get(install_id)
+    if candidate is None:
+        return RedirectResponse(
+            url=f"/settings/agents?enroll_error={quote('candidate no longer on network')}",
+            status_code=303,
+        )
+
+    # Resolve the candidate's URL. Prefer the IP we saw in avahi over
+    # the hostname — operators on a weird DNS setup might not resolve
+    # .local reliably, but mDNS gave us a working IP.
+    candidate_url = f"http://{candidate.address}:{candidate.port}"
+
+    # Mint a fresh long-lived agent token. This is the same two-step
+    # dance the v0.10.0 CLI path does (issue enrollment token, then
+    # consume it) — we just do both sides server-side so the token
+    # never leaves the operator machine before it hits the candidate.
+    with state.session_factory() as session:
+        issue = fleet_mod.issue_enrollment_token(session, ttl_seconds=60)
+    with state.session_factory() as session:
+        result = fleet_mod.consume_enrollment_token(
+            session,
+            composite_token=issue.raw_token,
+            display_name=candidate.hostname,
+            hostname=candidate.hostname,
+            version=candidate.version,
+        )
+    agent_token = result.api_token
+
+    # Compose the operator URL that the candidate will dial into.
+    # Mirrors the logic in the Settings page's operator_url hint.
+    from driveforge.core import hostname as hostname_mod
+    op_host = (
+        state.settings.integrations.cloudflare_tunnel_hostname
+        or f"{hostname_mod.current_hostname() or 'driveforge'}.local"
+    )
+    op_scheme = "https" if state.settings.integrations.cloudflare_tunnel_hostname else "http"
+    op_port_suffix = "" if op_scheme == "https" else f":{state.settings.daemon.port}"
+    operator_url = f"{op_scheme}://{op_host}{op_port_suffix}"
+
+    # POST the adoption package to the candidate. Short timeout
+    # because the candidate's adoption handler is designed to reply
+    # fast and restart; if we hang we should back off rather than
+    # block the operator's Settings UI.
+    logger.info(
+        "fleet: adopting candidate install_id=%s host=%s ip=%s",
+        install_id, candidate.hostname, candidate.address,
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{candidate_url}/api/fleet/adopt",
+                json={
+                    "operator_url": operator_url,
+                    "agent_token": agent_token,
+                    "display_name": candidate.hostname,
+                    "install_id": install_id,
+                },
+            )
+    except httpx.RequestError as exc:
+        logger.warning("fleet: adoption POST failed: %s", exc)
+        # Roll back the Agent row so a retry doesn't create a
+        # duplicate. The token we minted is never used by anyone.
+        with state.session_factory() as session:
+            from driveforge.db import models as m
+            row = session.get(m.Agent, result.agent_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+        return RedirectResponse(
+            url=f"/settings/agents?enroll_error={quote(f'candidate unreachable: {exc}')}",
+            status_code=303,
+        )
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:  # noqa: BLE001
+            detail = resp.text
+        with state.session_factory() as session:
+            from driveforge.db import models as m
+            row = session.get(m.Agent, result.agent_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+        return RedirectResponse(
+            url=f"/settings/agents?enroll_error={quote(f'candidate rejected: {detail}')}",
+            status_code=303,
+        )
+
+    # Success — remove from discovered cache so the Enroll button
+    # doesn't offer the same box again while it's restarting.
+    state.discovered_candidates.pop(install_id, None)
+    return RedirectResponse(
+        url=f"/settings/agents?enrolled={quote(candidate.hostname)}",
+        status_code=303,
+    )
+
+
+@router.post("/settings/agents/discovered/{install_id}/ignore")
+def agents_ignore_discovered(install_id: str) -> RedirectResponse:
+    """Hide a candidate from the Discovered panel without enrolling.
+    Useful when an operator sees a neighbor's DriveForge on a shared
+    VLAN or an old candidate that hasn't cleaned up its mDNS entry."""
+    state = get_state()
+    cand = state.discovered_candidates.get(install_id)
+    if cand is not None:
+        cand.ignored = True
+    return RedirectResponse(url="/settings/agents", status_code=303)
 
 
 @router.post("/settings/agents/{agent_id}/revoke")

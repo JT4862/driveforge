@@ -352,6 +352,95 @@ class FleetEnrollResponse(BaseModel):
     operator_version: str
 
 
+class FleetAdoptRequest(BaseModel):
+    """v0.11.0+ — operator → candidate adoption payload. Everything
+    the candidate needs to flip itself into agent mode without ever
+    running the setup wizard."""
+    operator_url: str
+    agent_token: str  # long-lived token the candidate writes to agent.token
+    display_name: str
+    install_id: str   # operator echoes back the candidate's install_id as proof
+
+
+class FleetAdoptResponse(BaseModel):
+    ok: bool
+    detail: str | None = None
+
+
+@router.post("/fleet/adopt", response_model=FleetAdoptResponse)
+def fleet_adopt(req: FleetAdoptRequest) -> FleetAdoptResponse:
+    """v0.11.0+ — accept an adoption package from an operator on the
+    LAN. Candidate writes the token, flips role to agent, restarts
+    the daemon.
+
+    Serves ONLY on `role == "candidate"` — standalone / operator /
+    agent daemons return 404 to prevent accidental re-adoption of
+    an already-enrolled box (the existing agent credential would
+    be overwritten, losing its fleet membership). To re-adopt an
+    agent, run `driveforge fleet leave` on its console first to
+    revert to standalone + (on v0.11.0+) manually flip role to
+    candidate in Settings → Fleet.
+
+    Install_id echo-check prevents cross-candidate confusion on a
+    LAN with multiple candidates — operator must target the
+    specific candidate it intends to enroll.
+    """
+    state = get_state()
+    if state.settings.fleet.role != "candidate":
+        raise HTTPException(
+            status_code=404,
+            detail="not a candidate",
+        )
+    if req.install_id != (state.settings.fleet.install_id or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="install_id mismatch",
+        )
+
+    from driveforge import config as cfg
+    from driveforge.core import fleet as fleet_mod
+
+    # Write the long-lived agent token (mode 0600, chown driveforge
+    # on root path).
+    try:
+        fleet_mod.write_agent_token(
+            state.settings.fleet.api_token_path, req.agent_token,
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"token write failed: {exc}") from exc
+
+    # Flip role + persist operator URL.
+    state.settings.fleet.role = "agent"
+    state.settings.fleet.operator_url = req.operator_url
+    state.settings.fleet.display_name = req.display_name
+    try:
+        cfg.save(state.settings)
+    except PermissionError:
+        # Shouldn't happen — /etc/driveforge is owned by driveforge
+        # user per install.sh — but handle gracefully.
+        raise HTTPException(
+            status_code=500,
+            detail="could not persist role change",
+        ) from None
+
+    # Schedule daemon restart so agent mode takes effect. Fire-and-
+    # forget; the response to the operator MUST land first, else
+    # they think adoption failed.
+    import subprocess
+    import threading
+
+    def _delayed_restart():
+        import time
+        time.sleep(1.5)  # give HTTP response time to flush
+        subprocess.run(
+            ["systemctl", "restart", "driveforge-daemon"],
+            check=False,
+        )
+
+    threading.Thread(target=_delayed_restart, daemon=True).start()
+    return FleetAdoptResponse(ok=True, detail="adoption accepted; restarting")
+
+
 @router.get("/fleet/local-status")
 def fleet_local_status() -> dict[str, Any]:
     """v0.10.4+ — live fleet status for the local daemon. Called by

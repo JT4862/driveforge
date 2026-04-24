@@ -195,6 +195,13 @@ class DaemonState:
     # overwriting newer state. Keyed by agent_id.
     remote_snapshot_seq: dict[str, int] = field(default_factory=dict)
 
+    # v0.11.0+ — operator-side cache of candidates advertising on
+    # the LAN via mDNS. Keyed by install_id (stable per-install
+    # random). Populated by `fleet_discovery.operator_discover_loop`;
+    # read by the Settings → Agents "Discovered on network" panel.
+    # Operator-only; empty in other roles.
+    discovered_candidates: dict[str, "object"] = field(default_factory=dict)
+
     # v0.10.9+ — agent-side cache of the operator's auto_enroll_mode.
     # Populated from HelloAckMsg on every (re)connect + updated on
     # ConfigUpdateMsg. The agent's hotplug handler reads this when

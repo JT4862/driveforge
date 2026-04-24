@@ -60,6 +60,70 @@
   </div>
   {% endif %}
 
+  {# v0.11.0+ Discovered-on-network panel. Candidates advertise
+     themselves via mDNS when installed from the "DriveForge Agent"
+     ISO menu entry (or manually via `driveforge fleet become-candidate`).
+     One-click enroll — no tokens to copy/paste. #}
+  {% if enroll_error %}
+  <div class="banner warn-banner">&#9888; Enrollment failed: {{ enroll_error }}</div>
+  {% endif %}
+  {% if enrolled_host %}
+  <div class="banner" style="background: rgba(63,185,80,0.18); color: var(--ok); padding: 8px 12px; border-radius: 6px; margin: 10px 0;">
+    ✓ Adopted <code>{{ enrolled_host }}</code> — it will appear as an active agent within ~10 seconds.
+  </div>
+  {% endif %}
+
+  <h2 class="section-head">Discovered on network</h2>
+  {% if discovered %}
+  <p class="muted small">
+    {{ discovered|length }} candidate{{ 's' if discovered|length != 1 else '' }}
+    advertising on your LAN. Click Enroll to adopt one into this
+    fleet — no tokens needed.
+  </p>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Hostname</th>
+        <th>IP</th>
+        <th>Version</th>
+        <th>Install ID</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in discovered %}
+      <tr>
+        <td><code>{{ c.hostname }}</code></td>
+        <td><code>{{ c.address }}</code></td>
+        <td>{{ c.version }}</td>
+        <td><code class="muted">{{ c.install_id[:8] }}</code></td>
+        <td>
+          <form method="post" action="/settings/agents/discovered/{{ c.install_id }}/enroll"
+                class="inline-form" style="display: inline-block; margin-right: 6px;">
+            <button type="submit" class="btn primary">Enroll</button>
+          </form>
+          <form method="post" action="/settings/agents/discovered/{{ c.install_id }}/ignore"
+                class="inline-form" style="display: inline-block;">
+            <button type="submit" class="btn">Ignore</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">
+    No candidates on the network right now. To add an agent, boot a
+    new box from the DriveForge ISO and pick the "DriveForge Agent"
+    menu entry — it will appear here automatically within ~15 seconds.
+  </p>
+  {% endif %}
+
+  <h2 class="section-head">Manual enrollment</h2>
+  <p class="muted small">
+    For automation / provisioning scripts, or when mDNS doesn't
+    reach the new box (VLAN-isolated, non-LAN).
+  </p>
   <form method="post" action="/settings/agents/new-token" class="inline-form">
     <button type="submit" class="btn">Generate enrollment token</button>
   </form>

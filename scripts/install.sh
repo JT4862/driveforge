@@ -252,6 +252,41 @@ ok "package installed"
 log "Installing default config..."
 [[ -f /etc/driveforge/grading.yaml ]] || install -m 0644 \
   "$(dirname "$0")/../config/grading.yaml.example" /etc/driveforge/grading.yaml
+
+# v0.11.0+ — ISO boot menu can seed the initial role via kernel
+# cmdline. The "DriveForge Agent" boot entry passes
+# `driveforge.initial_role=candidate` so install.sh writes a
+# minimal driveforge.yaml skipping the setup wizard, and the
+# daemon boots directly into candidate mode (advertises itself
+# via mDNS, waits for operator adoption).
+#
+# Only applies on first install (no existing yaml); in-app updates
+# leave the existing config untouched.
+if [[ ! -f /etc/driveforge/driveforge.yaml ]]; then
+  initial_role=""
+  if [[ -r /proc/cmdline ]]; then
+    for tok in $(cat /proc/cmdline); do
+      case "$tok" in
+        driveforge.initial_role=*) initial_role="${tok#driveforge.initial_role=}" ;;
+      esac
+    done
+  fi
+  if [[ "$initial_role" == "candidate" ]]; then
+    log "kernel cmdline set driveforge.initial_role=candidate — seeding candidate config"
+    cat > /etc/driveforge/driveforge.yaml <<'YAMLEOF'
+# Seeded by install.sh from ISO boot menu (DriveForge Agent entry).
+# This box will advertise itself via mDNS until an operator on the
+# LAN adopts it via Settings → Agents → Discovered.
+setup_completed: true
+fleet:
+  role: candidate
+YAMLEOF
+    chown driveforge:driveforge /etc/driveforge/driveforge.yaml
+    chmod 0644 /etc/driveforge/driveforge.yaml
+    ok "candidate config seeded"
+  fi
+fi
+
 ok "defaults written to /etc/driveforge/"
 
 # ---------------------------------------------------------------- hostname
@@ -272,7 +307,17 @@ ok "defaults written to /etc/driveforge/"
 #     the marker file ensures we don't undo their rename on future
 #     install.sh re-runs (in-app updates call install.sh).
 HOSTNAME_UNIQ_MARKER=/var/lib/driveforge/.hostname-uniquified
-if [[ "$(hostname)" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; then
+# v0.11.0+ — read /etc/hostname directly instead of calling the
+# `hostname` command. Inside Debian installer's in-target chroot,
+# `hostname` returns the installer-environment name (usually
+# localhost or the d-i runtime's name), NOT the target's configured
+# hostname, so the guard check never matched and the uniquifier
+# never fired at install time. Only subsequent in-app updates
+# (running in the live system) would catch it, which explained
+# why fresh ISO installs were shipping out as `driveforge.local`
+# despite this block existing since v0.10.0.
+preseed_hostname="$(cat /etc/hostname 2>/dev/null | tr -d '[:space:]')"
+if [[ "$preseed_hostname" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; then
   log "Uniquifying hostname (avoids driveforge.local mDNS collisions)..."
   # Pick the iface on the default route. Fallback to first /sys entry that
   # isn't lo or a virtual bridge if `ip route` yields nothing yet
@@ -298,7 +343,14 @@ if [[ "$(hostname)" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; th
   if [[ -n "$mac_suffix" ]]; then
     new_hostname="driveforge-${mac_suffix}"
     log "  → ${new_hostname}"
-    hostnamectl set-hostname "$new_hostname" || warn "hostnamectl set-hostname failed (non-fatal)"
+    # v0.11.0+ — write /etc/hostname directly as the source of
+    # truth. `hostnamectl` may not work inside the Debian installer's
+    # in-target chroot (no running systemd-hostnamed on the installer
+    # side); direct-write is authoritative on first boot regardless.
+    # Try hostnamectl for live-system paths (in-app update) where
+    # it DOES work and pokes the kernel hostname immediately.
+    echo "$new_hostname" > /etc/hostname
+    hostnamectl set-hostname "$new_hostname" 2>/dev/null || true
     # Patch /etc/hosts so local resolution matches. Debian's preseed usually
     # installs `127.0.1.1 driveforge`; replace that exact line.
     if grep -qE '^127\.0\.1\.1\s+driveforge\b' /etc/hosts; then
@@ -306,9 +358,14 @@ if [[ "$(hostname)" == "driveforge" ]] && [[ ! -f "$HOSTNAME_UNIQ_MARKER" ]]; th
     elif ! grep -qE "^127\.0\.1\.1\s+${new_hostname}\b" /etc/hosts; then
       echo "127.0.1.1	${new_hostname}" >> /etc/hosts
     fi
-    # avahi watches /etc/hostname; a SIGHUP is the polite way to reload.
+    # avahi caches the system hostname at daemon start. `reload`
+    # sends SIGHUP which re-reads avahi-daemon.conf but NOT the
+    # kernel hostname — so the advertised name stays stale. v0.11.0
+    # uses `restart` unconditionally. Fire-and-forget: if avahi
+    # isn't running yet (pre-boot, install-time chroot), we skip
+    # cleanly and the first boot picks up the right name naturally.
     if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
-      systemctl reload avahi-daemon 2>/dev/null || systemctl restart avahi-daemon 2>/dev/null || true
+      systemctl restart avahi-daemon 2>/dev/null || true
     fi
     touch "$HOSTNAME_UNIQ_MARKER"
     ok "hostname set to ${new_hostname}"
