@@ -298,17 +298,20 @@ serial they don't physically own. The QR on that cert would point
 to your operator's dashboard, legitimizing the fake record.
 
 If your LAN is compromised, you have bigger problems than fleet
-mode. For deployments in less-trusted networks:
+mode. What we DO have today:
 
-- **Audit log**: every enrollment is logged to the operator's
-  journal (INFO level) with source IP + hostname + version.
-  `journalctl -u driveforge-daemon | grep auto-enrolled` shows
-  exactly when and from where.
-- **Revoke button** is one click; a rogue agent can be evicted
-  from the fleet the moment you spot it on the Agents page.
-- **Approval-required mode** (opt-in): Settings toggle gates every
-  enrollment behind explicit operator approval. Good for shared
-  VLANs.
+- **Operator-initiated enrollment**. Candidates advertise
+  themselves but don't auto-join anything — the operator has to
+  click Enroll on the Settings → Agents → Discovered panel. That
+  click IS the approval gate; there's no unauthenticated auto-adoption.
+- **Audit logging**. Adoption logs at INFO with the candidate's
+  install_id, hostname, and IP:
+  `journalctl -u driveforge-daemon | grep "fleet: adopting"`.
+- **Revoke** is one click; a rogue agent can be evicted from the
+  fleet the moment you spot it on the Agents page.
+- **Recent connection refusals** panel on Settings → Agents shows
+  rejected handshakes (wrong token, revoked, protocol skew, etc.)
+  with source IP for diagnostic + audit use.
 
 mTLS on the fleet socket is on the post-v1.0 roadmap for operators
 who want stronger network-layer identity.

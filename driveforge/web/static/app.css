@@ -1121,6 +1121,91 @@ dialog.label-preview-dialog::backdrop { background: rgba(0,0,0,0.65); }
 .enclosure-head h3 { margin: 0; font-size: 15px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
 .enclosure-head .muted { font-size: 12px; }
 
+/* v0.11.0 wizard Step 1 — role picker cards. Without these
+   the three <label class="role-option"> blocks render as inline
+   text, running all three role names + descriptions into one
+   paragraph. Give each option its own card with clear spacing,
+   radio button left-aligned, head/sub stacked on the right. */
+fieldset.role-select {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px 16px 4px;
+  margin: 18px 0;
+}
+fieldset.role-select legend {
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.role-option {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.role-option:hover {
+  border-color: var(--accent);
+  background: rgba(255,255,255,0.02);
+}
+.role-option input[type="radio"] {
+  margin: 2px 0 0 0;
+  grid-column: 1;
+}
+.role-option .role-head {
+  grid-column: 2;
+  display: block;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.role-option .role-head .pill {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+.role-option .role-sub {
+  grid-column: 2;
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+/* The radio's own card "activates" visually when its input is
+   checked — most browsers don't style the parent label from a
+   child :checked, so we use the :has() selector. Falls back
+   gracefully on old browsers (no styling, still usable). */
+.role-option:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.06);
+}
+
+/* v0.11.0 hostname-confirm fieldset on the wizard matches the
+   role-select fieldset's chrome. */
+fieldset.hostname-confirm {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 18px 0;
+}
+fieldset.hostname-confirm legend {
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
 /* v0.10.1+ fleet — host badge on drive cards + host filter row */
 .bay-card.remote-host { border-left: 3px solid #5b8cd6; }
 .bay-card.remote-host.host-offline { opacity: 0.55; border-left-color: #6a6f78; }

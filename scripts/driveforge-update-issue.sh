@@ -40,20 +40,31 @@ done
 PRIMARY_IP=${PRIMARY_IP:-<no-ip>}
 
 # getty(8) honors a set of backslash escapes in /etc/issue — we use:
-#   \n = hostname (set to `driveforge` by the installer preseed)
+#   \n = hostname (getty substitutes this live at login-prompt render
+#                  time, so the banner reflects the CURRENT hostname
+#                  even if the box has been renamed since boot)
 #   \r = OS release (kernel version)
 # Everything else is literal.
+#
+# v0.11.0+ — previously the Dashboard + SSH URLs hardcoded
+# `driveforge.local`, which was correct before the MAC-derived
+# hostname uniquifier (v0.10.0+) but wrong afterwards. JT hit
+# this on the NX-3200: hostname was driveforge-44242c but the
+# banner still said driveforge.local so the box looked unreachable.
+# Using `\n.local` lets getty resolve to the live hostname when
+# the login prompt renders, no matter when the hostname changed
+# relative to boot.
 
 cat > /etc/issue <<EOF
 
   DriveForge on \\n (kernel \\r)
 
   Dashboard:
-    → http://driveforge.local:8080     (preferred — mDNS)
+    → http://\\n.local:8080     (preferred — mDNS)
     → http://${PRIMARY_IP}:8080          (direct IP)
 
   Admin SSH:
-    → ssh forge@driveforge.local
+    → ssh forge@\\n.local
     → ssh forge@${PRIMARY_IP}
 
 EOF
