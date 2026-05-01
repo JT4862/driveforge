@@ -25,7 +25,7 @@ it joins the fleet — no tokens to copy, no shell commands. See
 [Fleet mode](https://jt4862.github.io/driveforge/operations/fleet.html)
 for the full multi-node guide.
 
-- **Status**: pre-alpha, in active development
+- **Status**: **v1.0** — production-ready, validated end-to-end on real hardware (3-node fleet: Dell R720 + Supermicro/Nutanix NX-3200 + Seneca xVault)
 - **License**: [MIT](LICENSE)
 - **Latest release**: [GitHub Releases](https://github.com/JT4862/driveforge/releases/latest)
 

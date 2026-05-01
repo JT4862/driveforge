@@ -18,13 +18,15 @@ onto one dashboard — useful when you have spare servers that could
 burn-in drives but don't need their own UI. See
 [Fleet mode](operations/fleet.md) for the multi-node guide.
 
-**Full operator documentation as of v0.11.11.** Every page in the tree
-below has detailed content. The v0.11.x series brought fleet mode to
-production-readiness — fleet-wide one-click updates with verified
-delivery, batch creation across multiple hosts, agent drives showing
-real test history on the operator dashboard, and remediation panels
-that work for both standalone and fleet drives. For the architectural
-/ design plan, see
+**Full operator documentation as of v1.0.** Every page in the tree
+below has detailed content. The v0.11.x series brought fleet mode
+to production-readiness — fleet-wide one-click updates with
+verified delivery, batch creation across multiple hosts, agent
+drives showing real test history on the operator dashboard, and
+remediation panels that work for both standalone and fleet drives.
+v1.0 was the formal stamp on top of v0.11.13 after the first
+24-drive multi-host batch ran end-to-end in production. For the
+architectural / design plan, see
 [`BUILD.md`](https://github.com/JT4862/driveforge/blob/main/BUILD.md)
 in the repo root — that's still the canonical place for "why is the
 system designed this way?" decisions.
@@ -51,7 +53,11 @@ system designed this way?" decisions.
 
 ## Status
 
-DriveForge is **pre-alpha**. Latest release is on the
+DriveForge is **v1.0** as of 2026-04-24 — production-ready and
+validated end-to-end on real hardware. Latest release is on the
 [Releases page](https://github.com/JT4862/driveforge/releases).
-Features are stable but the project hasn't yet had its v1.0
-real-world burn-in pass.
+v1.0 was tagged after a 3-node fleet (Dell R720 + Supermicro/Nutanix
+NX-3200 + Seneca xVault) ran a 24-drive quick-mode batch under
+operator control with the v0.11.13 codebase, validating: fleet
+fan-out, batch_id propagation across hosts, virtual-media drive
+filtering, and the in-app fleet update path with verified delivery.
