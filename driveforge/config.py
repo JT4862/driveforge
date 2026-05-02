@@ -171,7 +171,49 @@ class GradingConfig(BaseModel):
     command_timeout_b_ceiling: int = 5
     # Self-test log: cap at C if any past long self-test failed even if
     # current short test passes.
+    #
+    # v1.0.1+: this single blunt setting is preserved for backwards
+    # compatibility but is supplanted by `nuanced_self_test_grading`
+    # below. When the nuanced grading is enabled (default), the four
+    # rules below replace the single-rule behavior. Set the nuanced
+    # toggle to False to fall back to v1.0 behavior.
     cap_c_on_past_self_test_failure: bool = True
+
+    # v1.0.1+ nuanced self-test grading toggle.
+    # JT's first 15-drive 6TB enterprise pull batch capped 12/14 at C
+    # via the single pre-v1.0.1 rule — over-firing on enterprise drives
+    # that ran weekly long-tests for years and accumulated normal-noise
+    # entries. The nuanced version distinguishes test type (short vs
+    # long), recency (recent vs ancient), and clustering (one-off vs
+    # active-deterioration pattern).
+    nuanced_self_test_grading: bool = True
+
+    # When the most-recent failure is in the last `recent_window_pct` of
+    # the drive's lifetime, treat it as recent → C cap. 30 means "last
+    # 30% of POH". Default 0.3 (30%) — drives that failed within the
+    # last 30% of their service life are still showing recent stress
+    # signals. Tune higher if your refurb workflow tolerates older
+    # drives more aggressively.
+    self_test_recent_failure_window_pct: float = 0.3
+
+    # Long-test failure that's ANCIENT (recency > 1 - recent_window_pct,
+    # so default >70% of life ago) AND has at least this many clean
+    # tests since → demote to B (one tier softer than C). Default 3 —
+    # three subsequent clean long-tests is meaningful evidence the
+    # drive recovered or the original failure was a one-off. Set to a
+    # very large number to disable this softening (always C).
+    self_test_ancient_min_clean_since: int = 3
+
+    # Multiple recent failures clustering inside the last
+    # `cluster_window_hours` of POH → sticky F (active deterioration
+    # pattern). Default 1000 hours (~6 weeks of 24/7 operation). Tune
+    # tighter on more-conservative refurb pipelines.
+    self_test_cluster_failures_window_hours: int = 1000
+
+    # How many failures inside the cluster window trip the sticky-F
+    # rule. Default 2 — two distinct failed tests within ~6 weeks
+    # is a real pattern, not a one-off.
+    self_test_cluster_failures_threshold: int = 2
 
 
 class FleetConfig(BaseModel):

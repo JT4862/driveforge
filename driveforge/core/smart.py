@@ -24,6 +24,35 @@ class SmartAttribute(BaseModel):
     raw_value: int | None = None
 
 
+class SelfTestEntry(BaseModel):
+    """v1.0.1+ — one row from the drive's SMART self-test log.
+
+    The log is a ~21-entry ring buffer the drive maintains in firmware,
+    written every time the operator (or a host script) issues
+    `smartctl --test=short|long|conveyance`. Pre-v1.0.1 DriveForge
+    only kept the count + a "did any fail" boolean; v1.0.1's grading
+    rules need the per-entry shape to distinguish short-test
+    electronics-class failures from long-test media-class failures
+    AND distinguish ancient one-offs from recent clusters.
+    """
+    test_type: str  # "Short" | "Extended" | "Conveyance" | etc.
+    passed: bool
+    lifetime_hours: int | None = None
+    # Where on the drive the failure was first detected (LBA address);
+    # None for tests that passed or for SCSI drives whose log doesn't
+    # carry the field. Useful for the operator's drive-detail page
+    # Test History — clusters of failures at similar LBAs suggest
+    # localized media damage.
+    lba_first_error: int | None = None
+    # If the test was aborted mid-run, what percent of the LBA range
+    # was still untested. 0 = test ran to completion; 90 = drive
+    # gave up at 10% in. Helps distinguish "drive aborted because of
+    # power loss" (high remaining_percent, often safe to ignore)
+    # from "drive aborted because it hit unrecoverable media"
+    # (typically low remaining_percent at point of failure).
+    remaining_percent: int | None = None
+
+
 class SmartSnapshot(BaseModel):
     """Point-in-time SMART snapshot for a drive.
 
@@ -99,11 +128,23 @@ class SmartSnapshot(BaseModel):
     # `ata_smart_self_test_log.standard.table` or its SCSI equivalent).
     # Records whether ANY past self-test failed; the date/LBA of the
     # most recent failure; and total completed tests. Used by the
-    # drive-detail page's Test History section and as a ceiling-C
-    # grading signal ("drive has a failed long test in its past").
+    # drive-detail page's Test History section and (pre-v1.0.1) as
+    # a single blunt ceiling-C grading signal ("drive has a failed
+    # test in its past, demote regardless of when / what type").
     self_test_total_count: int | None = None
     self_test_last_failed_at_hour: int | None = None  # POH of last-failed, for trend display
     self_test_has_past_failure: bool | None = None
+
+    # v1.0.1+ per-entry breakdown of the SMART self-test log. Lets
+    # grading distinguish "ancient short-test failure followed by 30
+    # clean long tests" (low signal) from "long-test failure last
+    # week" (high signal). JT's first 15-drive 6TB enterprise pull
+    # batch capped 12/14 at C from the single pre-v1.0.1 rule —
+    # exactly the over-firing this nuanced version fixes. Optional
+    # for backwards compat with rows captured pre-v1.0.1; grading
+    # falls back to the summary fields above when the per-entry
+    # list is absent.
+    self_test_entries: list["SelfTestEntry"] | None = None
 
 
 ATTR_REALLOCATED = 5
@@ -255,6 +296,10 @@ def _parse_self_test_log(data: dict[str, Any]) -> dict[str, Any]:
         "self_test_total_count": None,
         "self_test_last_failed_at_hour": None,
         "self_test_has_past_failure": None,
+        # v1.0.1+ per-entry list. None = log section absent (pre-test
+        # drive or smartctl couldn't read it); empty list = log section
+        # present but no entries yet.
+        "self_test_entries": None,
     }
     # ATA self-test log
     ata_tests = (
@@ -273,6 +318,26 @@ def _parse_self_test_log(data: dict[str, Any]) -> dict[str, Any]:
             # Table is in reverse-chronological order per spec; first
             # failure in iteration = most-recent failure.
             out["self_test_last_failed_at_hour"] = failures[0].get("lifetime_hours")
+        # v1.0.1+ per-entry breakdown. Defensive about missing fields —
+        # different smartctl versions / drive vendors structure the
+        # JSON slightly differently and we'd rather omit a field than
+        # crash on a None.
+        entries: list[dict[str, Any]] = []
+        for t in ata_tests:
+            status = t.get("status") or {}
+            type_obj = t.get("type") or {}
+            entries.append({
+                "test_type": (type_obj.get("string") or "Unknown").strip(),
+                "passed": bool(status.get("passed", True)),
+                "lifetime_hours": t.get("lifetime_hours"),
+                "lba_first_error": t.get("lba"),
+                "remaining_percent": (
+                    status.get("remaining_percent")
+                    if status.get("remaining_percent") is not None
+                    else status.get("value")  # some smartctl JSONs nest it
+                ),
+            })
+        out["self_test_entries"] = entries
         return out
 
     # SCSI path (parsed similarly)
@@ -379,6 +444,14 @@ def parse(payload: str, *, device: str = "") -> SmartSnapshot:
         self_test_total_count=test_log["self_test_total_count"],
         self_test_last_failed_at_hour=test_log["self_test_last_failed_at_hour"],
         self_test_has_past_failure=test_log["self_test_has_past_failure"],
+        # v1.0.1+ per-entry breakdown — feeds the nuanced grading
+        # rules in core/grading.py and the drive-detail Test History
+        # render.
+        self_test_entries=(
+            [SelfTestEntry(**e) for e in test_log["self_test_entries"]]
+            if test_log.get("self_test_entries") is not None
+            else None
+        ),
     )
 
 

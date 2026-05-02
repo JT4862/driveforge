@@ -105,6 +105,18 @@ class CertLabelData:
     # the model/serial/reason.
     unrecoverable: bool = False
 
+    # v1.0.1+ — short human-readable reason a pass-tier (A/B/C) drive
+    # got the grade it did. Pre-v1.0.1 only F drives had a printed
+    # reason on the sticker; A/B/C drives just showed the grade glyph
+    # with no explanation. JT 2026-05-02: "if a user sees a C grading
+    # or B grading, they know exactly why it was graded that way"
+    # — surfaced after the 6TB enterprise pull batch where 14/14
+    # drives graded C with no on-sticker rationale.
+    # Populated by `primary_ceiling_reason(rules)` in the caller;
+    # None for un-ceilinged drives (clean-pass A drives that hit no
+    # ceiling rules — these print "no ceilings fired").
+    ceiling_reason: str | None = None
+
 
 def primary_fail_reason(rules: list[dict]) -> str | None:
     """Given a TestRun's `rules` JSON (a list of dict rule results from
@@ -178,6 +190,54 @@ def primary_fail_reason(rules: list[dict]) -> str | None:
         # Unknown rule name — fall back to the detail as-is, truncated.
         return (detail or "failed grading rule")[:40]
     return None
+
+
+def primary_ceiling_reason(rules: list[dict]) -> str | None:
+    """v1.0.1+ — companion to `primary_fail_reason`. Returns a short
+    label-friendly string explaining why an A/B/C drive got the
+    ceiling it did, or None if no ceiling fired (clean A drive).
+
+    Picks the STRICTEST ceiling (C-cap beats B-cap) and uses its
+    detail. Compresses the verbose grading-rule prose to fit on a
+    label line; full text is always available via the QR-linked
+    drive detail page where the "Why this drive graded X" section
+    renders the full rationale.
+
+    Format target: ≤ ~50 characters per line so it fits the cert
+    label's ~36-char body column without aggressive wrapping.
+    """
+    # Walk all rules, capture the strictest forces_grade ceiling.
+    # Order: C-cap is stricter than B-cap (caps grade lower) — we
+    # report the binding constraint, not the looser ones.
+    strictest_tier = None
+    strictest_detail = None
+    for rule in rules or []:
+        forces = rule.get("forces_grade")
+        if forces not in ("B", "C"):
+            continue
+        # B is stricter than no-cap; C is stricter than B.
+        if strictest_tier is None or (
+            forces == "C" and strictest_tier == "B"
+        ):
+            strictest_tier = forces
+            strictest_detail = rule.get("detail") or rule.get("name")
+    if not strictest_detail:
+        return None
+    # Strip the trailing "— capped at X" tail since the grade glyph
+    # on the label already shows the tier; redundant on a small sticker.
+    cleaned = strictest_detail
+    for tail in (" — capped at C", " — capped at B", " — capped at A"):
+        if cleaned.endswith(tail):
+            cleaned = cleaned[: -len(tail)]
+            break
+    # Collapse "drive's own self-test log shows a past failure at
+    # POH=12,345" → keep substantively but trim. Real label space
+    # is ~50 chars per line at body font; any rule longer than ~80
+    # chars wraps cleanly via the Pillow text-draw routine but we
+    # cap at 110 here as defense in depth.
+    if len(cleaned) > 110:
+        cleaned = cleaned[:107] + "..."
+    return cleaned
 
 
 def _load_font(size: int) -> ImageFont.ImageFont:
@@ -422,6 +482,28 @@ def render_label(data: CertLabelData, *, roll: str = "DK-1209") -> Image.Image:
             # + 4-pass badblocks overwrite was run.
             wipe_line = "Wipe: NIST 800-88 + 4-pass"
         lines.append(wipe_line)
+
+        # v1.0.1+ — ceiling-reason line. Pre-v1.0.1 a B/C drive's
+        # sticker showed the grade glyph but no explanation; an
+        # operator (or buyer) holding the sticker had no way to know
+        # WHY this drive landed at C without scanning the QR. Now
+        # the strictest ceiling rule's detail prints right below the
+        # Wipe line. Wraps to two lines if needed; full rationale is
+        # always available on the QR-linked report page.
+        if data.ceiling_reason and not is_fail:
+            reason = data.ceiling_reason
+            label = f"Capped at {data.grade.upper()}: "
+            full = label + reason
+            if len(full) <= 50:
+                lines.append(full)
+            else:
+                # Soft-wrap on a word boundary near the budget.
+                budget = 50 - len(label)
+                split_at = reason.rfind(" ", 0, budget)
+                if split_at < 20:
+                    split_at = budget
+                lines.append(label + reason[:split_at])
+                lines.append(" " * len(label) + reason[split_at:].strip())
 
     for line in lines:
         draw.text((padding, body_y), line, font=font_body, fill="black")
@@ -703,6 +785,11 @@ def build_cert_label_data_from_run(drive, run, *, report_url: str) -> CertLabelD
             break
 
     fail_reason = primary_fail_reason(run.rules or [])
+    # v1.0.1+ — also surface the strictest ceiling reason for A/B/C
+    # drives so the printed sticker isn't just a grade glyph + no
+    # explanation. The buyer-facing report linked from the QR shows
+    # the full rationale; the sticker shows the headline.
+    ceiling_reason = primary_ceiling_reason(run.rules or [])
 
     # v0.5.5+ healing delta. Only meaningful when both pre and post
     # snapshots are present (pre is NULL on legacy pre-v0.5.5 rows).
@@ -727,6 +814,7 @@ def build_cert_label_data_from_run(drive, run, *, report_url: str) -> CertLabelD
         current_pending_sector=run.current_pending_sector,
         badblocks_errors=badblocks,
         fail_reason=fail_reason,
+        ceiling_reason=ceiling_reason,  # v1.0.1+
         remapped_during_run=remapped,
         throughput_mean_mbps=run.throughput_mean_mbps,
         # v0.6.7+: pulled onto the label so the Wipe: line reflects
