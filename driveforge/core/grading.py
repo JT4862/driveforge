@@ -72,6 +72,165 @@ def _ceiling(name: str, detail: str, tier: Grade) -> Rule:
     return Rule(name=name, passed=True, detail=detail, forces_grade=tier)
 
 
+def _apply_nuanced_self_test_rules(rules: list, post, config) -> None:
+    """v1.0.1+ — split the v1.0 single past-self-test ceiling into a
+    family of nuanced rules. Each rule fires only on its specific
+    pattern; the strictest forces_grade wins the final ceiling.
+
+    The four cases:
+
+      1. RECENT long-test failure (within `recent_failure_window_pct`
+         of current POH) → cap at C. Same severity as v1.0's blanket
+         rule but only fires when the failure is genuinely recent.
+      2. ANCIENT long-test failure (>1 - recent_window_pct ago) AND
+         enough subsequent clean tests → cap at B. One tier softer,
+         on the principle that an ancient failure with proven
+         recovery is meaningfully less concerning than a recent one.
+      3. SHORT-test-only failures (no failed long tests in the log,
+         but at least one failed short test) → cap at B. Short tests
+         exercise electronics + heads + read path; failures there
+         imply electronics issues but NOT confirmed media damage.
+      4. CLUSTER pattern: ≥N failures within the last
+         `cluster_failures_window_hours` of POH → sticky F. Multiple
+         failures clustering recently is an active-deterioration
+         signal — drive is dying.
+
+    Rules are added in order of increasing severity, so the order
+    of forces_grade is C → B → C → F. The grade-rollup logic in the
+    caller picks the tightest cap.
+    """
+    # We've been called inside `if any(not e.passed for e in entries)`,
+    # so we know there's at least one failure. Sort entries chronological
+    # (smartctl returns reverse-chrono — newest first; we want
+    # iteration-by-recency below).
+    entries = list(post.self_test_entries or [])
+    poh_now = post.power_on_hours
+    failed = [e for e in entries if not e.passed]
+    if not failed:
+        return  # defensive — caller should have filtered
+
+    # --- Test type breakdown ---
+    failed_long = [
+        e for e in failed
+        if e.test_type and "extended" in e.test_type.lower()
+    ]
+    failed_short = [
+        e for e in failed
+        if e.test_type and "short" in e.test_type.lower()
+    ]
+
+    # --- Recency: only meaningful if we have a current POH AND at
+    # least one failure entry has a lifetime_hours value to compare.
+    # Drives that don't expose lifetime_hours per-entry (rare, mostly
+    # very old smartctl output) fall back to "treat as recent" —
+    # safer to demote than to silently soften.
+    most_recent_long_failure_hour = None
+    if failed_long:
+        with_hours = [e for e in failed_long if e.lifetime_hours is not None]
+        if with_hours:
+            # Reverse-chrono ordering preserved: first = most recent.
+            most_recent_long_failure_hour = with_hours[0].lifetime_hours
+
+    def _is_recent(failed_at_hour: int | None) -> bool:
+        """True when the failure is in the last `recent_window_pct` of
+        the drive's lifetime. Returns True when we can't compute
+        recency (defensive — over-demote rather than under-demote)."""
+        if poh_now is None or poh_now == 0:
+            return True
+        if failed_at_hour is None:
+            return True
+        recency = (poh_now - failed_at_hour) / poh_now
+        return recency < config.self_test_recent_failure_window_pct
+
+    # --- Rule 1: RECENT long-test failure → C cap ---
+    if failed_long and _is_recent(most_recent_long_failure_hour):
+        detail = "drive had a long-test failure within the last "
+        detail += f"{int(config.self_test_recent_failure_window_pct * 100)}% of POH"
+        if most_recent_long_failure_hour is not None:
+            detail += f" (failed at POH={most_recent_long_failure_hour:,}"
+            if poh_now is not None:
+                detail += f", now at {poh_now:,}"
+            detail += ")"
+        detail += " — capped at C"
+        rules.append(_ceiling(
+            "no_recent_long_test_failure", detail, Grade.C,
+        ))
+
+    # --- Rule 2: ANCIENT long-test failure + clean tests since → B cap ---
+    if failed_long and not _is_recent(most_recent_long_failure_hour):
+        # Count clean tests AFTER the most-recent failure. Entries are
+        # reverse-chrono; "after" the failure means "earlier in the
+        # entries list" (closer to index 0).
+        clean_since = 0
+        for e in entries:
+            if e.lifetime_hours is None:
+                continue
+            if (
+                most_recent_long_failure_hour is not None
+                and e.lifetime_hours > most_recent_long_failure_hour
+                and e.passed
+            ):
+                clean_since += 1
+        if clean_since >= config.self_test_ancient_min_clean_since:
+            detail = (
+                f"drive had an ancient long-test failure (POH="
+                f"{most_recent_long_failure_hour:,}) but has {clean_since} "
+                f"clean tests since — capped at B"
+            )
+            rules.append(_ceiling(
+                "no_ancient_long_test_failure_or_recovered", detail, Grade.B,
+            ))
+        else:
+            # Ancient failure but not enough clean tests since to
+            # demonstrate recovery — still demote to C, just with the
+            # honest "ancient but no recovery evidence" wording.
+            detail = (
+                f"drive had an ancient long-test failure (POH="
+                f"{most_recent_long_failure_hour:,}) and only {clean_since} "
+                f"clean tests since (need {config.self_test_ancient_min_clean_since}) "
+                f"— capped at C"
+            )
+            rules.append(_ceiling(
+                "no_ancient_long_test_failure_without_recovery",
+                detail, Grade.C,
+            ))
+
+    # --- Rule 3: SHORT-test-only failures → B cap ---
+    if failed_short and not failed_long:
+        rules.append(_ceiling(
+            "no_short_test_only_failure",
+            f"drive had {len(failed_short)} short-test failure(s) but no "
+            f"long-test failures (electronics signal, not media) "
+            f"— capped at B",
+            Grade.B,
+        ))
+
+    # --- Rule 4: CLUSTER pattern → sticky F ---
+    if poh_now is not None:
+        cluster_window_lower = poh_now - config.self_test_cluster_failures_window_hours
+        cluster_failures = [
+            e for e in failed
+            if e.lifetime_hours is not None
+            and e.lifetime_hours >= cluster_window_lower
+        ]
+        if len(cluster_failures) >= config.self_test_cluster_failures_threshold:
+            # This is a HARD fail — passed=False so the grade rollup
+            # treats it as a forces_grade=F ceiling. The cluster
+            # pattern is the strongest signal in the family: it
+            # means the drive is actively deteriorating, not just
+            # carrying historical noise.
+            rules.append(Rule(
+                name="no_recent_cluster_failures",
+                passed=False,
+                detail=(
+                    f"{len(cluster_failures)} self-test failures within the "
+                    f"last {config.self_test_cluster_failures_window_hours} "
+                    f"POH — active-deterioration pattern; failing the drive"
+                ),
+                forces_grade=Grade.FAIL,
+            ))
+
+
 def grade_drive(
     pre: SmartSnapshot,
     post: SmartSnapshot,
@@ -462,9 +621,30 @@ def grade_drive(
                     Grade.B,
                 ))
 
-        # Self-test log history — past long-test failure caps at C
-        # even if the short test we just ran passed.
-        if config.cap_c_on_past_self_test_failure and post.self_test_has_past_failure:
+        # Self-test log history — pre-v1.0.1 was a single blunt
+        # ceiling-C rule that fired on ANY past failure, no matter
+        # how ancient or which test type. JT's first 15-drive 6TB
+        # enterprise pull batch capped 12/14 at C from this single
+        # rule — exactly the over-firing v1.0.1's nuanced version
+        # fixes.
+        if (
+            config.nuanced_self_test_grading
+            and post.self_test_entries is not None
+            and any(not e.passed for e in post.self_test_entries)
+        ):
+            # v1.0.1+ nuanced fork: split into (up to) 4 rules based on
+            # test type, recency, and clustering. Multiple rules can
+            # fire concurrently (e.g. ancient long-test failure + recent
+            # short-test failure → both apply, the strictest wins for
+            # the actual grade ceiling).
+            _apply_nuanced_self_test_rules(rules, post, config)
+        elif (
+            config.cap_c_on_past_self_test_failure
+            and post.self_test_has_past_failure
+        ):
+            # v1.0 fallback path — fires when the nuanced grading is
+            # disabled OR when per-entry data is missing (pre-v1.0.1
+            # SmartSnapshot rows that haven't been re-captured).
             failed_at = post.self_test_last_failed_at_hour
             rules.append(_ceiling(
                 "no_past_self_test_failure",

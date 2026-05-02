@@ -443,6 +443,56 @@
     </dd>
     {% endif %}
   </dl>
+
+  {# v1.0.1+ per-entry SMART self-test log breakdown. Rendered when the
+     SmartSnapshot carries the new `self_test_entries` list (populated
+     by post-v1.0.1 captures). Lets operators see WHICH entries fired
+     the grading ceiling — short vs long, recent vs ancient, clustered
+     vs isolated — so the grade ceiling is auditable, not opaque.
+     Pre-v1.0.1 SmartSnapshot rows render the summary above + a note
+     directing the operator to Regrade for the breakdown. #}
+  {% if latest.self_test_entries %}
+  <details style="margin-top: 14px;">
+    <summary class="muted small">Show SMART self-test log ({{ latest.self_test_entries|length }} entries)</summary>
+    <table class="rules" style="margin-top: 10px;">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Test</th>
+          <th>Status</th>
+          <th>POH at test</th>
+          <th>LBA of first error</th>
+          <th>Remaining %</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for e in latest.self_test_entries %}
+        <tr class="{% if e.passed %}ok{% else %}fail{% endif %}">
+          <td>{{ loop.index }}</td>
+          <td>{{ e.test_type }}</td>
+          <td>{% if e.passed %}<span class="ok">passed</span>{% else %}<span class="bad">FAILED</span>{% endif %}</td>
+          <td>{{ "{:,}".format(e.lifetime_hours) if e.lifetime_hours is not none else "—" }}</td>
+          <td>{{ "{:,}".format(e.lba_first_error) if e.lba_first_error is not none else "—" }}</td>
+          <td>{{ e.remaining_percent if e.remaining_percent is not none else "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small" style="margin-top: 6px;">
+      Entries are reverse-chronological per ATA spec — entry #1 is the
+      most recent test. v1.0.1+ grading rules consider both type and
+      recency to avoid the v1.0 over-firing on enterprise drives that
+      accumulated normal-noise entries over years of operation.
+    </p>
+  </details>
+  {% elif latest.self_test_has_past_failure %}
+  <p class="muted small" style="margin-top: 10px;">
+    SMART self-test log per-entry breakdown was not captured for this
+    run (pre-v1.0.1). Click <strong>Regrade this drive</strong> below
+    to re-capture and see which specific entries triggered the past-
+    failure ceiling.
+  </p>
+  {% endif %}
 </section>
 {% endif %}
 
