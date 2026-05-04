@@ -1,0 +1,76 @@
+[Unit]
+Description=DriveForge daemon (orchestration, web UI, REST API)
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+User=driveforge
+Group=driveforge
+ExecStart=/usr/bin/driveforge-daemon
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=/var/lib/driveforge
+StateDirectory=driveforge
+LogsDirectory=driveforge
+
+# Drive access — the daemon needs privileged access to block devices
+# for SMART reads, secure-erase, and badblocks. AmbientCapabilities
+# grants these to the daemon process itself; it runs as the
+# unprivileged `driveforge` user with just these three caps rather
+# than as root.
+#
+# CapabilityBoundingSet removed (v0.5.0)
+# --------------------------------------
+#
+# The bounding set used to be a tight whitelist (RAWIO + ADMIN +
+# NET_BIND_SERVICE). But the bounding set is a HARD cap on what
+# capabilities the entire process tree can hold — including caps
+# gained via setuid. Sudo is setuid-root and needs CAP_SETUID,
+# CAP_SETGID, CAP_AUDIT_WRITE, and realistically several more
+# (PAM modules pull in CAP_AUDIT_CONTROL, CAP_DAC_READ_SEARCH,
+# CAP_SYS_RESOURCE depending on sudoers config). v0.4.2 added three;
+# real-deploy testing surfaced that it still wasn't enough on the
+# R720. Rather than play whack-a-mole trying to enumerate every cap
+# sudo or its PAM stack transitively needs, drop the bounding set
+# entirely and rely on the daemon's ambient caps (above) as the
+# actual security boundary.
+#
+# Effective security posture:
+#   - Daemon process runs as user `driveforge` with exactly RAWIO +
+#     ADMIN + NET_BIND_SERVICE ambient caps. That's the load-bearing
+#     restriction; it's what prevents a compromised daemon from
+#     doing arbitrary kernel things.
+#   - v0.6.0+ update path: the daemon no longer shells out via sudo.
+#     The in-app "Install update" button runs `systemctl start
+#     driveforge-update.service` without any sudo wrapper; the
+#     polkit rule at /etc/polkit-1/rules.d/50-driveforge-update.rules
+#     authorizes the daemon user's StartUnit call via systemd's
+#     D-Bus interface. No setuid path in the daemon's code anywhere.
+#   - Bounding set + NoNewPrivileges left as pre-v0.6.0 for now. A
+#     follow-up release can tighten NoNewPrivileges=true once we've
+#     audited that no daemon-spawned binary relies on setuid
+#     elevation (smartctl/hdparm/sg_format/nvme/badblocks/ipmitool/
+#     ledctl/sg_ses/systemctl are all non-setuid on Debian; rawio
+#     cap + disk-group membership covers them).
+AmbientCapabilities=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=false
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+# /etc/hostname + /etc/hosts are needed for the v0.2.8+ Settings → Hostname
+# rename feature. Without these, the daemon hits EROFS (Errno 30) trying
+# to write to /etc — systemd's mount-namespace protection makes the whole
+# filesystem read-only to the daemon by default, even though shells see
+# normal write permissions. Bug shipped in v0.2.8 (rename feature never
+# exercised against the real protected daemon — dev mode short-circuits
+# the writes); fixed in v0.4.1.
+ReadWritePaths=/var/lib/driveforge /var/log/driveforge /etc/driveforge /etc/hostname /etc/hosts
+
+# Allow journald + local logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

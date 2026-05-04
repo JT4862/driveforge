@@ -1,0 +1,16 @@
+# DHCP on every wired Ethernet interface present at boot. Wildcard
+# matches any name starting with "en" (modern systemd predictable
+# interface naming: enp0s31f6, eno1, ens3, etc.) plus the legacy
+# "eth*" naming some older kernels still produce.
+#
+# Live ISO ships ifupdown-style configuration for simplicity — Debian
+# 12 still includes ifupdown by default and it's the path of least
+# friction for "DHCP on whatever NIC is plugged in." NetworkManager
+# would be heavier and brings a dbus dependency we don't otherwise
+# need.
+
+auto en*
+iface en* inet dhcp
+
+auto eth*
+iface eth* inet dhcp

@@ -1,0 +1,11 @@
+
+================================================================
+  DriveForge Field-Check Live
+  Read-only inspection mode. Destructive operations are disabled.
+================================================================
+
+  Web UI: http://\4{en0}:8080
+  (or check `ip -4 addr show` if the IP didn't render above)
+
+  Login: root (no password — Live ISO default)
+

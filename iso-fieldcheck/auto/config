@@ -1,0 +1,23 @@
+#!/bin/sh
+# live-build's auto/config script — runs on every `lb config` invocation.
+# Captures the canonical configuration so fresh `lb clean && lb config`
+# rebuilds always produce the same Live ISO.
+#
+# Reference: https://live-team.pages.debian.net/live-manual/
+
+set -e
+
+lb config noauto \
+    --architectures amd64 \
+    --linux-flavours amd64 \
+    --distribution bookworm \
+    --archive-areas "main contrib" \
+    --binary-images iso-hybrid \
+    --bootloaders "syslinux,grub-efi" \
+    --iso-application "DriveForge Field-Check Live" \
+    --iso-volume "DriveForge Field-Check" \
+    --apt-recommends false \
+    --apt-indices false \
+    --memtest none \
+    --debootstrap-options "--variant=minbase" \
+    "${@}"
