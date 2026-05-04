@@ -256,7 +256,18 @@ class FleetConfig(BaseModel):
 
     # Role this daemon plays. Default "standalone" means "no fleet
     # features" — same as pre-v0.10.0.
-    role: str = "standalone"  # "standalone" | "operator" | "agent" | "candidate"
+    #
+    # v1.1.0+ adds "field_check" — a read-only mode preseeded by the
+    # field-check Live ISO (`driveforge-fieldcheck-X.Y.Z.iso`). Used
+    # for "show up to a seller's house, plug a USB stick into their
+    # server, boot, see drive verdicts" workflows. Hard-disabled
+    # destructive ops; no fleet client; no mDNS publish; minimal
+    # read-only dashboard. NOT exposed in the setup wizard or the
+    # Settings → Fleet role toggle — only ever set by the live ISO's
+    # preseed, never by an existing-install operator's choice. The
+    # only way `role=field_check` shows up on a daemon is if it
+    # booted from the field-check ISO.
+    role: str = "standalone"  # "standalone" | "operator" | "agent" | "candidate" | "field_check"
 
     # Agent-only: where the operator lives. Accepts http(s)://host:port
     # or ws(s)://host:port — the fleet transport normalizes both.

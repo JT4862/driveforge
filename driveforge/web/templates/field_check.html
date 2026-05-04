@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Field check · DriveForge{% endblock %}
+{% block content %}
+<section class="page-head">
+  <h1>Field check</h1>
+  <p class="muted">
+    Read-only inspection mode. This DriveForge install booted from
+    the field-check Live ISO and <strong>cannot run any destructive
+    operation</strong> on this host's drives — no secure-erase, no
+    badblocks, no formatting. Use it to inspect SMART health + server
+    identity before deciding whether to buy or accept the hardware.
+  </p>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Server</h2>
+  </div>
+  <dl style="display: grid; grid-template-columns: max-content 1fr; gap: 6px 24px; margin: 0;">
+    <dt class="muted">Manufacturer</dt>
+    <dd>{{ server.manufacturer or "—" }}</dd>
+    <dt class="muted">Model</dt>
+    <dd>{{ server.product_name or "—" }}</dd>
+    <dt class="muted">Serial</dt>
+    <dd>{{ server.serial_number or "—" }}</dd>
+    <dt class="muted">BIOS</dt>
+    <dd>
+      {% if server.bios_vendor or server.bios_version %}
+        {{ server.bios_vendor or "—" }} {{ server.bios_version or "" }}
+        {% if server.bios_date %}<span class="muted small">({{ server.bios_date }})</span>{% endif %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt class="muted">CPU</dt>
+    <dd>
+      {% if server.cpu_model %}
+        {{ server.cpu_model }}
+        {% if server.cpu_sockets and server.cpu_cores_per_socket %}
+          <span class="muted small">·
+            {{ server.cpu_sockets }}× sockets,
+            {{ server.cpu_cores_per_socket }} cores each,
+            {{ server.cpu_threads_total }} threads total
+          </span>
+        {% endif %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt class="muted">Memory</dt>
+    <dd>
+      {% if server.memory_total_gb %}
+        {{ server.memory_total_gb }} GB
+        {% if server.memory_dimm_summary %}
+          <span class="muted small">· {{ server.memory_dimm_summary }}</span>
+        {% endif %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt class="muted">Network</dt>
+    <dd>
+      {% if server.nic_count %}
+        {{ server.nic_count }} NIC{{ "s" if server.nic_count != 1 else "" }}
+        {% if server.nic_summary %}
+          <span class="muted small">·
+            {% for n in server.nic_summary %}{{ n }}{% if not loop.last %}, {% endif %}{% endfor %}
+          </span>
+        {% endif %}
+      {% else %}—{% endif %}
+    </dd>
+    <dt class="muted">Storage controllers</dt>
+    <dd>
+      {% if server.storage_controllers %}
+        <ul style="margin: 0; padding-left: 18px;">
+        {% for c in server.storage_controllers %}<li>{{ c }}</li>{% endfor %}
+        </ul>
+      {% else %}—{% endif %}
+    </dd>
+    <dt class="muted">BMC / IPMI</dt>
+    <dd>
+      {% if server.bmc_present %}
+        <span class="ok">{{ server.bmc_summary or "Present" }}</span>
+      {% elif server.bmc_present is false %}
+        <span class="muted">Not detected</span>
+      {% else %}—{% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Drives ({{ drives|length }})</h2>
+  </div>
+
+  {% if not drives %}
+  <p class="muted">
+    No drives detected. Either nothing is plugged in, or the host's
+    HBA isn't passing drives through to the OS (check for hardware
+    RAID — DriveForge needs IT-mode pass-through to read SMART).
+  </p>
+  {% else %}
+  <table class="runs">
+    <thead>
+      <tr>
+        <th>Serial</th>
+        <th>Model</th>
+        <th>Capacity</th>
+        <th>Transport</th>
+        <th>Type</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in drives %}
+      <tr>
+        <td><code>{{ d.serial }}</code></td>
+        <td>{{ d.model }}</td>
+        <td>{{ "%.1f"|format(d.capacity_tb) }} TB</td>
+        <td>{{ d.transport|upper }}</td>
+        <td>
+          {% if d.rotation_rate is not none and d.rotation_rate > 0 %}HDD
+          {% elif d.rotation_rate == 0 %}SSD
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small" style="margin-top: 14px;">
+    Live drive listing only — this is the pre-grade view. To get
+    SMART grades + per-entry self-test history (the v1.0.1 nuanced
+    rules), boot from the full DriveForge installer ISO instead and
+    run a quick-mode pipeline. The field-check ISO refuses all
+    destructive operations by design.
+  </p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <p class="muted small" style="margin: 0;">
+    DriveForge {{ settings.app.version if settings.app else "" }} ·
+    Field-check ISO · Refresh this page after plugging/unplugging
+    drives. Reboot the host to leave field-check mode.
+  </p>
+</section>
+{% endblock %}
