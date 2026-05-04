@@ -351,6 +351,13 @@ class Orchestrator:
     ) -> str:
         """Create a batch and kick off testing for each drive.
 
+        v1.1.0+: hard-refused when role=field_check. The field-check
+        Live ISO is for plugging-into-stranger's-server scenarios
+        where DriveForge MUST NOT run any destructive operation.
+        Refusal at the orchestrator level (not just in the web route)
+        is defense-in-depth — even if someone manually edits config
+        and restarts the daemon, the destructive paths refuse to fire.
+
         Refuses to include any drive that's already under test in another
         in-flight batch (raises `BatchRejected` if every requested drive is
         already active).
@@ -365,6 +372,18 @@ class Orchestrator:
         side the row never exists locally yet, so we insert fresh —
         both sides end up with rows under the same operator-owned id.
         """
+        # v1.1.0+ field-check refusal — hard stop before any drive
+        # state mutation. Raises BatchRejected so callers (web route,
+        # fleet command dispatcher) surface a clean operator-visible
+        # error instead of crashing.
+        if self.state.settings.fleet.role == "field_check":
+            raise BatchRejected(
+                "drive testing is permanently disabled in field-check mode "
+                "— this DriveForge install boots from the field-check Live "
+                "ISO and must not run destructive operations on the host's "
+                "drives. Reboot from the full DriveForge installer ISO if "
+                "you want to run a real refurb pipeline."
+            )
         busy = self.active_serials()
         conflicts = [d.serial for d in drives if d.serial in busy]
         if conflicts:

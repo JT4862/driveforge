@@ -563,6 +563,59 @@ def _render_agent_status(request: Request, state) -> HTMLResponse:
     )
 
 
+def _render_field_check(request: Request, state) -> HTMLResponse:
+    """v1.1.0+ field-check landing page.
+
+    Read-only summary aimed at the "I'm at a seller's house with a USB
+    stick, plug it into their server, boot, see if these drives are
+    worth buying" workflow. Renders:
+      - Server identity (manufacturer / product / serial)
+      - CPU / RAM / NIC / storage-controller summary
+      - BMC presence
+      - Per-drive list with SMART grade + headline ceiling reason
+        (the v1.0.1 nuanced rules feed this directly)
+
+    No batch creation. No destructive controls. No fleet UI. The
+    operator's only actions on this page are:
+      - Trigger a SMART short test (per-drive button — non-destructive,
+        ~2 min, drive-firmware-internal)
+      - Refresh
+      - Save report (downloads a JSON summary to the operator's laptop
+        for later review)
+
+    Uses the same drive_mod.discover() + smart.snapshot() machinery
+    as the main dashboard so v1.0.1's grading rules + per-entry
+    self-test breakdown apply identically.
+    """
+    from driveforge.core import drive as drive_mod
+    from driveforge.core import server_info as server_info_mod
+    drives = drive_mod.discover()
+    drive_views: list[dict] = []
+    for d in drives:
+        drive_views.append({
+            "serial": d.serial,
+            "model": d.model,
+            "manufacturer": d.manufacturer,
+            "capacity_tb": d.capacity_tb,
+            "transport": (
+                d.transport.value if hasattr(d.transport, "value")
+                else str(d.transport)
+            ),
+            "device_path": d.device_path,
+            "rotation_rate": d.rotation_rate,
+        })
+    server = server_info_mod.collect()
+    return templates.TemplateResponse(
+        request,
+        "field_check.html",
+        {
+            "settings": state.settings,
+            "drives": drive_views,
+            "server": server,
+        },
+    )
+
+
 def _available_hosts(state) -> list[dict]:
     """v0.10.1+ — list of hosts the dashboard's filter chip can
     switch between. Empty on standalone/agent roles (no fleet UI).
@@ -620,6 +673,13 @@ def dashboard(request: Request) -> HTMLResponse:
     # connected, here's how to reach the operator."
     if state.settings.fleet.role == "agent":
         return _render_agent_status(request, state)
+    # v1.1.0+ — field_check role renders a read-only summary aimed
+    # at the "I'm at a seller's house and need to know if these
+    # drives + this server are worth buying" workflow. No batch
+    # creation, no destructive actions of any kind, no fleet
+    # status. Pure introspection.
+    if state.settings.fleet.role == "field_check":
+        return _render_field_check(request, state)
     host_filter = request.query_params.get("host") or None
     with state.session_factory() as session:
         view = _drive_view(state, session, host_filter=host_filter)

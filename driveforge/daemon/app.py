@@ -295,6 +295,12 @@ async def _handle_drive_added(state: DaemonState, orch: Orchestrator, event) -> 
     # UI), which meant an old cached "full" on the agent kept
     # auto-starting pipelines even when the operator had "off."
     #
+    # v1.1.0+: field-check mode never auto-enrolls. Defense-in-depth
+    # belt with the orchestrator's start_batch refusal as the
+    # suspenders. Explicit early-return so we don't even read config.
+    if state.settings.fleet.role == "field_check":
+        return
+
     # Standalone + operator roles: local config remains authoritative.
     # Agent role: operator's cached value, falling back to "off" if
     # the handshake hasn't happened yet (fail-closed — never auto-
