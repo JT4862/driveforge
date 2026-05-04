@@ -104,3 +104,64 @@ jobs:
 
           Edit this release to add detailed notes."
           fi
+
+  # v1.1.1+ — build the Field-Check Live ISO alongside the installer ISO.
+  # Separate job (not a matrix entry) so failures here don't block the
+  # installer release — installer is the canonical artifact, field-check
+  # is a convenience artifact for the "buying-decision USB stick" workflow.
+  # Both jobs run in parallel on independent runners and both attach to
+  # the same release.
+  build-and-release-fieldcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build Field-Check Live ISO
+        run: ./scripts/build-fieldcheck-iso-docker.sh
+
+      - name: Compute SHA256 + stage asset
+        id: stage
+        run: |
+          cd dist
+          ISO=$(ls driveforge-fieldcheck-*-amd64.iso | head -1)
+          if [[ -z "$ISO" ]]; then
+            echo "::error::no field-check ISO in dist/ after build"
+            exit 1
+          fi
+          SHA=$(sha256sum "$ISO" | awk '{print $1}')
+          echo "iso=$ISO" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Built: $ISO"
+          echo "SHA256: $SHA"
+          echo "$SHA  $ISO" > "${ISO}.sha256"
+
+      - name: Attach ISO + SHA256 to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          ISO="${{ steps.stage.outputs.iso }}"
+          # The installer-build job above creates the release if it
+          # doesn't exist. We just upload alongside. --clobber so a
+          # rebuild of the same tag overwrites the prior asset cleanly.
+          # Wait briefly for the release to exist if the installer job
+          # is still running ahead of us.
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Release not yet created by installer job; waiting 30s (attempt $attempt/6)"
+            sleep 30
+          done
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::warning::Release not created by installer job within 3 minutes; creating now"
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated build from tag ${GITHUB_REF_NAME}."
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "$ISO" "${ISO}.sha256" --clobber

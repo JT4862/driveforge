@@ -1,0 +1,29 @@
+# DriveForge config preseeded by the Field-Check Live ISO build.
+#
+# The single non-default setting is `fleet.role: field_check`. That
+# triggers:
+#   - Hard refusal of all destructive operations at the orchestrator
+#     (defense-in-depth — see daemon/orchestrator.py:start_batch)
+#   - Skip of fleet client + mDNS publish (no operator to talk to)
+#   - Read-only field-check landing page at GET / instead of the normal
+#     dashboard (see web/routes.py:_render_field_check)
+#
+# This file lives on the read-only squashfs at boot. Any operator edits
+# at runtime are discarded on reboot — that's by design for the Live
+# use case (every boot is a clean inspection slate).
+
+setup_completed: true
+
+fleet:
+  role: field_check
+
+daemon:
+  host: 0.0.0.0
+  port: 8080
+  # Auto-enroll is the orchestrator-driven path that picks up newly-
+  # inserted drives and starts a pipeline on them. field_check role
+  # already refuses destructive ops at the orchestrator level (so this
+  # would be a no-op even if we set it to "quick"), but explicitly
+  # set to "off" as belt-and-suspenders so the auto-enroll handler
+  # fast-returns without even consulting the orchestrator.
+  auto_enroll_mode: "off"

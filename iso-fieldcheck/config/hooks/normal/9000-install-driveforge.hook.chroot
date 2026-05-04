@@ -1,0 +1,58 @@
+#!/bin/sh
+# Runs INSIDE the live-build chroot during the binary stage.
+# Installs DriveForge from the source tree staged at /opt/driveforge-src
+# (placed there by the build script via config/includes.chroot/), creates
+# the daemon user, enables the systemd unit so it starts on boot.
+#
+# The /etc/driveforge/config.yaml file is also already in place via
+# includes.chroot — preseeded with `fleet.role: field_check` so the
+# daemon comes up in the read-only mode without needing operator
+# intervention.
+
+set -eu
+
+echo "I: installing DriveForge into the live image"
+
+# Daemon user — matches what scripts/install.sh creates on a real install.
+# `--system` keeps UID below 1000 so login managers don't surface it.
+if ! getent group driveforge >/dev/null; then
+    groupadd --system driveforge
+fi
+if ! getent passwd driveforge >/dev/null; then
+    useradd --system --gid driveforge \
+        --home-dir /var/lib/driveforge \
+        --shell /usr/sbin/nologin \
+        driveforge
+fi
+
+# disk group — daemon needs raw block-device access for SMART reads
+usermod -a -G disk driveforge
+
+# Runtime dirs the daemon expects to write to. systemd creates these
+# at start time too via StateDirectory, but pre-creating with the right
+# ownership avoids a first-boot race.
+install -d -o driveforge -g driveforge -m 0755 /var/lib/driveforge
+install -d -o driveforge -g driveforge -m 0755 /var/log/driveforge
+install -d -o root -g root -m 0755 /etc/driveforge
+
+# Install the package + dependencies. --break-system-packages because
+# Debian 12 ships PEP 668 by default; in a live ISO we own the system
+# Python, so this is safe. Wheels go to /usr/local/lib by default.
+pip install --break-system-packages --no-cache-dir /opt/driveforge-src
+
+# The daemon's CLI entrypoint lands at /usr/local/bin/driveforge-daemon.
+# The systemd unit (already in includes.chroot at /etc/systemd/system/)
+# expects /usr/bin/driveforge-daemon — symlink to bridge.
+if [ -x /usr/local/bin/driveforge-daemon ] && [ ! -e /usr/bin/driveforge-daemon ]; then
+    ln -s /usr/local/bin/driveforge-daemon /usr/bin/driveforge-daemon
+fi
+
+# Enable the daemon to start on boot. Use systemd's offline enable
+# pattern (works inside a chroot without dbus / a running systemd).
+systemctl enable driveforge-daemon.service
+
+# Free up some disk before the squashfs is built — keeps the ISO small.
+rm -rf /root/.cache /tmp/* /var/tmp/* 2>/dev/null || true
+apt-get clean
+
+echo "I: DriveForge install complete"

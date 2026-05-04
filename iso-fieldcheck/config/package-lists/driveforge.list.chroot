@@ -1,0 +1,47 @@
+# Packages installed into the Field-Check Live root filesystem.
+# These run inside the squashfs root that boots into tmpfs at runtime.
+#
+# Categories:
+#   - Drive introspection (smartmontools, hdparm, sg3-utils, nvme-cli, lsscsi)
+#   - Hardware introspection for the server-info collector
+#     (dmidecode, lshw, pciutils, usbutils)
+#   - Python runtime for the DriveForge daemon
+#   - System essentials (systemd, network, ssh)
+#   - Tools the operator might want at the console (curl, vim-tiny, less)
+#
+# NOT included (unlike the installer ISO):
+#   - brother_ql / printer libs — field-check doesn't print anything
+#   - Polkit rules infrastructure — no in-app updates / fleet ops
+#   - Avahi — field-check doesn't advertise itself
+
+# Drive tools (smartctl + raw SCSI/SAT + NVMe)
+smartmontools
+hdparm
+sg3-utils
+nvme-cli
+lsscsi
+
+# Hardware introspection — feeds core/server_info.py
+dmidecode
+lshw
+pciutils
+usbutils
+util-linux
+
+# Python runtime
+python3
+python3-pip
+python3-venv
+
+# System essentials
+systemd-sysv
+isc-dhcp-client
+openssh-server
+ca-certificates
+sudo
+
+# Operator quality-of-life at the console
+curl
+vim-tiny
+less
+htop
