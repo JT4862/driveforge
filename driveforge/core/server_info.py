@@ -278,6 +278,98 @@ def _probe_storage_controllers(info: ServerInfo) -> None:
 # ---------------------------------------------------------------- BMC
 
 
+# ---------------------------------------------------------------- RAID detection
+
+
+# v1.1.2+ — RAID-controller detection patterns. Used by the field-check
+# report + ISO to surface "physical drives are not directly visible"
+# warnings when we boot into a server with a RAID card in non-IT mode.
+#
+# `lspci`-description fragments that mean "this is a RAID controller,
+# not a passthrough HBA". Order doesn't matter; substring match.
+_RAID_CONTROLLER_PATTERNS = (
+    "RAID bus controller",            # generic — covers most cards
+    "MegaRAID",                       # LSI/Avago/Broadcom MegaRAID
+    "Smart Array",                    # HP / HPE Smart Array
+    "PERC",                           # Dell PERC (rebranded MegaRAID/SAS3008)
+    "Adaptec",                        # Adaptec
+    "AAC",                            # Adaptec AAC variants
+    "Hewlett-Packard Company Smart",  # older HP
+    "3ware",                          # 3ware (LSI subsidiary)
+)
+
+# Block-device model-string fragments that indicate a RAID virtual disk
+# (a logical volume the controller exposes), as opposed to a real
+# passthrough drive. Model strings come from lsblk / SCSI INQUIRY data.
+# Lower-cased substring match.
+_RAID_VIRTUAL_DISK_PATTERNS = (
+    "perc",                           # "PERC H710 V" / "PERC 6/i V"
+    "avago",                          # "AVAGO MR9361-8i"
+    "megaraid",                       # generic LSI virt disk
+    "smart array",                    # HP Smart Array logical drives
+    "logical volume",                 # generic LVM-on-controller
+    "lsilogic",                       # older LSI virtual disks
+    "ldrv",                           # some Adaptec virt disks
+)
+
+
+def is_raid_controller_description(desc: str) -> bool:
+    """True when a `lspci` controller description matches a known
+    RAID-mode pattern (vs. an IT/HBA-mode controller). Substring
+    match against `_RAID_CONTROLLER_PATTERNS`. Returns False for
+    pass-through HBAs (`Fusion-MPT SAS-2`, `SAS3008`, etc.) which
+    are the supported DriveForge configuration."""
+    if not desc:
+        return False
+    return any(pat.lower() in desc.lower() for pat in _RAID_CONTROLLER_PATTERNS)
+
+
+def is_raid_virtual_disk_model(model: str) -> bool:
+    """True when a drive's model string matches a known RAID-virtual-
+    disk naming pattern. Used by the field-check report to flag
+    drives whose SMART data isn't reliable because they're logical
+    volumes, not physical drives."""
+    if not model:
+        return False
+    return any(pat in model.lower() for pat in _RAID_VIRTUAL_DISK_PATTERNS)
+
+
+def detect_raid_situation(info: "ServerInfo") -> dict:
+    """Summarize the host's RAID-controller exposure for the field
+    report. Returns a dict with:
+      - has_raid_controller: bool — at least one RAID-mode controller present
+      - raid_controllers: list[str] — descriptions of the RAID controllers
+      - has_passthrough_hba: bool — at least one IT-mode HBA also present
+        (mixed setup; passthrough drives WILL be inspectable even if RAID
+        ones aren't)
+
+    This separation matters because some servers ship with BOTH a RAID
+    card (front bays) AND a separate HBA (rear flex bays / NVMe risers).
+    The operator can still inspect drives behind the HBA even if the
+    RAID controller is hiding the front bays.
+    """
+    raid: list[str] = []
+    passthrough = False
+    for ctrl in info.storage_controllers or []:
+        if is_raid_controller_description(ctrl):
+            raid.append(ctrl)
+        else:
+            # Anything else with "SAS" / "SATA" / "NVMe" in lspci's
+            # storage-controller bucket is presumed passthrough-capable.
+            # Conservative: only flag passthrough on positive identification.
+            low = ctrl.lower()
+            if any(kw in low for kw in (
+                "fusion-mpt", "sas-2", "sas-3", "sas2008", "sas2308", "sas3008",
+                "sata controller", "non-volatile memory",
+            )):
+                passthrough = True
+    return {
+        "has_raid_controller": bool(raid),
+        "raid_controllers": raid,
+        "has_passthrough_hba": passthrough,
+    }
+
+
 def _probe_bmc(info: ServerInfo) -> None:
     """Detect iDRAC / iLO / Supermicro BMC presence via dmidecode's
     IPMI device entry. Doesn't try to log in — just notes
