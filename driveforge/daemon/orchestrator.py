@@ -1078,6 +1078,32 @@ class Orchestrator:
             run.grade = grade
             run.error_message = f"[{phase}] {detail}"[:4000]
             run.log_tail = "\n".join(self.state.active_log.get(drive.serial, []))
+
+            # v1.1.3+: best-effort post-SMART capture + synthesized rules entry.
+            # Pre-v1.1.3 failure paths only stamped grade + error_message,
+            # leaving every counter (POH, reallocated, pending, etc.) NULL
+            # AND the rules JSON empty. Operators looking at a failed-drive
+            # report saw "Grade: F" with no underlying data and no rationale
+            # — surfaced by JT's Z1Z7N1T1 case where a 4TB Seagate failed
+            # SMART long self-test but the drive-detail page showed nothing
+            # but the bare "long_test reported failure" message.
+            #
+            # Two pieces:
+            #   1. SMART probe — only attempted when grade is set (skipping
+            #      pure aborts) AND the drive's device_path is still
+            #      probable. Wrapped in broad try/except: if the drive's
+            #      gone D-state from the failure (which is the whole reason
+            #      we're in _record_failure), we'd rather log an empty SMART
+            #      capture than wedge the failure-recording itself. Each
+            #      field falls back to None individually if the snapshot
+            #      lacks it.
+            #   2. Synthesized rules entry — a single rule mirroring the
+            #      grade so the drive-detail "Why this drive graded X"
+            #      template has SOMETHING to render. Detail includes the
+            #      same error_message text the operator sees in the flash.
+            if grade is not None:
+                self._capture_post_smart_for_failure(run, drive)
+                self._synthesize_failure_rule(run, phase=phase, detail=detail, grade=grade)
             # v0.10.3+ fleet completion WAL — match the _finalize_run
             # path. Only forward non-abort outcomes (grade=F or
             # grade=error); plain aborts stay local since they produce
@@ -1153,6 +1179,106 @@ class Orchestrator:
                             self._log(_serial, f"auto-print: crashed ({exc})")
 
                     future.add_done_callback(_on_print_done)
+
+
+    def _capture_post_smart_for_failure(self, run, drive: Drive) -> None:
+        """v1.1.3+ — best-effort post-SMART capture during the failure
+        path. Pre-v1.1.3 `_record_failure` left every post-counter NULL
+        on failed runs, so the drive-detail page showed nothing about
+        the drive's actual state at failure time. Now we try to probe
+        SMART one more time before declaring the run closed.
+
+        This is BEST-EFFORT: if the drive is wedged (D-state from the
+        same failure that brought us here), the snapshot call will hang
+        and timeout. Caught + logged; the row stays NULL on those
+        fields and the operator can still see the error_message and
+        the pre-SMART values that were captured before the pipeline
+        ran. Never raises — failure-recording must always succeed.
+
+        SQLAlchemy session is the OPEN session from _record_failure;
+        commit happens there once both helpers return.
+        """
+        from driveforge.core import smart as smart_mod
+        try:
+            snap = smart_mod.snapshot(drive.device_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_record_failure: post-SMART probe failed for %s "
+                "(drive likely unresponsive after failure): %s",
+                drive.serial, exc,
+            )
+            return
+        # Map snapshot fields onto the TestRun row. Each assignment is
+        # guarded with a getattr fallback so a partial snapshot (some
+        # fields populated, some not) lands gracefully.
+        run.power_on_hours_at_test = snap.power_on_hours
+        run.reallocated_sectors = snap.reallocated_sectors
+        run.current_pending_sector = snap.current_pending_sector
+        run.offline_uncorrectable = snap.offline_uncorrectable
+        run.smart_status_passed = snap.smart_status_passed
+        run.self_test_has_past_failure = snap.self_test_has_past_failure
+        # v0.8.0+ error-class counters (some installs don't have these
+        # columns yet — getattr-guarded so older schemas don't crash
+        # on the assignment).
+        for src_attr, dst_attr in (
+            ("end_to_end_error_count", "end_to_end_error_count"),
+            ("command_timeout_count", "command_timeout_count"),
+            ("reallocation_event_count", "reallocation_event_count"),
+            ("nvme_critical_warning", "nvme_critical_warning"),
+            ("nvme_media_errors", "nvme_media_errors"),
+            ("lifetime_host_reads_bytes", "lifetime_host_reads_bytes"),
+            ("lifetime_host_writes_bytes", "lifetime_host_writes_bytes"),
+            ("wear_pct_used", "wear_pct_used"),
+            ("available_spare_pct", "available_spare_pct"),
+        ):
+            val = getattr(snap, src_attr, None)
+            if val is not None and hasattr(run, dst_attr):
+                setattr(run, dst_attr, val)
+
+    def _synthesize_failure_rule(
+        self, run, *, phase: str, detail: str, grade: str,
+    ) -> None:
+        """v1.1.3+ — write a single grading-rule entry into the run's
+        rules JSON so the drive-detail "Why this drive graded X" panel
+        renders something instead of falling through to the empty-state
+        message.
+
+        The grade is already determined by `_classify_failure_grade`
+        in the failure path — we just need to mirror that into a rule
+        the template can iterate over. Mapping:
+
+          phase=long_test  + grade=F     → smart_long_test_passed=False
+          phase=short_test + grade=F     → smart_short_test_passed=False
+          phase=secure_erase + grade=F   → secure_erase_completed=False
+          phase=badblocks + grade=F      → badblocks_clean=False
+          (any other)      + grade=F     → pipeline_failure=False
+          (any other)      + grade=error → pipeline_error=False (no force; error grade)
+
+        For grade="error" we DON'T set forces_grade — the error grade
+        means "we don't actually know if the drive is bad, the pipeline
+        broke." Setting forces_grade=F would be a stronger statement
+        than we earned.
+        """
+        # Map phase to a canonical rule name so the existing template
+        # rendering can recognize known patterns.
+        rule_name = {
+            "long_test": "smart_long_test_passed",
+            "short_test": "smart_short_test_passed",
+            "secure_erase": "secure_erase_completed",
+            "badblocks": "badblocks_clean",
+        }.get(phase, "pipeline_failure" if grade == "F" else "pipeline_error")
+        forces = "F" if grade == "F" else None
+        rule = {
+            "name": rule_name,
+            "passed": False,
+            "detail": f"[{phase}] {detail}",
+            "forces_grade": forces,
+        }
+        existing = list(run.rules or [])
+        # Don't double-insert if a re-run lands here twice. Match by name.
+        if not any(r.get("name") == rule_name for r in existing):
+            existing.append(rule)
+            run.rules = existing
 
 
     async def _execute_pipeline(
