@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "driveforge"
-version = "1.1.1"
+version = "1.1.2"
 description = "In-house enterprise drive refurbishment pipeline"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -65,6 +65,13 @@ dev = [
 driveforge = "driveforge.cli:main"
 driveforge-daemon = "driveforge.daemon.app:main"
 driveforge-tui = "driveforge.tui.app:main"
+# v1.1.2+ — terminal-rendered field-check report. Companion to the
+# web UI for the air-gapped / no-laptop seller's-house workflow:
+# operator plugs keyboard + monitor into the server they're inspecting,
+# logs in at the console, runs `driveforge-field-report`, sees a
+# color-coded summary of drives + server identity right on the screen.
+# Live ISO auto-runs this on first tty1 login.
+driveforge-field-report = "driveforge.field_report:main"
 
 [project.urls]
 Homepage = "https://github.com/JT4862/driveforge"
