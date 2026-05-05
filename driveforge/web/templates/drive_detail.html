@@ -264,28 +264,53 @@
     <dt>Started</dt><dd>{{ latest.started_at.isoformat() if latest.started_at else "—" }}</dd>
     <dt>Completed</dt><dd>{{ latest.completed_at.isoformat() if latest.completed_at else "—" }}{% if duration_label %} &middot; ran {{ duration_label }}{% endif %}</dd>
     <dt>Power-on hours</dt><dd>{{ "{:,}".format(latest.power_on_hours_at_test) if latest.power_on_hours_at_test else "—" }}{% if latest.power_on_hours_at_test %} ({{ "%.1f"|format(latest.power_on_hours_at_test / 8760) }} years continuous){% endif %}</dd>
+    {# v1.1.3+: pre-SMART fallback when post is NULL. Pre-v1.1.3 the
+       failure path didn't capture post-SMART, so failed-run reports
+       showed "—" for these counters even though pre values were
+       captured at pipeline start. Now: if post is missing but pre
+       exists, show the pre value with a clear "(captured at pipeline
+       start)" note so the operator at least sees what the drive
+       looked like going IN to the failed test. #}
     <dt>Reallocated sectors</dt><dd>
-      {{- latest.reallocated_sectors if latest.reallocated_sectors is not none else "—" -}}
-      {%- if latest.pre_reallocated_sectors is not none and latest.reallocated_sectors is not none %}
-        <span class="muted small"> &middot; pre {{ latest.pre_reallocated_sectors }} &rarr; post {{ latest.reallocated_sectors }}
-        {%- set delta = latest.reallocated_sectors - latest.pre_reallocated_sectors %}
-        {%- if delta > 0 %} <span class="remapped-inline">(+{{ delta }} remapped during run)</span>{% endif -%}
-        </span>
-      {% endif -%}
+      {%- if latest.reallocated_sectors is not none -%}
+        {{ latest.reallocated_sectors }}
+        {%- if latest.pre_reallocated_sectors is not none %}
+          <span class="muted small"> &middot; pre {{ latest.pre_reallocated_sectors }} &rarr; post {{ latest.reallocated_sectors }}
+          {%- set delta = latest.reallocated_sectors - latest.pre_reallocated_sectors %}
+          {%- if delta > 0 %} <span class="remapped-inline">(+{{ delta }} remapped during run)</span>{% endif -%}
+          </span>
+        {% endif -%}
+      {%- elif latest.pre_reallocated_sectors is not none -%}
+        {{ latest.pre_reallocated_sectors }}
+        <span class="muted small"> &middot; captured at pipeline start; post-SMART not available (failed run before v1.1.3, or drive unresponsive at failure)</span>
+      {%- else -%}
+        —
+      {%- endif -%}
     </dd>
     <dt>Current pending</dt><dd>
-      {%- if latest.current_pending_sector and latest.current_pending_sector > 0 -%}
-        <span class="bad">{{ latest.current_pending_sector }}</span>
+      {%- if latest.current_pending_sector is not none -%}
+        {%- if latest.current_pending_sector > 0 -%}
+          <span class="bad">{{ latest.current_pending_sector }}</span>
+        {%- else -%}
+          {{ latest.current_pending_sector }}
+        {%- endif -%}
+        {%- if latest.pre_current_pending_sector is not none %}
+          <span class="muted small"> &middot; pre {{ latest.pre_current_pending_sector }} &rarr; post {{ latest.current_pending_sector }}
+          {%- set pend_delta = latest.current_pending_sector - latest.pre_current_pending_sector %}
+          {%- if pend_delta < 0 %} <span class="remapped-inline">(healed {{ pend_delta|abs }})</span>
+          {%- elif pend_delta > 0 %} <span class="bad">(grew by {{ pend_delta }})</span>{% endif -%}
+          </span>
+        {% endif -%}
+      {%- elif latest.pre_current_pending_sector is not none -%}
+        {%- if latest.pre_current_pending_sector > 0 -%}
+          <span class="bad">{{ latest.pre_current_pending_sector }}</span>
+        {%- else -%}
+          {{ latest.pre_current_pending_sector }}
+        {%- endif -%}
+        <span class="muted small"> &middot; captured at pipeline start</span>
       {%- else -%}
-        {{ latest.current_pending_sector if latest.current_pending_sector is not none else "—" }}
+        —
       {%- endif -%}
-      {%- if latest.pre_current_pending_sector is not none and latest.current_pending_sector is not none %}
-        <span class="muted small"> &middot; pre {{ latest.pre_current_pending_sector }} &rarr; post {{ latest.current_pending_sector }}
-        {%- set pend_delta = latest.current_pending_sector - latest.pre_current_pending_sector %}
-        {%- if pend_delta < 0 %} <span class="remapped-inline">(healed {{ pend_delta|abs }})</span>
-        {%- elif pend_delta > 0 %} <span class="bad">(grew by {{ pend_delta }})</span>{% endif -%}
-        </span>
-      {% endif -%}
     </dd>
     <dt>Offline uncorrectable</dt><dd>{% if latest.offline_uncorrectable and latest.offline_uncorrectable > 0 %}<span class="bad">{{ latest.offline_uncorrectable }}</span>{% else %}{{ latest.offline_uncorrectable if latest.offline_uncorrectable is not none else "—" }}{% endif %}</dd>
     <dt>SMART status</dt><dd>{% if latest.smart_status_passed %}passed{% elif latest.smart_status_passed is false %}failed{% else %}—{% endif %}</dd>
